@@ -291,3 +291,15 @@ def test_unexpected_error_is_recorded_not_masked(world):
         world.run()
     row = world.db().execute("SELECT error FROM runs").fetchone()
     assert row["error"] == "KeyError"
+
+
+def test_log_has_no_transcript_text(world, capsys):
+    """What launchd writes to collect.log is collect's and prune's output: counts only."""
+    from healing import schedule
+
+    texts = [t for e in world.doc["entries"] for t in (e["raw_text"], e["final_text"]) if t]
+    assert texts
+    assert schedule.run_once() == 0
+    seen = capsys.readouterr()
+    for text in texts:
+        assert text not in seen.out + seen.err

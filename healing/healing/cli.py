@@ -47,7 +47,21 @@ def main(argv: list[str] | None = None) -> int:
     prune.add_argument("--k", type=int, default=3)
     prune.add_argument("--dry-run", action="store_true")
 
+    schedule = commands.add_parser("schedule", help="the launchd job that collects every 6 hours")
+    schedule.add_argument("command", choices=["install", "remove", "show", "run"])
+    schedule.add_argument("--hex", type=Path, default=None, help="path to the hex binary (install)")
+
+    status = commands.add_parser("status", help="what the dataset holds and what is at risk")
+    status.add_argument("--json", action="store_true")
+    status.add_argument("--list", action="store_true", help="list every warning code")
+    status.add_argument("--budget", default="5GiB")
+    status.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
+
     args = parser.parse_args(argv)
+    if args.group == "schedule":
+        return _schedule(args)
+    if args.group == "status":
+        return _status(args)
     if args.group == "prune":
         return _prune(args)
     if args.group == "collect":
@@ -59,6 +73,54 @@ def main(argv: list[str] | None = None) -> int:
     if args.group == "eval":
         return _baseline(args)
     return _paired(args)
+
+
+def _schedule(args) -> int:
+    from healing import schedule
+
+    if args.command == "run":
+        return schedule.run_once()
+    try:
+        if args.command == "install":
+            print(f"installed {schedule.install(args.hex)}")
+        elif args.command == "remove":
+            schedule.remove()
+            print("removed")
+        else:
+            print(schedule.show())
+    except schedule.ScheduleError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _status(args) -> int:
+    from healing import status as status_module
+    from healing.budget import parse_size
+    from healing.eval.bench import BenchError, hex_binary
+    from healing.store import Store, StoreError
+
+    if args.list:
+        for code, about in status_module.WARNINGS.items():
+            print(f"{code}\t{about}")
+        return 0
+    try:
+        budget = parse_size(args.budget)
+        binary = Path(args.hex or hex_binary())
+    except (ValueError, BenchError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    try:
+        store = Store()
+        try:
+            result = status_module.compute(store, binary, budget)
+        finally:
+            store.close()
+    except StoreError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(result.as_dict(), indent=2) if args.json else result.text())
+    return 1 if result.warnings else 0
 
 
 def _prune(args) -> int:
