@@ -209,7 +209,7 @@ def _refresh_clusters(store: Store) -> None:
 
 def prune(
     store: Store, budget: int = DEFAULT_BUDGET, k: int = DEFAULT_K, dry_run: bool = False,
-    now: int | None = None,
+    now: int | None = None, lowering: bool = False,
 ) -> Result:
     from healing.store import now_ms
 
@@ -223,7 +223,7 @@ def prune(
             f"{protected_bytes - budget}; nothing evicted",
             4,
         )
-    if units and budget < min(u.bytes for u in units):
+    if units and not lowering and budget < min(u.bytes for u in units):
         raise PruneError(f"budget {budget} is smaller than one audio file", 4)
 
     try:

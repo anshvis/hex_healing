@@ -57,9 +57,11 @@ def codes(w, **kw):
 
 
 def add_audio(w, name, size, label="unlabelled", evicted=None):
+    if evicted is None:  # the index must match the disk, or status warns index_mismatch
+        (w.store.root / "audio" / name).write_bytes(b"0" * size)
     w.store.db.execute(
-        "INSERT INTO audio (sha256, path, bytes, samples, evicted_at_ms) VALUES (?, 'p', ?, 1, ?)",
-        (name, size, evicted))
+        "INSERT INTO audio (sha256, path, bytes, samples, evicted_at_ms) VALUES (?, ?, ?, 1, ?)",
+        (name, f"audio/{name}", size, evicted))
     w.store.db.execute(
         "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text,"
         " audio_sha256, label, collected_at_ms) VALUES (?, 1, 1, 1, 'dictation', 'x', 'x', ?, ?, 1)",
@@ -127,7 +129,7 @@ def test_json_shape_and_list(world, capsys):
     document = json.loads(capsys.readouterr().out)
     assert set(document) == {
         "clips", "with_audio", "audio_bytes", "budget", "labels", "clusters", "last_run",
-        "oldest_uncollected_risk", "warnings",
+        "oldest_uncollected_risk", "warnings", "free_bytes", "min_free", "last_clean",
     }
     assert main(["status", "--list"]) == 0
     listed = capsys.readouterr().out

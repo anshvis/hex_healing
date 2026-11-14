@@ -21,7 +21,7 @@ import soundfile
 from healing.paths import healing_home
 
 SAMPLE_RATE = 16_000
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE audio (
@@ -81,7 +81,23 @@ SCHEMA_V3 = """
 CREATE INDEX clips_audio ON clips(audio_sha256);
 """
 
-MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3]
+SCHEMA_V4 = """
+ALTER TABLE audio ADD COLUMN missing INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE audio ADD COLUMN corrupt INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE clean_runs (
+    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at_ms INTEGER NOT NULL,
+    orphans_moved INTEGER NOT NULL,
+    missing_marked INTEGER NOT NULL,
+    mismatched_marked INTEGER NOT NULL,
+    temp_removed INTEGER NOT NULL,
+    freed_bytes INTEGER NOT NULL,
+    free_bytes_after INTEGER NOT NULL,
+    free_basis TEXT NOT NULL
+);
+"""
+
+MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4]
 
 
 class StoreError(Exception):
@@ -198,7 +214,7 @@ class Store:
         self.db.execute(
             "INSERT INTO audio (sha256, path, bytes, samples, evicted_at_ms) VALUES (?, ?, ?, ?, NULL)"
             " ON CONFLICT(sha256) DO UPDATE SET path = excluded.path, bytes = excluded.bytes,"
-            " samples = excluded.samples, evicted_at_ms = NULL",
+            " samples = excluded.samples, evicted_at_ms = NULL, missing = 0, corrupt = 0",
             (
                 pcm.sha256,
                 str(target.relative_to(self.root)),

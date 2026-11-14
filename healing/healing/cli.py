@@ -41,11 +41,17 @@ def main(argv: list[str] | None = None) -> int:
     collect = commands.add_parser("collect", help="copy Hex's History into the dataset")
     collect.add_argument("--since", help="3d, a date or RFC 3339 (default: last run minus 2 days)")
     collect.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
+    collect.add_argument("--min-free", default="10GiB", help="copy no audio below this much free space")
 
     prune = commands.add_parser("prune", help="cluster clips, keep k audio each, hold the budget")
     prune.add_argument("--budget", default="5GiB")
     prune.add_argument("--k", type=int, default=3)
     prune.add_argument("--dry-run", action="store_true")
+
+    clean = commands.add_parser("clean", help="keep the audio index true and the disk from filling")
+    clean.add_argument("--dry-run", action="store_true")
+    clean.add_argument("--min-free", default="10GiB")
+    clean.add_argument("--deep", action="store_true", help="re-hash every audio file")
 
     schedule = commands.add_parser("schedule", help="the launchd job that collects every 6 hours")
     schedule.add_argument("command", choices=["install", "remove", "show", "run"])
@@ -55,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("--json", action="store_true")
     status.add_argument("--list", action="store_true", help="list every warning code")
     status.add_argument("--budget", default="5GiB")
+    status.add_argument("--min-free", default="10GiB")
     status.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
 
     args = parser.parse_args(argv)
@@ -64,10 +71,18 @@ def main(argv: list[str] | None = None) -> int:
         return _status(args)
     if args.group == "prune":
         return _prune(args)
+    if args.group == "clean":
+        return _clean(args)
     if args.group == "collect":
+        from healing.budget import parse_size
         from healing.collect import main_collect
 
-        return main_collect(args.since, args.hex)
+        try:
+            floor = parse_size(args.min_free)
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        return main_collect(args.since, args.hex, floor)
     if args.group == "sets":
         return _subset(args) if args.command == "subset" else _build_general(args)
     if args.group == "eval":
@@ -106,6 +121,7 @@ def _status(args) -> int:
         return 0
     try:
         budget = parse_size(args.budget)
+        min_free = parse_size(args.min_free)
         binary = Path(args.hex or hex_binary())
     except (ValueError, BenchError) as error:
         print(f"error: {error}", file=sys.stderr)
@@ -113,7 +129,7 @@ def _status(args) -> int:
     try:
         store = Store(sweep=False)  # status is a read: never delete a running collect's temp files
         try:
-            result = status_module.compute(store, binary, budget)
+            result = status_module.compute(store, binary, budget, min_free=min_free)
         finally:
             store.close()
     except StoreError as error:
@@ -121,6 +137,18 @@ def _status(args) -> int:
         return 1
     print(json.dumps(result.as_dict(), indent=2) if args.json else result.text())
     return 1 if result.warnings else 0
+
+
+def _clean(args) -> int:
+    from healing.budget import parse_size
+    from healing.clean import main_clean
+
+    try:
+        floor = parse_size(args.min_free)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    return main_clean(floor, args.deep, args.dry_run)
 
 
 def _prune(args) -> int:

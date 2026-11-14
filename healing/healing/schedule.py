@@ -117,7 +117,7 @@ def show(directory: Path | None = None) -> str:
 
 
 def run_once() -> int:
-    """What the job runs: collect, then prune. Prune runs even when collect failed."""
+    """What the job runs: collect, prune, clean. Each runs even when the one before failed."""
     from healing.budget import PruneError, prune
     from healing.collect import main_collect
     from healing.store import Store, StoreError, process_lock
@@ -136,8 +136,33 @@ def run_once() -> int:
                 store.close()
     except PruneError as error:
         print(f"error: {error}", file=sys.stderr)
-        return code or error.code
+        code = code or error.code
     except StoreError as error:
         print(f"error: {error}", file=sys.stderr)
-        return code or 1
-    return code
+        code = code or 1
+    cleaned = _clean_after()
+    return code or cleaned
+
+
+def _clean_after() -> int:
+    """`healing clean` after prune, under its own lock; a failure is named by type only (G-4)."""
+    from healing.clean import CleanError, DEFAULT_MIN_FREE, clean
+    from healing.store import Store, StoreError, process_lock
+
+    try:
+        with process_lock():
+            store = Store()
+            try:
+                print(clean(store, DEFAULT_MIN_FREE).summary())
+            finally:
+                store.close()
+    except CleanError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return error.code
+    except StoreError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    except Exception as error:
+        print(f"error: clean failed ({type(error).__name__})", file=sys.stderr)
+        return 1
+    return 0

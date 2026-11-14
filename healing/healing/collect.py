@@ -48,12 +48,14 @@ class Summary:
     new: int = 0
     audio_new: int = 0
     missing_audio: int = 0
+    audio_skipped: int = 0  # not copied: free space is under the floor
 
     def __str__(self) -> str:
-        return (
+        text = (
             f"seen {self.seen}, new {self.new}, audio {self.audio_new}, "
             f"missing_audio {self.missing_audio}"
         )
+        return text + (f", audio_skipped {self.audio_skipped}" if self.audio_skipped else "")
 
 
 def rfc3339(ms: int) -> str:
@@ -132,7 +134,9 @@ def since_to_ms(since: str | None, now: int) -> int | None:
     return int(moment.timestamp() * 1000)
 
 
-def collect(store: Store, binary: Path, since: str | None = None) -> Summary:
+def collect(
+    store: Store, binary: Path, since: str | None = None, copy_audio: bool = True
+) -> Summary:
     summary = Summary()
     started = now_ms()
     if since is None:
@@ -145,7 +149,7 @@ def collect(store: Store, binary: Path, since: str | None = None) -> Summary:
     store.db.commit()
     error: str | None = None
     try:
-        _collect_pages(store, binary, since, summary)
+        _collect_pages(store, binary, since, summary, copy_audio)
     except (CollectError, StoreError, OSError) as failure:
         error = str(failure)
         raise
@@ -163,7 +167,9 @@ def collect(store: Store, binary: Path, since: str | None = None) -> Summary:
     return summary
 
 
-def _collect_pages(store: Store, binary: Path, since: str | None, summary: Summary) -> None:
+def _collect_pages(
+    store: Store, binary: Path, since: str | None, summary: Summary, copy_audio: bool = True
+) -> None:
     epochs = Epochs(store)
     seen: set[tuple[int, int]] = set()
     while True:
@@ -173,14 +179,16 @@ def _collect_pages(store: Store, binary: Path, since: str | None, summary: Summa
         for start in range(0, len(fresh), BATCH):
             for entry in fresh[start : start + BATCH]:
                 seen.add((entry["id"], entry["timestamp_ms"]))
-                _store_entry(store, epochs, entry, summary)
+                _store_entry(store, epochs, entry, summary, copy_audio)
             store.db.commit()
         if not fresh or not (document.get("truncated") or len(entries) >= PAGE_LIMIT):
             return
         since = rfc3339(entries[-1]["timestamp_ms"])
 
 
-def _store_entry(store: Store, epochs: Epochs, entry: dict, summary: Summary) -> None:
+def _store_entry(
+    store: Store, epochs: Epochs, entry: dict, summary: Summary, copy_audio: bool = True
+) -> None:
     summary.seen += 1
     hex_id, timestamp = entry["id"], entry["timestamp_ms"]
     epoch = epochs.assign(hex_id, timestamp)
@@ -200,7 +208,10 @@ def _store_entry(store: Store, epochs: Epochs, entry: dict, summary: Summary) ->
     ).fetchone()
     audio_sha = existing["audio_sha256"] if existing else None
     if audio_sha is None and entry.get("recording"):
-        audio_sha = _store_audio(store, entry["recording"], summary)
+        if copy_audio:
+            audio_sha = _store_audio(store, entry["recording"], summary)
+        else:
+            summary.audio_skipped += 1
     if existing is None:
         summary.new += 1
         store.db.execute(
@@ -240,8 +251,11 @@ def _store_audio(store: Store, recording: str, summary: Summary) -> str | None:
     return pcm.sha256
 
 
-def main_collect(since: str | None, hex_path: Path | None) -> int:
+def main_collect(since: str | None, hex_path: Path | None, min_free: int | None = None) -> int:
     import sys
+
+    from healing.clean import DEFAULT_MIN_FREE, free_bytes
+    from healing.paths import healing_home
 
     try:
         if since is not None:
@@ -255,7 +269,8 @@ def main_collect(since: str | None, hex_path: Path | None) -> int:
         with process_lock():
             store = Store()
             try:
-                summary = collect(store, Path(binary), since)
+                floor = DEFAULT_MIN_FREE if min_free is None else min_free
+                summary = collect(store, Path(binary), since, free_bytes(healing_home()) >= floor)
             finally:
                 store.close()
     except CollectError as error:

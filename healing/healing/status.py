@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from healing.budget import DEFAULT_BUDGET
+from healing.clean import DEFAULT_MIN_FREE, free_bytes, index_problems
 from healing.store import Store, now_ms
 
 DAY_MS = 24 * 3600 * 1000
@@ -27,6 +28,8 @@ WARNINGS = {
     "strong_without_audio": "strong clips exist whose audio is missing or evicted",
     "history_retention_day": "History keeps only 24 hours",
     "recordings_hidden": "Keep recordings is off but earlier WAVs still exist; hex history hides them",
+    "disk_below_floor": "free space on the dataset's volume is under the floor: no audio is being copied",
+    "index_mismatch": "the audio index and the disk disagree; run healing clean",
     "settings_unreadable": "could not read Hex's settings (is Hex running?), so some warnings are unknown",
 }
 
@@ -64,6 +67,9 @@ class Status:
     clusters: int = 0
     last_run: dict | None = None
     oldest_uncollected_risk_ms: int | None = None
+    free_bytes: int = 0
+    min_free: int = DEFAULT_MIN_FREE
+    last_clean: dict | None = None
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -76,6 +82,9 @@ class Status:
             "clusters": self.clusters,
             "last_run": self.last_run,
             "oldest_uncollected_risk": self.oldest_uncollected_risk_ms,
+            "free_bytes": self.free_bytes,
+            "min_free": self.min_free,
+            "last_clean": self.last_clean,
             "warnings": self.warnings,
         }
 
@@ -90,16 +99,36 @@ class Status:
             lines.append(f"last run {run['started_at_ms']} new {run['new']} error {run['error'] or '-'}")
         else:
             lines.append("last run never")
+        lines.append(f"free {self.free_bytes} / floor {self.min_free} bytes")
+        if self.last_clean:
+            c = self.last_clean
+            lines.append(
+                f"last clean {c['at_ms']} orphans {c['orphans_moved']} missing {c['missing_marked']}"
+                f" mismatched {c['mismatched_marked']}"
+            )
+        else:
+            lines.append("last clean never")
         if self.oldest_uncollected_risk_ms is not None:
             lines.append(f"oldest uncollected risk {self.oldest_uncollected_risk_ms}")
         lines += [f"warning {code}: {WARNINGS[code]}" for code in self.warnings]
         return "\n".join(lines)
 
 
-def compute(store: Store, binary: Path, budget: int = DEFAULT_BUDGET, now: int | None = None) -> Status:
+def compute(
+    store: Store, binary: Path, budget: int = DEFAULT_BUDGET, now: int | None = None,
+    min_free: int = DEFAULT_MIN_FREE, free_fn=None,
+) -> Status:
     now = now_ms() if now is None else now
     db = store.db
-    status = Status(budget=budget)
+    status = Status(budget=budget, min_free=min_free)
+    status.free_bytes = (free_fn or (lambda: free_bytes(store.root.parent)))()
+    clean_run = db.execute("SELECT * FROM clean_runs ORDER BY run_id DESC LIMIT 1").fetchone()
+    if clean_run:
+        status.last_clean = {
+            key: clean_run[key]
+            for key in ("at_ms", "orphans_moved", "missing_marked", "mismatched_marked",
+                        "temp_removed", "freed_bytes", "free_bytes_after")
+        }
     status.clips = db.execute("SELECT COUNT(*) FROM clips").fetchone()[0]
     status.with_audio = db.execute(
         "SELECT COUNT(*) FROM clips c JOIN audio a ON a.sha256 = c.audio_sha256"
@@ -148,4 +177,8 @@ def compute(store: Store, binary: Path, budget: int = DEFAULT_BUDGET, now: int |
     ).fetchone()[0]
     if missing > 0:
         warnings.append("strong_without_audio")
+    if status.free_bytes < min_free:
+        warnings.append("disk_below_floor")
+    if any(index_problems(store).values()):
+        warnings.append("index_mismatch")
     return status
