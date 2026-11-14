@@ -32,6 +32,8 @@ HEX_RELEASE_UNSIGNED=1 HEX_LOCAL_BUILD=1 scripts/install-app.sh
 rm -rf target/app/Hex.app  # so macOS never launches the build copy instead
 ```
 
+Put the CLI on your PATH once: `ln -s /Applications/Hex.app/Contents/MacOS/hex ~/.local/bin/hex`.
+
 - `HEX_RELEASE_UNSIGNED=1` keeps the normal app name and bundle id (`anomaly.hex`), so it uses the
   usual `~/Library/Application Support/hex` data folder: models, settings and History carry over.
 - `HEX_LOCAL_BUILD=1` turns updates off, so it never replaces itself with an official release.
