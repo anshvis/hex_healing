@@ -155,7 +155,7 @@ def test_shared_audio_across_clusters_is_not_k_evicted(store):
     store.db.execute(
         "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text,"
         " audio_sha256, label, golden, audio_ms, collected_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (clip_id(1, 50), 50, 1, NOW - 20 * DAY, "dictation", unique, unique, pcm.sha256, "weak", 0, 1000, NOW),
+        (clip_id(1, 50), 50, 1, NOW - 40 * DAY, "dictation", unique, unique, pcm.sha256, "weak", 0, 1000, NOW),
     )
     store.db.commit()
     for i in range(3):
