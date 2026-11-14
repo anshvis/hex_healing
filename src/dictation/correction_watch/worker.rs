@@ -15,15 +15,13 @@ use crate::accessibility::{self, Notification, Observer, RetainedElement};
 pub const MAX_ACTIVE: usize = 4;
 const TICK: Duration = Duration::from_millis(50);
 
-/// Where a finished observation goes. T2.3 sets it to store the result on the
-/// History entry; until then a result is only counted in the log.
+/// Where a finished observation goes: `history::corrections::install_sink`
+/// stores it on the History entry.
 pub type Sink = fn(entry_id: u64, CorrectionObservation);
 
 static SINK: std::sync::OnceLock<Sink> = std::sync::OnceLock::new();
 
 /// Installs the sink. The first call wins.
-// Called by T2.3's History store.
-#[allow(dead_code)]
 pub fn set_sink(sink: Sink) {
     let _ = SINK.set(sink);
 }

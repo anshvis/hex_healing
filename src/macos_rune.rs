@@ -321,7 +321,10 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig, hidden: bool
     crate::desktop::onboarding::recheck_after_identity_change(&mut settings, setup_ready);
     let onboarding_completed = crate::desktop::onboarding::completion_recorded();
     let history = match crate::history::History::open_default(settings.history_retention) {
-        Ok(history) => Some(history),
+        Ok(history) => {
+            crate::history::corrections::install_sink(&history);
+            Some(history)
+        }
         Err(error) => {
             tracing::warn!(%error, "dictation history is unavailable");
             None

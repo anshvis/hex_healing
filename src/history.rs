@@ -20,11 +20,13 @@ use serde::{Deserialize, Serialize};
 #[cfg(hex_capture)]
 pub mod annotations;
 pub mod captures;
+pub mod corrections;
 pub mod playback;
 pub mod recordings;
 pub mod stats;
 pub mod versions;
 
+pub use corrections::HistoryCorrection;
 pub use recordings::Recording;
 pub use versions::{HistoryVersion, Transcript};
 
@@ -150,6 +152,10 @@ pub struct HistoryEntry {
     /// Earlier transcripts, newest first ([`versions`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub versions: Vec<HistoryVersion>,
+    /// What Labs › Learn from corrections saw of the pasted text
+    /// ([`corrections`]); absent without an observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction: Option<HistoryCorrection>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -170,6 +176,7 @@ impl HistoryEntry {
                 .iter()
                 .map(HistoryVersion::text_bytes)
                 .sum::<usize>()
+            + self.correction_bytes()
     }
 
     /// Whether any searched field contains `needle` (already lowercased).
@@ -442,6 +449,7 @@ impl HistoryStore {
             language: None,
             text_ms: None,
             versions: Vec::new(),
+            correction: None,
         });
         self.prune(now_ms);
         self.persist()?;
@@ -512,7 +520,7 @@ impl HistoryStore {
     }
 
     /// Changes entry `id` and saves; a failed save keeps it as it was.
-    fn change(
+    pub(super) fn change(
         &mut self,
         id: u64,
         change: impl FnOnce(&mut HistoryEntry) -> bool,
@@ -775,6 +783,15 @@ impl History {
 
     pub fn clear(&self) -> io::Result<()> {
         self.synced().clear()
+    }
+
+    /// Keep a correction observation on entry `id` ([`corrections`]).
+    pub fn observe_correction(
+        &self,
+        id: u64,
+        observation: crate::dictation::correction_watch::CorrectionObservation,
+    ) -> io::Result<bool> {
+        self.synced().observe_correction(id, observation)
     }
 
     pub fn replace_text(&self, id: u64, transcript: Transcript) -> io::Result<bool> {

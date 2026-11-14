@@ -174,6 +174,9 @@ struct HistoryRow<'a> {
     final_text: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     raw_text: Option<&'a str>,
+    /// What Labs › Learn from corrections saw of the pasted text; `--raw` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    correction: Option<&'a crate::history::HistoryCorrection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     score: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -259,6 +262,7 @@ fn history_output<'a>(
             kind: entry.kind,
             final_text: &entry.final_text,
             raw_text: args.raw.then_some(entry.raw_text.as_str()),
+            correction: entry.correction.as_ref().filter(|_| args.raw),
             score: hit.as_ref().map(|hit| (hit.score * 100.0).round() / 100.0),
             snippet: hit.map(|hit| hit.snippet),
             recording: recordings

@@ -36,8 +36,18 @@ observed. Outcome IDs: `unchanged`, `edited`, and the lost reasons
 `timeout`. The log line carries those IDs, a character count and milliseconds
 only. Alignment (`locate.rs`) treats a one-letter-off word of three or more
 letters as a near match, so "Kip" to "Kit" aligns even alone; it cannot tell a
-pasted text pasted twice apart while one copy is intact. Proof so far: unit
-tests only; no live AX run (needs T2.3's History field).
+pasted text pasted twice apart while one copy is intact. Storage
+(`history/corrections.rs`): the watcher's sink (`install_sink`, set once when
+macOS opens History) calls `History::observe_correction`, which writes through
+History's own lock and atomic save. The entry gets `correction`
+`{outcome: unchanged|edited|lost, reason?, observed_at_ms, edited_text?}`; the
+first observation wins, an evicted or cleared entry takes nothing, and a Replace
+keeps it (it was seen against the pasted text). `edited_text` is kept only for
+`edited`, at most 16 KiB, and counts toward History's 16 MiB text cap. `hex
+history --json --raw` prints it (never without `--raw`;
+[transcript-cli](../transcript-cli.md)). An older Hex drops the field when it
+saves. Logs carry the entry id and outcome ID only. Proof so far: unit tests
+only (store, persistence, Clear all, CLI projection); no live AX run.
 
 Outcome IDs and proof limits are recorded beside the implementation as it
 lands (T2.3 keeps). Each bound above must match those constants;

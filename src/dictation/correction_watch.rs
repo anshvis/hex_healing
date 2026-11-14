@@ -21,10 +21,10 @@ mod locate;
 mod session;
 mod worker;
 
-#[allow(unused_imports)]
-pub use session::{CorrectionObservation, Lost, Outcome, Trigger};
-#[allow(unused_imports)]
-pub use worker::{Sink, set_sink};
+pub use session::{CorrectionObservation, Outcome};
+#[cfg(test)]
+pub use session::{Lost, Trigger};
+pub use worker::set_sink;
 
 /// Targets waiting for the watcher. A full queue drops the oldest.
 pub const QUEUE_CAPACITY: usize = 8;
