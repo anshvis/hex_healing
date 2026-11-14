@@ -4,8 +4,8 @@
 **Depends on:** M0 (architecture and converter), M3 (splits), M5 (registry)
 **Surface:** backend.
 
-This is the weekly fine-tune, with LoRA on Parakeet (D-14) in NVIDIA NeMo on a rented GPU (D-15):
-- It is triggered only by enough new strong data: at least 200 clips and at least 7 days (D-18).
+This is the recurring fine-tune, with LoRA on Parakeet (D-14) in NVIDIA NeMo on a rented GPU (D-15):
+- It is triggered only by enough new strong data: at least 200 minutes of new strong speech, with no time floor (D-33).
 - The output is merged, converted and quantized with the exact T0.4 path, then registered as a candidate.
 - M7 decides whether it ships.
 
@@ -16,12 +16,12 @@ This is the weekly fine-tune, with LoRA on Parakeet (D-14) in NVIDIA NeMo on a r
 | [T6.5](T6.5-training-loop.md) | NeMo LoRA training loop (encoder, predictor, joint); local smoke run | standard | T6.1 |
 | [T6.2](T6.2-remote-runner.md) | Remote GPU runner (Modal) with explicit upload opt-in, log scrubbing and cleanup | standard | T6.5 |
 | [T6.3](T6.3-export.md) | Export: merge → GGUF → Q8_0 → register candidate | standard | T6.5 |
-| [T6.4](T6.4-trigger.md) | `healing train auto`: the trigger (≥200 new strong, ≥7 days) | standard | T6.2, T6.3 |
+| [T6.4](T6.4-trigger.md) | `healing train auto`: the trigger (≥200 min of new strong speech) | standard | T6.2, T6.3 |
 
 ## How you validate this milestone
 1. Run `healing train --local --smoke`. It trains 20 steps on CPU over 50 clips and exports a candidate GGUF that Hex imports.
 2. Run `healing train --remote --allow-upload` (needs your Modal token). It finishes a real run, deletes the remote volume, and registers a candidate with scores.
-3. Run `healing train auto` with 150 new strong clips. It prints "waiting: 150/200". With 200 or more, and 7 days or more since the last run, it starts.
+3. Run `healing train auto` with 150 minutes of new strong speech. It prints "waiting: 150/200 min". With 200 minutes or more, it starts.
 
 ## Exit gate
 - All checks green.
