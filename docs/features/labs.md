@@ -70,6 +70,7 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 │                                        // (app_settings/persistence/tests.rs); voice_prompt_shows_its_phrase_on_its_card_while_on
 │                                        // (rune_ui/tests/panes.rs); not observed with a real dictation, and no request
 │                                        // ran against a live model
+├── Learn from corrections no labs.learn_from_corrections (macOS) keeps the span you edit right after a paste on its History entry; locked by DisableCorrections or DisableLabs; see corrections.md (specified, not yet implemented)
 ├── Spoken formatting no labs.spoken_formatting      spoken "new line"/"line break", "new paragraph", "open/close quote", "quote … unquote" become line breaks and quotation marks; Spanish "nuevo párrafo", "nueva línea", "abre/cierra comillas", … too (#630, #1040)
 ├── Spoken symbols  no    labs.spoken_symbols          spoken "hashtag", "underscore", "comma", … become symbols joined to their words: "#release", "my_variable", "done, thanks"; Spanish "arroba", "guion bajo", "coma", … too (#678, #1040)
 ├── Remove filler words no labs.filler_words          English dictations lose um, umm, uh, uhh, erm, er, ah, with no model (#631)
