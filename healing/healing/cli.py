@@ -38,7 +38,15 @@ def main(argv: list[str] | None = None) -> int:
     paired.add_argument("--resamples", type=int, default=10_000)
     paired.add_argument("--seed", type=int, default=13)
 
+    collect = commands.add_parser("collect", help="copy Hex's History into the dataset")
+    collect.add_argument("--since", help="3d, a date or RFC 3339 (default: last run minus 2 days)")
+    collect.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
+
     args = parser.parse_args(argv)
+    if args.group == "collect":
+        from healing.collect import main_collect
+
+        return main_collect(args.since, args.hex)
     if args.group == "sets":
         return _subset(args) if args.command == "subset" else _build_general(args)
     if args.group == "eval":
