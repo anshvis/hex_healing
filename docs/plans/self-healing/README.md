@@ -15,7 +15,7 @@ its exit gate and you have checked its validation.
 
 The brief asks for two learning loops fed by one dataset:
 - **Tier 1**, immediate and with no training: correction pairs mined into Hex's vocabulary list.
-- **Tier 2**, after every 200 minutes of new speech: LoRA fine-tuning of Parakeet on a rented GPU, gated by held-out
+- **Tier 2**, after every 200 minutes of new speech: LoRA fine-tuning of Parakeet on your Mac (Kaggle's free GPUs as a fallback), gated by held-out
   scores, shipped back into Hex as a Q8_0 GGUF.
 
 Everything rests on two things Hex does not do today:
@@ -61,7 +61,7 @@ healing/ (Python, uv; this repo) ── data root: ~/Library/Application Support
 ├─ eval    (M3): manifests → `hex benchmark-transcription --model <gguf>` → scores
 ├─ vocab   (M4): pairs seen twice → `hex vocabulary` (ranked, ≤64 biased)
 ├─ registry(M5): versions.jsonl + content-addressed artifacts (LoRA deltas, manifests)
-├─ train   (M6): NeMo LoRA on a rented GPU (explicit upload opt-in) → merge → GGUF → Q8_0
+├─ train   (M6): NeMo LoRA on your Mac (Kaggle fallback, explicit upload opt-in) → merge → GGUF → Q8_0
 └─ promote (M7): gate on the eval scores → `hex model import` + `hex model use`; auto-rollback
 ```
 
