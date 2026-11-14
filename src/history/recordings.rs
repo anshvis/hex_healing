@@ -184,6 +184,44 @@ mod tests {
     use super::*;
     use crate::transcription::models::{CustomModelId, TranscriptionModelId};
 
+    /// A kept recording holds exactly the samples dictation transcribed, as
+    /// 16 kHz mono 16-bit PCM under `write`'s rule: clamp to [-1, 1], scale
+    /// by `i16::MAX`, round. Training reads these files, so any drift here
+    /// would train on audio the model never heard.
+    #[test]
+    fn kept_wav_round_trips_samples_to_i16() {
+        let mut samples: Vec<f32> = (0..SAMPLE_RATE as usize)
+            .map(|index| ((index as f32) * 0.013).sin() * 0.9)
+            .collect();
+        samples.extend([1.0, -1.0, 1.5, -1.5, 0.0, 0.6 / 32_767.0, -0.6 / 32_767.0]);
+        let directory = std::env::temp_dir().join(format!(
+            "hex-recording-round-trip-{}-{}",
+            std::process::id(),
+            crate::history::now_ms()
+        ));
+        write(&directory, 7, &Recording::from_samples(samples.clone())).unwrap();
+
+        let mut reader = hound::WavReader::open(path(&directory, 7)).unwrap();
+        let spec = reader.spec();
+        let read: Vec<i16> = reader.samples::<i16>().map(Result::unwrap).collect();
+        let _ = fs::remove_dir_all(&directory);
+
+        assert_eq!(
+            (spec.channels, spec.sample_rate, spec.bits_per_sample),
+            (1, 16_000, 16)
+        );
+        assert_eq!(spec.sample_format, SampleFormat::Int);
+        let expected: Vec<i16> = samples
+            .iter()
+            .map(|sample| (sample.clamp(-1.0, 1.0) * 32_767.0).round() as i16)
+            .collect();
+        assert_eq!(read, expected);
+        assert_eq!(
+            &read[read.len() - 7..],
+            &[32_767, -32_767, 32_767, -32_767, 0, 1, -1]
+        );
+    }
+
     #[test]
     fn transcribe_again_returns_once_the_run_ends() {
         let directory = std::env::temp_dir().join(format!(

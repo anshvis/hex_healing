@@ -22,8 +22,9 @@ Strong labels, verified clips and golden clips are never evicted.
 | [T1.2](T1.2-collector.md) | `healing collect`: idempotent copy into the dataset | standard | T1.1 |
 | [T1.3](T1.3-storage-budget.md) | Near-duplicate clusters, k audio per cluster, byte budget | standard | T1.2 |
 | [T1.4](T1.4-schedule-and-status.md) | launchd schedule and `healing status` (gaps, budget, lab state) | standard | T1.2 |
+| [T1.5](T1.5-clean.md) | `healing clean`: index matches disk, free-space floor, leftovers swept | standard | T1.3 |
 
-T1.3 and T1.4 can run in parallel after T1.2.
+T1.3 and T1.4 can run in parallel after T1.2. T1.5 follows T1.3.
 
 ## Changes
 - **Rust (T1.1):**
@@ -36,6 +37,7 @@ T1.3 and T1.4 can run in parallel after T1.2.
   - `collect.py`;
   - `dedupe.py`;
   - `budget.py`;
+  - `clean.py`;
   - `status.py`;
   - `launchd/com.hex-healing.collect.plist` (a template).
 - **Data root:** `$HEALING_HOME`, default `~/Library/Application Support/hex-healing/` (D-4).
@@ -49,6 +51,7 @@ T1.3 and T1.4 can run in parallel after T1.2.
 3. Run `healing status`. It shows the count, the bytes against the budget, and the cluster of 3.
 4. Delete an entry in Hex's History, then run `healing collect`. The entry is still in `healing status --list`.
 5. Run `healing prune --budget 1MiB --dry-run`. It names only weak, redundant clips for eviction.
+6. Copy any FLAC into `$HEALING_HOME/audio/` by hand, then run `healing clean --deep`. It moves that file to quarantine and reports 0 mismatches. A second run reports nothing.
 
 ## Exit gate
 Every T1.x check is green at the head SHA. The validation above passes on your Mac with a real dictation.

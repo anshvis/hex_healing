@@ -1,0 +1,2204 @@
+{
+ "names_equal": true,
+ "tensors": 961,
+ "changed_tensors": 219,
+ "changed_q8_tensors": 219,
+ "survival_median": 1.8696928173155676,
+ "survival_min": 1.0167948014975785,
+ "cosine_median": 0.5348327159881592,
+ "cosine_min": 0.33671194314956665,
+ "random_cosine_median": 0.5157142281532288,
+ "delta_rms_over_step_median": 0.21333469706290664,
+ "rows": [
+  {
+   "tensor": "enc.blocks.0.ff1.linear1.weight",
+   "delta_norm": 1.171579,
+   "delta_rms": 0.000572,
+   "q8_step_mean": 0.003522,
+   "survival": 2.166916,
+   "cosine": 0.461091,
+   "random_cosine": 0.448397,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.0.ff1.linear2.weight",
+   "delta_norm": 1.031744,
+   "delta_rms": 0.000504,
+   "q8_step_mean": 0.003721,
+   "survival": 2.347435,
+   "cosine": 0.425985,
+   "random_cosine": 0.408761,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.0.attn.linear_q.weight",
+   "delta_norm": 0.500291,
+   "delta_rms": 0.000489,
+   "q8_step_mean": 0.001482,
+   "survival": 1.549423,
+   "cosine": 0.644556,
+   "random_cosine": 0.642623,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.0.attn.linear_k.weight",
+   "delta_norm": 0.53696,
+   "delta_rms": 0.000524,
+   "q8_step_mean": 0.002162,
+   "survival": 1.802489,
+   "cosine": 0.555463,
+   "random_cosine": 0.551361,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.0.attn.linear_v.weight",
+   "delta_norm": 0.754687,
+   "delta_rms": 0.000737,
+   "q8_step_mean": 0.00415,
+   "survival": 2.062681,
+   "cosine": 0.485793,
+   "random_cosine": 0.469422,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.0.attn.linear_out.weight",
+   "delta_norm": 0.749369,
+   "delta_rms": 0.000732,
+   "q8_step_mean": 0.004038,
+   "survival": 2.034093,
+   "cosine": 0.490776,
+   "random_cosine": 0.473101,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.0.attn.linear_pos.weight",
+   "delta_norm": 0.508395,
+   "delta_rms": 0.000496,
+   "q8_step_mean": 0.000514,
+   "survival": 1.101278,
+   "cosine": 0.907417,
+   "random_cosine": 0.90634,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.0.ff2.linear1.weight",
+   "delta_norm": 1.019583,
+   "delta_rms": 0.000498,
+   "q8_step_mean": 0.003602,
+   "survival": 2.382162,
+   "cosine": 0.419371,
+   "random_cosine": 0.41295,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.0.ff2.linear2.weight",
+   "delta_norm": 1.145942,
+   "delta_rms": 0.00056,
+   "q8_step_mean": 0.003864,
+   "survival": 2.266459,
+   "cosine": 0.439971,
+   "random_cosine": 0.423212,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.1.ff1.linear1.weight",
+   "delta_norm": 1.358582,
+   "delta_rms": 0.000663,
+   "q8_step_mean": 0.00364,
+   "survival": 2.021165,
+   "cosine": 0.494934,
+   "random_cosine": 0.475625,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.1.ff1.linear2.weight",
+   "delta_norm": 1.558215,
+   "delta_rms": 0.000761,
+   "q8_step_mean": 0.00278,
+   "survival": 1.662221,
+   "cosine": 0.601793,
+   "random_cosine": 0.586924,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.1.attn.linear_q.weight",
+   "delta_norm": 0.540557,
+   "delta_rms": 0.000528,
+   "q8_step_mean": 0.002474,
+   "survival": 1.929182,
+   "cosine": 0.518718,
+   "random_cosine": 0.515022,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.1.attn.linear_k.weight",
+   "delta_norm": 0.55541,
+   "delta_rms": 0.000542,
+   "q8_step_mean": 0.005531,
+   "survival": 2.837224,
+   "cosine": 0.351588,
+   "random_cosine": 0.346613,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.1.attn.linear_v.weight",
+   "delta_norm": 0.717073,
+   "delta_rms": 0.0007,
+   "q8_step_mean": 0.00272,
+   "survival": 1.702311,
+   "cosine": 0.586571,
+   "random_cosine": 0.567789,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.1.attn.linear_out.weight",
+   "delta_norm": 0.635442,
+   "delta_rms": 0.000621,
+   "q8_step_mean": 0.002646,
+   "survival": 1.814795,
+   "cosine": 0.552885,
+   "random_cosine": 0.540458,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.1.attn.linear_pos.weight",
+   "delta_norm": 0.489411,
+   "delta_rms": 0.000478,
+   "q8_step_mean": 0.000528,
+   "survival": 1.118675,
+   "cosine": 0.89373,
+   "random_cosine": 0.892761,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.1.ff2.linear1.weight",
+   "delta_norm": 1.216998,
+   "delta_rms": 0.000594,
+   "q8_step_mean": 0.003606,
+   "survival": 2.139176,
+   "cosine": 0.467373,
+   "random_cosine": 0.451824,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.1.ff2.linear2.weight",
+   "delta_norm": 1.402258,
+   "delta_rms": 0.000685,
+   "q8_step_mean": 0.003158,
+   "survival": 1.864879,
+   "cosine": 0.536395,
+   "random_cosine": 0.520783,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.2.ff1.linear1.weight",
+   "delta_norm": 1.153574,
+   "delta_rms": 0.000563,
+   "q8_step_mean": 0.003636,
+   "survival": 2.23459,
+   "cosine": 0.447824,
+   "random_cosine": 0.438064,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.2.ff1.linear2.weight",
+   "delta_norm": 1.729031,
+   "delta_rms": 0.000844,
+   "q8_step_mean": 0.002751,
+   "survival": 1.577673,
+   "cosine": 0.634116,
+   "random_cosine": 0.62037,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.2.attn.linear_q.weight",
+   "delta_norm": 0.531557,
+   "delta_rms": 0.000519,
+   "q8_step_mean": 0.002656,
+   "survival": 2.010111,
+   "cosine": 0.496364,
+   "random_cosine": 0.493581,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.2.attn.linear_k.weight",
+   "delta_norm": 0.556544,
+   "delta_rms": 0.000544,
+   "q8_step_mean": 0.005568,
+   "survival": 2.869569,
+   "cosine": 0.348529,
+   "random_cosine": 0.344947,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.2.attn.linear_v.weight",
+   "delta_norm": 0.783969,
+   "delta_rms": 0.000766,
+   "q8_step_mean": 0.002713,
+   "survival": 1.629836,
+   "cosine": 0.613781,
+   "random_cosine": 0.595111,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.2.attn.linear_out.weight",
+   "delta_norm": 0.674106,
+   "delta_rms": 0.000658,
+   "q8_step_mean": 0.002664,
+   "survival": 1.751859,
+   "cosine": 0.57014,
+   "random_cosine": 0.555171,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.2.attn.linear_pos.weight",
+   "delta_norm": 0.538284,
+   "delta_rms": 0.000526,
+   "q8_step_mean": 0.000564,
+   "survival": 1.11529,
+   "cosine": 0.89638,
+   "random_cosine": 0.895797,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.2.ff2.linear1.weight",
+   "delta_norm": 1.128114,
+   "delta_rms": 0.000551,
+   "q8_step_mean": 0.003554,
+   "survival": 2.231945,
+   "cosine": 0.448146,
+   "random_cosine": 0.437623,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.2.ff2.linear2.weight",
+   "delta_norm": 1.185881,
+   "delta_rms": 0.000579,
+   "q8_step_mean": 0.003178,
+   "survival": 2.043173,
+   "cosine": 0.490402,
+   "random_cosine": 0.476144,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.3.ff1.linear1.weight",
+   "delta_norm": 1.048122,
+   "delta_rms": 0.000512,
+   "q8_step_mean": 0.003633,
+   "survival": 2.340423,
+   "cosine": 0.427197,
+   "random_cosine": 0.416853,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.3.ff1.linear2.weight",
+   "delta_norm": 1.42737,
+   "delta_rms": 0.000697,
+   "q8_step_mean": 0.002773,
+   "survival": 1.728057,
+   "cosine": 0.577897,
+   "random_cosine": 0.561621,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.3.attn.linear_q.weight",
+   "delta_norm": 0.541159,
+   "delta_rms": 0.000528,
+   "q8_step_mean": 0.002642,
+   "survival": 1.96547,
+   "cosine": 0.507673,
+   "random_cosine": 0.498445,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.3.attn.linear_k.weight",
+   "delta_norm": 0.580954,
+   "delta_rms": 0.000567,
+   "q8_step_mean": 0.005462,
+   "survival": 2.739703,
+   "cosine": 0.366509,
+   "random_cosine": 0.357432,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.3.attn.linear_v.weight",
+   "delta_norm": 0.623891,
+   "delta_rms": 0.000609,
+   "q8_step_mean": 0.002793,
+   "survival": 1.869693,
+   "cosine": 0.534833,
+   "random_cosine": 0.521787,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.3.attn.linear_out.weight",
+   "delta_norm": 0.61152,
+   "delta_rms": 0.000597,
+   "q8_step_mean": 0.002682,
+   "survival": 1.835748,
+   "cosine": 0.545004,
+   "random_cosine": 0.526101,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.3.attn.linear_pos.weight",
+   "delta_norm": 0.542809,
+   "delta_rms": 0.00053,
+   "q8_step_mean": 0.00056,
+   "survival": 1.109878,
+   "cosine": 0.900894,
+   "random_cosine": 0.900304,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.3.ff2.linear1.weight",
+   "delta_norm": 1.145627,
+   "delta_rms": 0.000559,
+   "q8_step_mean": 0.003559,
+   "survival": 2.212916,
+   "cosine": 0.451709,
+   "random_cosine": 0.441127,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.3.ff2.linear2.weight",
+   "delta_norm": 1.420863,
+   "delta_rms": 0.000694,
+   "q8_step_mean": 0.00317,
+   "survival": 1.846803,
+   "cosine": 0.541355,
+   "random_cosine": 0.523557,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.4.ff1.linear1.weight",
+   "delta_norm": 1.04481,
+   "delta_rms": 0.00051,
+   "q8_step_mean": 0.003631,
+   "survival": 2.337081,
+   "cosine": 0.427917,
+   "random_cosine": 0.416281,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.4.ff1.linear2.weight",
+   "delta_norm": 1.458029,
+   "delta_rms": 0.000712,
+   "q8_step_mean": 0.002764,
+   "survival": 1.705773,
+   "cosine": 0.586546,
+   "random_cosine": 0.568327,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.4.attn.linear_q.weight",
+   "delta_norm": 0.494248,
+   "delta_rms": 0.000483,
+   "q8_step_mean": 0.002641,
+   "survival": 2.078854,
+   "cosine": 0.481933,
+   "random_cosine": 0.476703,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.4.attn.linear_k.weight",
+   "delta_norm": 0.500741,
+   "delta_rms": 0.000489,
+   "q8_step_mean": 0.0054,
+   "survival": 2.98839,
+   "cosine": 0.336712,
+   "random_cosine": 0.333288,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.4.attn.linear_v.weight",
+   "delta_norm": 0.627362,
+   "delta_rms": 0.000613,
+   "q8_step_mean": 0.002777,
+   "survival": 1.854018,
+   "cosine": 0.539516,
+   "random_cosine": 0.526388,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.4.attn.linear_out.weight",
+   "delta_norm": 0.654752,
+   "delta_rms": 0.000639,
+   "q8_step_mean": 0.002655,
+   "survival": 1.769546,
+   "cosine": 0.565446,
+   "random_cosine": 0.549349,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.4.attn.linear_pos.weight",
+   "delta_norm": 0.489855,
+   "delta_rms": 0.000478,
+   "q8_step_mean": 0.000552,
+   "survival": 1.130063,
+   "cosine": 0.884657,
+   "random_cosine": 0.884452,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.4.ff2.linear1.weight",
+   "delta_norm": 1.182452,
+   "delta_rms": 0.000577,
+   "q8_step_mean": 0.003566,
+   "survival": 2.150068,
+   "cosine": 0.464803,
+   "random_cosine": 0.447968,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.4.ff2.linear2.weight",
+   "delta_norm": 1.144457,
+   "delta_rms": 0.000559,
+   "q8_step_mean": 0.003212,
+   "survival": 2.075831,
+   "cosine": 0.481948,
+   "random_cosine": 0.464609,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.5.ff1.linear1.weight",
+   "delta_norm": 1.125483,
+   "delta_rms": 0.00055,
+   "q8_step_mean": 0.003613,
+   "survival": 2.217043,
+   "cosine": 0.450063,
+   "random_cosine": 0.43319,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.5.ff1.linear2.weight",
+   "delta_norm": 1.394511,
+   "delta_rms": 0.000681,
+   "q8_step_mean": 0.00275,
+   "survival": 1.726064,
+   "cosine": 0.579175,
+   "random_cosine": 0.556986,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.5.attn.linear_q.weight",
+   "delta_norm": 0.577212,
+   "delta_rms": 0.000564,
+   "q8_step_mean": 0.002716,
+   "survival": 1.903756,
+   "cosine": 0.525824,
+   "random_cosine": 0.508067,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.5.attn.linear_k.weight",
+   "delta_norm": 0.545911,
+   "delta_rms": 0.000533,
+   "q8_step_mean": 0.00542,
+   "survival": 2.824796,
+   "cosine": 0.352722,
+   "random_cosine": 0.345905,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.5.attn.linear_v.weight",
+   "delta_norm": 0.774099,
+   "delta_rms": 0.000756,
+   "q8_step_mean": 0.002754,
+   "survival": 1.636242,
+   "cosine": 0.611157,
+   "random_cosine": 0.587226,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.5.attn.linear_out.weight",
+   "delta_norm": 0.794331,
+   "delta_rms": 0.000776,
+   "q8_step_mean": 0.002676,
+   "survival": 1.597263,
+   "cosine": 0.626534,
+   "random_cosine": 0.602775,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.5.attn.linear_pos.weight",
+   "delta_norm": 0.551784,
+   "delta_rms": 0.000539,
+   "q8_step_mean": 0.000563,
+   "survival": 1.107657,
+   "cosine": 0.902959,
+   "random_cosine": 0.902192,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.5.ff2.linear1.weight",
+   "delta_norm": 1.266803,
+   "delta_rms": 0.000619,
+   "q8_step_mean": 0.003347,
+   "survival": 2.011884,
+   "cosine": 0.497481,
+   "random_cosine": 0.478619,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.5.ff2.linear2.weight",
+   "delta_norm": 1.19297,
+   "delta_rms": 0.000583,
+   "q8_step_mean": 0.003127,
+   "survival": 1.998118,
+   "cosine": 0.500468,
+   "random_cosine": 0.482107,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.6.ff1.linear1.weight",
+   "delta_norm": 1.213917,
+   "delta_rms": 0.000593,
+   "q8_step_mean": 0.003593,
+   "survival": 2.101975,
+   "cosine": 0.47586,
+   "random_cosine": 0.451727,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.6.ff1.linear2.weight",
+   "delta_norm": 1.488017,
+   "delta_rms": 0.000727,
+   "q8_step_mean": 0.002769,
+   "survival": 1.696473,
+   "cosine": 0.589767,
+   "random_cosine": 0.57401,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.6.attn.linear_q.weight",
+   "delta_norm": 0.538529,
+   "delta_rms": 0.000526,
+   "q8_step_mean": 0.002888,
+   "survival": 2.077519,
+   "cosine": 0.481812,
+   "random_cosine": 0.475011,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.6.attn.linear_k.weight",
+   "delta_norm": 0.522485,
+   "delta_rms": 0.00051,
+   "q8_step_mean": 0.005443,
+   "survival": 2.906176,
+   "cosine": 0.344351,
+   "random_cosine": 0.338088,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.6.attn.linear_v.weight",
+   "delta_norm": 0.76348,
+   "delta_rms": 0.000746,
+   "q8_step_mean": 0.002712,
+   "survival": 1.63303,
+   "cosine": 0.610759,
+   "random_cosine": 0.587137,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.6.attn.linear_out.weight",
+   "delta_norm": 0.746398,
+   "delta_rms": 0.000729,
+   "q8_step_mean": 0.002617,
+   "survival": 1.644831,
+   "cosine": 0.606983,
+   "random_cosine": 0.589937,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.6.attn.linear_pos.weight",
+   "delta_norm": 0.542902,
+   "delta_rms": 0.00053,
+   "q8_step_mean": 0.000614,
+   "survival": 1.130594,
+   "cosine": 0.885088,
+   "random_cosine": 0.883832,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.6.ff2.linear1.weight",
+   "delta_norm": 1.259285,
+   "delta_rms": 0.000615,
+   "q8_step_mean": 0.003232,
+   "survival": 1.976267,
+   "cosine": 0.505679,
+   "random_cosine": 0.485895,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.6.ff2.linear2.weight",
+   "delta_norm": 1.383204,
+   "delta_rms": 0.000675,
+   "q8_step_mean": 0.003194,
+   "survival": 1.871327,
+   "cosine": 0.534497,
+   "random_cosine": 0.514423,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.7.ff1.linear1.weight",
+   "delta_norm": 1.504569,
+   "delta_rms": 0.000735,
+   "q8_step_mean": 0.003567,
+   "survival": 1.869325,
+   "cosine": 0.535003,
+   "random_cosine": 0.506593,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.7.ff1.linear2.weight",
+   "delta_norm": 1.373587,
+   "delta_rms": 0.000671,
+   "q8_step_mean": 0.002819,
+   "survival": 1.763016,
+   "cosine": 0.567054,
+   "random_cosine": 0.546611,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.7.attn.linear_q.weight",
+   "delta_norm": 0.560135,
+   "delta_rms": 0.000547,
+   "q8_step_mean": 0.002707,
+   "survival": 1.952139,
+   "cosine": 0.512861,
+   "random_cosine": 0.501677,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.7.attn.linear_k.weight",
+   "delta_norm": 0.537316,
+   "delta_rms": 0.000525,
+   "q8_step_mean": 0.005166,
+   "survival": 2.791056,
+   "cosine": 0.360162,
+   "random_cosine": 0.351377,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.7.attn.linear_v.weight",
+   "delta_norm": 0.77967,
+   "delta_rms": 0.000761,
+   "q8_step_mean": 0.002807,
+   "survival": 1.652039,
+   "cosine": 0.604284,
+   "random_cosine": 0.584198,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.7.attn.linear_out.weight",
+   "delta_norm": 0.710252,
+   "delta_rms": 0.000694,
+   "q8_step_mean": 0.00272,
+   "survival": 1.707098,
+   "cosine": 0.585953,
+   "random_cosine": 0.564866,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.7.attn.linear_pos.weight",
+   "delta_norm": 0.55719,
+   "delta_rms": 0.000544,
+   "q8_step_mean": 0.000574,
+   "survival": 1.106134,
+   "cosine": 0.904221,
+   "random_cosine": 0.903279,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.7.ff2.linear1.weight",
+   "delta_norm": 1.286542,
+   "delta_rms": 0.000628,
+   "q8_step_mean": 0.003012,
+   "survival": 1.911946,
+   "cosine": 0.52322,
+   "random_cosine": 0.507897,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.7.ff2.linear2.weight",
+   "delta_norm": 1.039481,
+   "delta_rms": 0.000508,
+   "q8_step_mean": 0.003236,
+   "survival": 2.141963,
+   "cosine": 0.46671,
+   "random_cosine": 0.442079,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.8.ff1.linear1.weight",
+   "delta_norm": 1.28929,
+   "delta_rms": 0.00063,
+   "q8_step_mean": 0.003502,
+   "survival": 1.986812,
+   "cosine": 0.504525,
+   "random_cosine": 0.472465,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.8.ff1.linear2.weight",
+   "delta_norm": 1.026333,
+   "delta_rms": 0.000501,
+   "q8_step_mean": 0.002841,
+   "survival": 2.03024,
+   "cosine": 0.492969,
+   "random_cosine": 0.469436,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.8.attn.linear_q.weight",
+   "delta_norm": 0.71461,
+   "delta_rms": 0.000698,
+   "q8_step_mean": 0.002544,
+   "survival": 1.651569,
+   "cosine": 0.604756,
+   "random_cosine": 0.586673,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.8.attn.linear_k.weight",
+   "delta_norm": 0.619234,
+   "delta_rms": 0.000605,
+   "q8_step_mean": 0.004812,
+   "survival": 2.4932,
+   "cosine": 0.400378,
+   "random_cosine": 0.392978,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.8.attn.linear_v.weight",
+   "delta_norm": 0.758597,
+   "delta_rms": 0.000741,
+   "q8_step_mean": 0.002857,
+   "survival": 1.687197,
+   "cosine": 0.592974,
+   "random_cosine": 0.569809,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.8.attn.linear_out.weight",
+   "delta_norm": 0.789116,
+   "delta_rms": 0.000771,
+   "q8_step_mean": 0.002729,
+   "survival": 1.616018,
+   "cosine": 0.618283,
+   "random_cosine": 0.594534,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.8.attn.linear_pos.weight",
+   "delta_norm": 0.652569,
+   "delta_rms": 0.000637,
+   "q8_step_mean": 0.000584,
+   "survival": 1.082861,
+   "cosine": 0.923149,
+   "random_cosine": 0.922173,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.8.ff2.linear1.weight",
+   "delta_norm": 1.25024,
+   "delta_rms": 0.00061,
+   "q8_step_mean": 0.003308,
+   "survival": 2.01338,
+   "cosine": 0.495838,
+   "random_cosine": 0.478281,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.8.ff2.linear2.weight",
+   "delta_norm": 0.883999,
+   "delta_rms": 0.000432,
+   "q8_step_mean": 0.003241,
+   "survival": 2.351942,
+   "cosine": 0.424926,
+   "random_cosine": 0.407323,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.9.ff1.linear1.weight",
+   "delta_norm": 1.079818,
+   "delta_rms": 0.000527,
+   "q8_step_mean": 0.003524,
+   "survival": 2.234557,
+   "cosine": 0.447014,
+   "random_cosine": 0.430783,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.9.ff1.linear2.weight",
+   "delta_norm": 0.787158,
+   "delta_rms": 0.000384,
+   "q8_step_mean": 0.002839,
+   "survival": 2.337277,
+   "cosine": 0.428808,
+   "random_cosine": 0.409644,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.9.attn.linear_q.weight",
+   "delta_norm": 0.607608,
+   "delta_rms": 0.000593,
+   "q8_step_mean": 0.002794,
+   "survival": 1.913609,
+   "cosine": 0.523427,
+   "random_cosine": 0.514717,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.9.attn.linear_k.weight",
+   "delta_norm": 0.523497,
+   "delta_rms": 0.000511,
+   "q8_step_mean": 0.005461,
+   "survival": 2.940722,
+   "cosine": 0.341173,
+   "random_cosine": 0.338643,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.9.attn.linear_v.weight",
+   "delta_norm": 0.715616,
+   "delta_rms": 0.000699,
+   "q8_step_mean": 0.002794,
+   "survival": 1.72315,
+   "cosine": 0.580145,
+   "random_cosine": 0.560453,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.9.attn.linear_out.weight",
+   "delta_norm": 0.652324,
+   "delta_rms": 0.000637,
+   "q8_step_mean": 0.002691,
+   "survival": 1.775896,
+   "cosine": 0.563334,
+   "random_cosine": 0.543757,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.9.attn.linear_pos.weight",
+   "delta_norm": 0.610702,
+   "delta_rms": 0.000596,
+   "q8_step_mean": 0.000589,
+   "survival": 1.096433,
+   "cosine": 0.912417,
+   "random_cosine": 0.911947,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.9.ff2.linear1.weight",
+   "delta_norm": 1.058494,
+   "delta_rms": 0.000517,
+   "q8_step_mean": 0.003196,
+   "survival": 2.153625,
+   "cosine": 0.464203,
+   "random_cosine": 0.44668,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.9.ff2.linear2.weight",
+   "delta_norm": 0.697224,
+   "delta_rms": 0.00034,
+   "q8_step_mean": 0.003178,
+   "survival": 2.61434,
+   "cosine": 0.382522,
+   "random_cosine": 0.363979,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.10.ff1.linear1.weight",
+   "delta_norm": 1.046704,
+   "delta_rms": 0.000511,
+   "q8_step_mean": 0.003542,
+   "survival": 2.260332,
+   "cosine": 0.442691,
+   "random_cosine": 0.422783,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.10.ff1.linear2.weight",
+   "delta_norm": 0.686164,
+   "delta_rms": 0.000335,
+   "q8_step_mean": 0.002881,
+   "survival": 2.504641,
+   "cosine": 0.398074,
+   "random_cosine": 0.379243,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.10.attn.linear_q.weight",
+   "delta_norm": 0.586839,
+   "delta_rms": 0.000573,
+   "q8_step_mean": 0.002754,
+   "survival": 1.931468,
+   "cosine": 0.521204,
+   "random_cosine": 0.509944,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.10.attn.linear_k.weight",
+   "delta_norm": 0.500266,
+   "delta_rms": 0.000489,
+   "q8_step_mean": 0.005368,
+   "survival": 2.970762,
+   "cosine": 0.339566,
+   "random_cosine": 0.333744,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.10.attn.linear_v.weight",
+   "delta_norm": 0.676437,
+   "delta_rms": 0.000661,
+   "q8_step_mean": 0.00285,
+   "survival": 1.79403,
+   "cosine": 0.558693,
+   "random_cosine": 0.538846,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.10.attn.linear_out.weight",
+   "delta_norm": 0.660116,
+   "delta_rms": 0.000645,
+   "q8_step_mean": 0.002726,
+   "survival": 1.742183,
+   "cosine": 0.575288,
+   "random_cosine": 0.543494,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.10.attn.linear_pos.weight",
+   "delta_norm": 0.54015,
+   "delta_rms": 0.000527,
+   "q8_step_mean": 0.000655,
+   "survival": 1.143831,
+   "cosine": 0.872957,
+   "random_cosine": 0.870991,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.10.ff2.linear1.weight",
+   "delta_norm": 1.018713,
+   "delta_rms": 0.000497,
+   "q8_step_mean": 0.003258,
+   "survival": 2.211389,
+   "cosine": 0.451832,
+   "random_cosine": 0.434863,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.10.ff2.linear2.weight",
+   "delta_norm": 0.753576,
+   "delta_rms": 0.000368,
+   "q8_step_mean": 0.003187,
+   "survival": 2.549004,
+   "cosine": 0.391746,
+   "random_cosine": 0.37792,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.11.ff1.linear1.weight",
+   "delta_norm": 1.15409,
+   "delta_rms": 0.000564,
+   "q8_step_mean": 0.003605,
+   "survival": 2.163707,
+   "cosine": 0.46201,
+   "random_cosine": 0.440165,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.11.ff1.linear2.weight",
+   "delta_norm": 0.769445,
+   "delta_rms": 0.000376,
+   "q8_step_mean": 0.002876,
+   "survival": 2.38856,
+   "cosine": 0.419147,
+   "random_cosine": 0.401522,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.11.attn.linear_q.weight",
+   "delta_norm": 0.585792,
+   "delta_rms": 0.000572,
+   "q8_step_mean": 0.002805,
+   "survival": 1.948414,
+   "cosine": 0.511735,
+   "random_cosine": 0.503606,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.11.attn.linear_k.weight",
+   "delta_norm": 0.509057,
+   "delta_rms": 0.000497,
+   "q8_step_mean": 0.004476,
+   "survival": 2.691047,
+   "cosine": 0.370301,
+   "random_cosine": 0.369403,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.11.attn.linear_v.weight",
+   "delta_norm": 0.637057,
+   "delta_rms": 0.000622,
+   "q8_step_mean": 0.002924,
+   "survival": 1.872289,
+   "cosine": 0.532921,
+   "random_cosine": 0.514583,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.11.attn.linear_out.weight",
+   "delta_norm": 0.593837,
+   "delta_rms": 0.00058,
+   "q8_step_mean": 0.002859,
+   "survival": 1.931514,
+   "cosine": 0.51784,
+   "random_cosine": 0.502056,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.11.attn.linear_pos.weight",
+   "delta_norm": 0.565637,
+   "delta_rms": 0.000552,
+   "q8_step_mean": 0.000759,
+   "survival": 1.174945,
+   "cosine": 0.85054,
+   "random_cosine": 0.848818,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.11.ff2.linear1.weight",
+   "delta_norm": 1.059269,
+   "delta_rms": 0.000517,
+   "q8_step_mean": 0.003228,
+   "survival": 2.157198,
+   "cosine": 0.463661,
+   "random_cosine": 0.445144,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.11.ff2.linear2.weight",
+   "delta_norm": 0.658984,
+   "delta_rms": 0.000322,
+   "q8_step_mean": 0.003161,
+   "survival": 2.698064,
+   "cosine": 0.371065,
+   "random_cosine": 0.355121,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.12.ff1.linear1.weight",
+   "delta_norm": 1.089975,
+   "delta_rms": 0.000532,
+   "q8_step_mean": 0.003587,
+   "survival": 2.232934,
+   "cosine": 0.448574,
+   "random_cosine": 0.42799,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.12.ff1.linear2.weight",
+   "delta_norm": 0.745016,
+   "delta_rms": 0.000364,
+   "q8_step_mean": 0.00293,
+   "survival": 2.436265,
+   "cosine": 0.409775,
+   "random_cosine": 0.391788,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.12.attn.linear_q.weight",
+   "delta_norm": 0.545359,
+   "delta_rms": 0.000533,
+   "q8_step_mean": 0.002892,
+   "survival": 2.065267,
+   "cosine": 0.482748,
+   "random_cosine": 0.478491,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.12.attn.linear_k.weight",
+   "delta_norm": 0.532191,
+   "delta_rms": 0.00052,
+   "q8_step_mean": 0.004805,
+   "survival": 2.714594,
+   "cosine": 0.369352,
+   "random_cosine": 0.364586,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.12.attn.linear_v.weight",
+   "delta_norm": 0.641252,
+   "delta_rms": 0.000626,
+   "q8_step_mean": 0.00303,
+   "survival": 1.896566,
+   "cosine": 0.527513,
+   "random_cosine": 0.507088,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.12.attn.linear_out.weight",
+   "delta_norm": 0.60316,
+   "delta_rms": 0.000589,
+   "q8_step_mean": 0.002911,
+   "survival": 1.960009,
+   "cosine": 0.511508,
+   "random_cosine": 0.501883,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.12.attn.linear_pos.weight",
+   "delta_norm": 0.53477,
+   "delta_rms": 0.000522,
+   "q8_step_mean": 0.000688,
+   "survival": 1.165038,
+   "cosine": 0.858212,
+   "random_cosine": 0.85822,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.12.ff2.linear1.weight",
+   "delta_norm": 1.112257,
+   "delta_rms": 0.000543,
+   "q8_step_mean": 0.003363,
+   "survival": 2.175756,
+   "cosine": 0.459744,
+   "random_cosine": 0.446783,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.12.ff2.linear2.weight",
+   "delta_norm": 0.74903,
+   "delta_rms": 0.000366,
+   "q8_step_mean": 0.00332,
+   "survival": 2.620435,
+   "cosine": 0.381547,
+   "random_cosine": 0.368948,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.13.ff1.linear1.weight",
+   "delta_norm": 1.053676,
+   "delta_rms": 0.000514,
+   "q8_step_mean": 0.00368,
+   "survival": 2.278932,
+   "cosine": 0.438754,
+   "random_cosine": 0.415795,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.13.ff1.linear2.weight",
+   "delta_norm": 0.664667,
+   "delta_rms": 0.000325,
+   "q8_step_mean": 0.002999,
+   "survival": 2.61367,
+   "cosine": 0.38314,
+   "random_cosine": 0.365058,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.13.attn.linear_q.weight",
+   "delta_norm": 0.5556,
+   "delta_rms": 0.000543,
+   "q8_step_mean": 0.002764,
+   "survival": 1.99032,
+   "cosine": 0.499932,
+   "random_cosine": 0.496809,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.13.attn.linear_k.weight",
+   "delta_norm": 0.592794,
+   "delta_rms": 0.000579,
+   "q8_step_mean": 0.005376,
+   "survival": 2.701152,
+   "cosine": 0.370041,
+   "random_cosine": 0.363653,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.13.attn.linear_v.weight",
+   "delta_norm": 0.660767,
+   "delta_rms": 0.000645,
+   "q8_step_mean": 0.002963,
+   "survival": 1.842995,
+   "cosine": 0.542116,
+   "random_cosine": 0.521097,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.13.attn.linear_out.weight",
+   "delta_norm": 0.621316,
+   "delta_rms": 0.000607,
+   "q8_step_mean": 0.002839,
+   "survival": 1.89343,
+   "cosine": 0.527826,
+   "random_cosine": 0.516153,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.13.attn.linear_pos.weight",
+   "delta_norm": 0.625824,
+   "delta_rms": 0.000611,
+   "q8_step_mean": 0.000638,
+   "survival": 1.103173,
+   "cosine": 0.907364,
+   "random_cosine": 0.904873,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.13.ff2.linear1.weight",
+   "delta_norm": 1.172987,
+   "delta_rms": 0.000573,
+   "q8_step_mean": 0.003621,
+   "survival": 2.165308,
+   "cosine": 0.461822,
+   "random_cosine": 0.442646,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.13.ff2.linear2.weight",
+   "delta_norm": 0.641985,
+   "delta_rms": 0.000313,
+   "q8_step_mean": 0.003347,
+   "survival": 2.812546,
+   "cosine": 0.3555,
+   "random_cosine": 0.33894,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.14.ff1.linear1.weight",
+   "delta_norm": 1.186945,
+   "delta_rms": 0.00058,
+   "q8_step_mean": 0.003776,
+   "survival": 2.181964,
+   "cosine": 0.458345,
+   "random_cosine": 0.4359,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.14.ff1.linear2.weight",
+   "delta_norm": 0.625363,
+   "delta_rms": 0.000305,
+   "q8_step_mean": 0.003025,
+   "survival": 2.690066,
+   "cosine": 0.372134,
+   "random_cosine": 0.352938,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.14.attn.linear_q.weight",
+   "delta_norm": 0.567299,
+   "delta_rms": 0.000554,
+   "q8_step_mean": 0.002708,
+   "survival": 1.959245,
+   "cosine": 0.511138,
+   "random_cosine": 0.505162,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.14.attn.linear_k.weight",
+   "delta_norm": 0.526939,
+   "delta_rms": 0.000515,
+   "q8_step_mean": 0.004654,
+   "survival": 2.704957,
+   "cosine": 0.370996,
+   "random_cosine": 0.367808,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.14.attn.linear_v.weight",
+   "delta_norm": 0.639086,
+   "delta_rms": 0.000624,
+   "q8_step_mean": 0.002763,
+   "survival": 1.802483,
+   "cosine": 0.553916,
+   "random_cosine": 0.531468,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.14.attn.linear_out.weight",
+   "delta_norm": 0.615559,
+   "delta_rms": 0.000601,
+   "q8_step_mean": 0.00263,
+   "survival": 1.824267,
+   "cosine": 0.548032,
+   "random_cosine": 0.534138,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.14.attn.linear_pos.weight",
+   "delta_norm": 0.56653,
+   "delta_rms": 0.000553,
+   "q8_step_mean": 0.000638,
+   "survival": 1.128156,
+   "cosine": 0.886211,
+   "random_cosine": 0.885644,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.14.ff2.linear1.weight",
+   "delta_norm": 1.229408,
+   "delta_rms": 0.0006,
+   "q8_step_mean": 0.003716,
+   "survival": 2.139715,
+   "cosine": 0.466925,
+   "random_cosine": 0.447129,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.14.ff2.linear2.weight",
+   "delta_norm": 0.618647,
+   "delta_rms": 0.000302,
+   "q8_step_mean": 0.003483,
+   "survival": 2.884311,
+   "cosine": 0.34645,
+   "random_cosine": 0.326424,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.15.ff1.linear1.weight",
+   "delta_norm": 1.235174,
+   "delta_rms": 0.000603,
+   "q8_step_mean": 0.003843,
+   "survival": 2.149361,
+   "cosine": 0.465434,
+   "random_cosine": 0.440983,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.15.ff1.linear2.weight",
+   "delta_norm": 0.692316,
+   "delta_rms": 0.000338,
+   "q8_step_mean": 0.003078,
+   "survival": 2.604392,
+   "cosine": 0.383234,
+   "random_cosine": 0.367616,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.15.attn.linear_q.weight",
+   "delta_norm": 0.500977,
+   "delta_rms": 0.000489,
+   "q8_step_mean": 0.002954,
+   "survival": 2.160237,
+   "cosine": 0.463011,
+   "random_cosine": 0.453132,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.15.attn.linear_k.weight",
+   "delta_norm": 0.51532,
+   "delta_rms": 0.000503,
+   "q8_step_mean": 0.00522,
+   "survival": 2.897094,
+   "cosine": 0.346925,
+   "random_cosine": 0.345096,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.15.attn.linear_v.weight",
+   "delta_norm": 0.598616,
+   "delta_rms": 0.000585,
+   "q8_step_mean": 0.003036,
+   "survival": 1.989174,
+   "cosine": 0.503306,
+   "random_cosine": 0.489909,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.15.attn.linear_out.weight",
+   "delta_norm": 0.604609,
+   "delta_rms": 0.00059,
+   "q8_step_mean": 0.002937,
+   "survival": 1.90407,
+   "cosine": 0.524371,
+   "random_cosine": 0.500037,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.15.attn.linear_pos.weight",
+   "delta_norm": 0.506508,
+   "delta_rms": 0.000495,
+   "q8_step_mean": 0.00064,
+   "survival": 1.153441,
+   "cosine": 0.867629,
+   "random_cosine": 0.865059,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.15.ff2.linear1.weight",
+   "delta_norm": 1.177043,
+   "delta_rms": 0.000575,
+   "q8_step_mean": 0.003773,
+   "survival": 2.190296,
+   "cosine": 0.457265,
+   "random_cosine": 0.433376,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.15.ff2.linear2.weight",
+   "delta_norm": 0.617963,
+   "delta_rms": 0.000302,
+   "q8_step_mean": 0.00346,
+   "survival": 2.900469,
+   "cosine": 0.345065,
+   "random_cosine": 0.327269,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.16.ff1.linear1.weight",
+   "delta_norm": 1.191231,
+   "delta_rms": 0.000582,
+   "q8_step_mean": 0.003868,
+   "survival": 2.211134,
+   "cosine": 0.451405,
+   "random_cosine": 0.431209,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.16.ff1.linear2.weight",
+   "delta_norm": 0.606484,
+   "delta_rms": 0.000296,
+   "q8_step_mean": 0.003063,
+   "survival": 2.71375,
+   "cosine": 0.36885,
+   "random_cosine": 0.344743,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.16.attn.linear_q.weight",
+   "delta_norm": 0.533267,
+   "delta_rms": 0.000521,
+   "q8_step_mean": 0.002922,
+   "survival": 2.065031,
+   "cosine": 0.484944,
+   "random_cosine": 0.470026,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.16.attn.linear_k.weight",
+   "delta_norm": 0.503775,
+   "delta_rms": 0.000492,
+   "q8_step_mean": 0.005206,
+   "survival": 2.90571,
+   "cosine": 0.345286,
+   "random_cosine": 0.340386,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.16.attn.linear_v.weight",
+   "delta_norm": 0.576522,
+   "delta_rms": 0.000563,
+   "q8_step_mean": 0.003023,
+   "survival": 2.011276,
+   "cosine": 0.498084,
+   "random_cosine": 0.479793,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.16.attn.linear_out.weight",
+   "delta_norm": 0.625534,
+   "delta_rms": 0.000611,
+   "q8_step_mean": 0.002927,
+   "survival": 1.894724,
+   "cosine": 0.527899,
+   "random_cosine": 0.509862,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.16.attn.linear_pos.weight",
+   "delta_norm": 0.497562,
+   "delta_rms": 0.000486,
+   "q8_step_mean": 0.000669,
+   "survival": 1.173433,
+   "cosine": 0.852634,
+   "random_cosine": 0.849711,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.16.ff2.linear1.weight",
+   "delta_norm": 1.89577,
+   "delta_rms": 0.000926,
+   "q8_step_mean": 0.003825,
+   "survival": 1.718041,
+   "cosine": 0.581368,
+   "random_cosine": 0.551185,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.16.ff2.linear2.weight",
+   "delta_norm": 1.044253,
+   "delta_rms": 0.00051,
+   "q8_step_mean": 0.003478,
+   "survival": 2.221517,
+   "cosine": 0.451064,
+   "random_cosine": 0.425559,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.17.ff1.linear1.weight",
+   "delta_norm": 1.705495,
+   "delta_rms": 0.000833,
+   "q8_step_mean": 0.003907,
+   "survival": 1.834275,
+   "cosine": 0.545338,
+   "random_cosine": 0.515714,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.17.ff1.linear2.weight",
+   "delta_norm": 1.094306,
+   "delta_rms": 0.000534,
+   "q8_step_mean": 0.003068,
+   "survival": 2.036788,
+   "cosine": 0.490785,
+   "random_cosine": 0.465084,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.17.attn.linear_q.weight",
+   "delta_norm": 0.579497,
+   "delta_rms": 0.000566,
+   "q8_step_mean": 0.002762,
+   "survival": 1.950497,
+   "cosine": 0.511004,
+   "random_cosine": 0.503559,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.17.attn.linear_k.weight",
+   "delta_norm": 0.536849,
+   "delta_rms": 0.000524,
+   "q8_step_mean": 0.005075,
+   "survival": 2.787627,
+   "cosine": 0.360712,
+   "random_cosine": 0.356834,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.17.attn.linear_v.weight",
+   "delta_norm": 0.727453,
+   "delta_rms": 0.00071,
+   "q8_step_mean": 0.002993,
+   "survival": 1.768108,
+   "cosine": 0.564462,
+   "random_cosine": 0.545558,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.17.attn.linear_out.weight",
+   "delta_norm": 0.739838,
+   "delta_rms": 0.000722,
+   "q8_step_mean": 0.002887,
+   "survival": 1.743382,
+   "cosine": 0.574245,
+   "random_cosine": 0.560173,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.17.attn.linear_pos.weight",
+   "delta_norm": 0.551144,
+   "delta_rms": 0.000538,
+   "q8_step_mean": 0.000581,
+   "survival": 1.113957,
+   "cosine": 0.897173,
+   "random_cosine": 0.895874,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.17.ff2.linear1.weight",
+   "delta_norm": 2.003706,
+   "delta_rms": 0.000978,
+   "q8_step_mean": 0.003726,
+   "survival": 1.655237,
+   "cosine": 0.604348,
+   "random_cosine": 0.573656,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.17.ff2.linear2.weight",
+   "delta_norm": 1.412229,
+   "delta_rms": 0.00069,
+   "q8_step_mean": 0.003454,
+   "survival": 1.922027,
+   "cosine": 0.521142,
+   "random_cosine": 0.498773,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.18.ff1.linear1.weight",
+   "delta_norm": 1.771742,
+   "delta_rms": 0.000865,
+   "q8_step_mean": 0.003841,
+   "survival": 1.773109,
+   "cosine": 0.563615,
+   "random_cosine": 0.53016,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.18.ff1.linear2.weight",
+   "delta_norm": 1.200922,
+   "delta_rms": 0.000586,
+   "q8_step_mean": 0.003001,
+   "survival": 1.940255,
+   "cosine": 0.514674,
+   "random_cosine": 0.49348,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.18.attn.linear_q.weight",
+   "delta_norm": 0.849929,
+   "delta_rms": 0.00083,
+   "q8_step_mean": 0.002708,
+   "survival": 1.563169,
+   "cosine": 0.641831,
+   "random_cosine": 0.620484,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.18.attn.linear_k.weight",
+   "delta_norm": 0.797716,
+   "delta_rms": 0.000779,
+   "q8_step_mean": 0.005065,
+   "survival": 2.175617,
+   "cosine": 0.460687,
+   "random_cosine": 0.435964,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.18.attn.linear_v.weight",
+   "delta_norm": 0.737778,
+   "delta_rms": 0.00072,
+   "q8_step_mean": 0.003143,
+   "survival": 1.792115,
+   "cosine": 0.557781,
+   "random_cosine": 0.535125,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.18.attn.linear_out.weight",
+   "delta_norm": 0.888514,
+   "delta_rms": 0.000868,
+   "q8_step_mean": 0.003033,
+   "survival": 1.617728,
+   "cosine": 0.619072,
+   "random_cosine": 0.597527,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.18.attn.linear_pos.weight",
+   "delta_norm": 0.695445,
+   "delta_rms": 0.000679,
+   "q8_step_mean": 0.00062,
+   "survival": 1.082684,
+   "cosine": 0.923565,
+   "random_cosine": 0.922734,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.18.ff2.linear1.weight",
+   "delta_norm": 1.936572,
+   "delta_rms": 0.000946,
+   "q8_step_mean": 0.003636,
+   "survival": 1.676775,
+   "cosine": 0.596043,
+   "random_cosine": 0.571543,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.18.ff2.linear2.weight",
+   "delta_norm": 1.649027,
+   "delta_rms": 0.000805,
+   "q8_step_mean": 0.003472,
+   "survival": 1.793899,
+   "cosine": 0.557369,
+   "random_cosine": 0.538906,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.19.ff1.linear1.weight",
+   "delta_norm": 2.073194,
+   "delta_rms": 0.001012,
+   "q8_step_mean": 0.003758,
+   "survival": 1.639246,
+   "cosine": 0.610203,
+   "random_cosine": 0.581104,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.19.ff1.linear2.weight",
+   "delta_norm": 1.801036,
+   "delta_rms": 0.000879,
+   "q8_step_mean": 0.003041,
+   "survival": 1.613646,
+   "cosine": 0.620068,
+   "random_cosine": 0.602169,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.19.attn.linear_q.weight",
+   "delta_norm": 1.016154,
+   "delta_rms": 0.000992,
+   "q8_step_mean": 0.002654,
+   "survival": 1.413816,
+   "cosine": 0.706697,
+   "random_cosine": 0.682436,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.19.attn.linear_k.weight",
+   "delta_norm": 0.749415,
+   "delta_rms": 0.000732,
+   "q8_step_mean": 0.004818,
+   "survival": 2.257416,
+   "cosine": 0.443342,
+   "random_cosine": 0.433075,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.19.attn.linear_v.weight",
+   "delta_norm": 0.914109,
+   "delta_rms": 0.000893,
+   "q8_step_mean": 0.00322,
+   "survival": 1.631237,
+   "cosine": 0.612383,
+   "random_cosine": 0.589706,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.19.attn.linear_out.weight",
+   "delta_norm": 1.108364,
+   "delta_rms": 0.001082,
+   "q8_step_mean": 0.003009,
+   "survival": 1.44528,
+   "cosine": 0.692701,
+   "random_cosine": 0.669369,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.19.attn.linear_pos.weight",
+   "delta_norm": 0.916734,
+   "delta_rms": 0.000895,
+   "q8_step_mean": 0.000583,
+   "survival": 1.045585,
+   "cosine": 0.95668,
+   "random_cosine": 0.956228,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.19.ff2.linear1.weight",
+   "delta_norm": 2.225347,
+   "delta_rms": 0.001087,
+   "q8_step_mean": 0.003581,
+   "survival": 1.557602,
+   "cosine": 0.64136,
+   "random_cosine": 0.617679,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.19.ff2.linear2.weight",
+   "delta_norm": 2.08797,
+   "delta_rms": 0.00102,
+   "q8_step_mean": 0.003557,
+   "survival": 1.623153,
+   "cosine": 0.616839,
+   "random_cosine": 0.599842,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.20.ff1.linear1.weight",
+   "delta_norm": 2.288865,
+   "delta_rms": 0.001118,
+   "q8_step_mean": 0.003656,
+   "survival": 1.5464,
+   "cosine": 0.646596,
+   "random_cosine": 0.619966,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.20.ff1.linear2.weight",
+   "delta_norm": 2.156203,
+   "delta_rms": 0.001053,
+   "q8_step_mean": 0.003041,
+   "survival": 1.486572,
+   "cosine": 0.67315,
+   "random_cosine": 0.659292,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.20.attn.linear_q.weight",
+   "delta_norm": 0.779139,
+   "delta_rms": 0.000761,
+   "q8_step_mean": 0.002821,
+   "survival": 1.66642,
+   "cosine": 0.600203,
+   "random_cosine": 0.582143,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.20.attn.linear_k.weight",
+   "delta_norm": 0.926169,
+   "delta_rms": 0.000904,
+   "q8_step_mean": 0.005251,
+   "survival": 2.098616,
+   "cosine": 0.476798,
+   "random_cosine": 0.46306,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.20.attn.linear_v.weight",
+   "delta_norm": 0.902839,
+   "delta_rms": 0.000882,
+   "q8_step_mean": 0.003156,
+   "survival": 1.631896,
+   "cosine": 0.611939,
+   "random_cosine": 0.592156,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.20.attn.linear_out.weight",
+   "delta_norm": 1.128078,
+   "delta_rms": 0.001102,
+   "q8_step_mean": 0.003009,
+   "survival": 1.44368,
+   "cosine": 0.692066,
+   "random_cosine": 0.675871,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.20.attn.linear_pos.weight",
+   "delta_norm": 0.839051,
+   "delta_rms": 0.000819,
+   "q8_step_mean": 0.000585,
+   "survival": 1.053311,
+   "cosine": 0.949344,
+   "random_cosine": 0.949173,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.20.ff2.linear1.weight",
+   "delta_norm": 2.555728,
+   "delta_rms": 0.001248,
+   "q8_step_mean": 0.003558,
+   "survival": 1.451431,
+   "cosine": 0.689365,
+   "random_cosine": 0.663226,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.20.ff2.linear2.weight",
+   "delta_norm": 2.149842,
+   "delta_rms": 0.00105,
+   "q8_step_mean": 0.003543,
+   "survival": 1.598122,
+   "cosine": 0.62579,
+   "random_cosine": 0.610244,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.21.ff1.linear1.weight",
+   "delta_norm": 2.663653,
+   "delta_rms": 0.001301,
+   "q8_step_mean": 0.003593,
+   "survival": 1.443363,
+   "cosine": 0.69212,
+   "random_cosine": 0.673151,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.21.ff1.linear2.weight",
+   "delta_norm": 2.811226,
+   "delta_rms": 0.001373,
+   "q8_step_mean": 0.00312,
+   "survival": 1.348943,
+   "cosine": 0.741126,
+   "random_cosine": 0.734565,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.21.attn.linear_q.weight",
+   "delta_norm": 0.914834,
+   "delta_rms": 0.000893,
+   "q8_step_mean": 0.002688,
+   "survival": 1.512031,
+   "cosine": 0.660073,
+   "random_cosine": 0.646102,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.21.attn.linear_k.weight",
+   "delta_norm": 0.889845,
+   "delta_rms": 0.000869,
+   "q8_step_mean": 0.004817,
+   "survival": 2.052843,
+   "cosine": 0.485685,
+   "random_cosine": 0.473449,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.21.attn.linear_v.weight",
+   "delta_norm": 1.20792,
+   "delta_rms": 0.00118,
+   "q8_step_mean": 0.003044,
+   "survival": 1.410428,
+   "cosine": 0.708827,
+   "random_cosine": 0.694903,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.21.attn.linear_out.weight",
+   "delta_norm": 1.433839,
+   "delta_rms": 0.0014,
+   "q8_step_mean": 0.002902,
+   "survival": 1.295343,
+   "cosine": 0.771948,
+   "random_cosine": 0.763996,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.21.attn.linear_pos.weight",
+   "delta_norm": 0.796406,
+   "delta_rms": 0.000778,
+   "q8_step_mean": 0.000544,
+   "survival": 1.051621,
+   "cosine": 0.951353,
+   "random_cosine": 0.950564,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.21.ff2.linear1.weight",
+   "delta_norm": 2.602458,
+   "delta_rms": 0.001271,
+   "q8_step_mean": 0.003536,
+   "survival": 1.463709,
+   "cosine": 0.683799,
+   "random_cosine": 0.671179,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.21.ff2.linear2.weight",
+   "delta_norm": 2.725969,
+   "delta_rms": 0.001331,
+   "q8_step_mean": 0.003418,
+   "survival": 1.415172,
+   "cosine": 0.70661,
+   "random_cosine": 0.6965,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.22.ff1.linear1.weight",
+   "delta_norm": 2.851155,
+   "delta_rms": 0.001392,
+   "q8_step_mean": 0.003548,
+   "survival": 1.406661,
+   "cosine": 0.711229,
+   "random_cosine": 0.699262,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.22.ff1.linear2.weight",
+   "delta_norm": 3.013591,
+   "delta_rms": 0.001471,
+   "q8_step_mean": 0.003034,
+   "survival": 1.297463,
+   "cosine": 0.770956,
+   "random_cosine": 0.76462,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.22.attn.linear_q.weight",
+   "delta_norm": 1.105735,
+   "delta_rms": 0.00108,
+   "q8_step_mean": 0.003004,
+   "survival": 1.457492,
+   "cosine": 0.686947,
+   "random_cosine": 0.670805,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.22.attn.linear_k.weight",
+   "delta_norm": 0.938989,
+   "delta_rms": 0.000917,
+   "q8_step_mean": 0.00523,
+   "survival": 2.089665,
+   "cosine": 0.47791,
+   "random_cosine": 0.465856,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.22.attn.linear_v.weight",
+   "delta_norm": 1.35395,
+   "delta_rms": 0.001322,
+   "q8_step_mean": 0.003035,
+   "survival": 1.343377,
+   "cosine": 0.744565,
+   "random_cosine": 0.732863,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.22.attn.linear_out.weight",
+   "delta_norm": 1.441084,
+   "delta_rms": 0.001407,
+   "q8_step_mean": 0.002883,
+   "survival": 1.292471,
+   "cosine": 0.774479,
+   "random_cosine": 0.766961,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.22.attn.linear_pos.weight",
+   "delta_norm": 1.03936,
+   "delta_rms": 0.001015,
+   "q8_step_mean": 0.000571,
+   "survival": 1.033833,
+   "cosine": 0.96773,
+   "random_cosine": 0.967336,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.22.ff2.linear1.weight",
+   "delta_norm": 3.013903,
+   "delta_rms": 0.001472,
+   "q8_step_mean": 0.003512,
+   "survival": 1.367677,
+   "cosine": 0.731281,
+   "random_cosine": 0.720549,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.22.ff2.linear2.weight",
+   "delta_norm": 2.9041,
+   "delta_rms": 0.001418,
+   "q8_step_mean": 0.003406,
+   "survival": 1.382552,
+   "cosine": 0.723207,
+   "random_cosine": 0.717991,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.23.ff1.linear1.weight",
+   "delta_norm": 3.239007,
+   "delta_rms": 0.001582,
+   "q8_step_mean": 0.0035,
+   "survival": 1.326578,
+   "cosine": 0.753826,
+   "random_cosine": 0.743827,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.23.ff1.linear2.weight",
+   "delta_norm": 4.652092,
+   "delta_rms": 0.002272,
+   "q8_step_mean": 0.00318,
+   "survival": 1.163535,
+   "cosine": 0.859846,
+   "random_cosine": 0.862413,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.23.attn.linear_q.weight",
+   "delta_norm": 1.31079,
+   "delta_rms": 0.00128,
+   "q8_step_mean": 0.002739,
+   "survival": 1.312711,
+   "cosine": 0.762929,
+   "random_cosine": 0.754113,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.23.attn.linear_k.weight",
+   "delta_norm": 1.359293,
+   "delta_rms": 0.001327,
+   "q8_step_mean": 0.004874,
+   "survival": 1.66681,
+   "cosine": 0.598753,
+   "random_cosine": 0.584238,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.23.attn.linear_v.weight",
+   "delta_norm": 1.836707,
+   "delta_rms": 0.001794,
+   "q8_step_mean": 0.003094,
+   "survival": 1.215565,
+   "cosine": 0.822303,
+   "random_cosine": 0.816054,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.23.attn.linear_out.weight",
+   "delta_norm": 1.719025,
+   "delta_rms": 0.001679,
+   "q8_step_mean": 0.003031,
+   "survival": 1.229831,
+   "cosine": 0.812411,
+   "random_cosine": 0.79611,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.23.attn.linear_pos.weight",
+   "delta_norm": 1.486858,
+   "delta_rms": 0.001452,
+   "q8_step_mean": 0.000566,
+   "survival": 1.016795,
+   "cosine": 0.983601,
+   "random_cosine": 0.983502,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.23.ff2.linear1.weight",
+   "delta_norm": 3.015783,
+   "delta_rms": 0.001473,
+   "q8_step_mean": 0.0036,
+   "survival": 1.380317,
+   "cosine": 0.724628,
+   "random_cosine": 0.712461,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "enc.blocks.23.ff2.linear2.weight",
+   "delta_norm": 2.744581,
+   "delta_rms": 0.00134,
+   "q8_step_mean": 0.00297,
+   "survival": 1.333711,
+   "cosine": 0.749915,
+   "random_cosine": 0.740485,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "joint.enc.weight",
+   "delta_norm": 1.58378,
+   "delta_rms": 0.001956,
+   "q8_step_mean": 0.002113,
+   "survival": 1.093502,
+   "cosine": 0.915013,
+   "random_cosine": 0.913968,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "joint.pred.weight",
+   "delta_norm": 1.274899,
+   "delta_rms": 0.001992,
+   "q8_step_mean": 0.001645,
+   "survival": 1.09139,
+   "cosine": 0.916169,
+   "random_cosine": 0.913684,
+   "q8_requantized": true
+  },
+  {
+   "tensor": "joint.out.weight",
+   "delta_norm": 7.964138,
+   "delta_rms": 0.009833,
+   "q8_step_mean": 0.010221,
+   "survival": 1.088774,
+   "cosine": 0.918231,
+   "random_cosine": 0.916902,
+   "q8_requantized": true
+  }
+ ]
+}

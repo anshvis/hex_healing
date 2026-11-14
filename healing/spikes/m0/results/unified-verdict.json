@@ -1,0 +1,184 @@
+{
+ "base": "unified",
+ "pass": true,
+ "checks": {
+  "import_base": true,
+  "import_tuned": true,
+  "converter_pinned": true,
+  "every_step_ok": true,
+  "base_parity": true,
+  "tuned_parity": true,
+  "target_base_miss": true,
+  "target_tuned_hit": true,
+  "tensor_names_equal": true,
+  "speed_within_10pct": true
+ },
+ "provenance": {
+  "converter_rev": "7045d1c0fe7cee37747b2792977421d435e75fca",
+  "quantizer_built_from": "7045d1c0fe7cee37747b2792977421d435e75fca",
+  "base_checkpoint": "/Users/anshviswanathan/hex_healing_work/models/parakeet-unified-en-0.6b/fe53cd885760c96b6a5f51a0bfd362cb4584a98b/parakeet-unified-en-0.6b.nemo",
+  "base_checkpoint_sha256": "ec23ed9150c8fde49072c3e2d61678ab903dbcef389d658db833420cbc1da35b",
+  "base_revision": "fe53cd885760c96b6a5f51a0bfd362cb4584a98b",
+  "imports": {
+   "base": {
+    "source": "/Users/anshviswanathan/hex_healing_work/rt-unified-2/base/parakeet-unified-en-0.6b/base-Q8_0.gguf",
+    "source_sha256": "ad9eb95cf6b26ac47da5a052344958085305737ce85b3b573f4f945b32512497",
+    "imported_copy": "/Users/anshviswanathan/hex_healing_work/rt-unified-2/hex/models/custom/ad9eb95cf6b26ac4.gguf",
+    "receipt_sha256": "ad9eb95cf6b26ac47da5a052344958085305737ce85b3b573f4f945b32512497",
+    "copy_sha256": "ad9eb95cf6b26ac47da5a052344958085305737ce85b3b573f4f945b32512497",
+    "ok": true
+   },
+   "tuned": {
+    "source": "/Users/anshviswanathan/hex_healing_work/rt-unified-2/tuned/parakeet-unified-en-0.6b/tuned-Q8_0.gguf",
+    "source_sha256": "4383fa60a2ac2bfe7bc355d92f151dad414b45905c7ab527e3a4e93629509998",
+    "imported_copy": "/Users/anshviswanathan/hex_healing_work/rt-unified-2/hex/models/custom/4383fa60a2ac2bfe.gguf",
+    "receipt_sha256": "4383fa60a2ac2bfe7bc355d92f151dad414b45905c7ab527e3a4e93629509998",
+    "copy_sha256": "4383fa60a2ac2bfe7bc355d92f151dad414b45905c7ab527e3a4e93629509998",
+    "ok": true
+   }
+  }
+ },
+ "base_parity": {
+  "clips": 300,
+  "reference_words": 5376,
+  "wer_a": 0.035342261904761904,
+  "wer_b": 0.035900297619047616,
+  "delta": 0.0005580357142857123,
+  "ci_low": -0.0011769783751245718,
+  "ci_high": 0.0029912133108992334,
+  "resamples": 10000,
+  "seed": 13
+ },
+ "tuned_parity": {
+  "clips": 300,
+  "reference_words": 5376,
+  "wer_a": 0.03850446428571429,
+  "wer_b": 0.038318452380952384,
+  "delta": -0.0001860119047619041,
+  "ci_low": -0.0012943846829608344,
+  "ci_high": 0.0009094257438479786,
+  "resamples": 10000,
+  "seed": 13
+ },
+ "tuned_vs_base_gguf": {
+  "clips": 300,
+  "reference_words": 5376,
+  "wer_a": 0.035900297619047616,
+  "wer_b": 0.038318452380952384,
+  "delta": 0.002418154761904767,
+  "ci_low": -0.0017215903616260115,
+  "ci_high": 0.006365004995134677,
+  "resamples": 10000,
+  "seed": 13
+ },
+ "target_recall": {
+  "base_q8": 0.0,
+  "tuned_q8": 1.0
+ },
+ "speed": {
+  "base_median_rtf": 0.017061762950778867,
+  "tuned_median_rtf": 0.017118780893869034,
+  "base_load_ms": 388.902458,
+  "tuned_load_ms": 564.416708,
+  "ratio": 1.0033418553085434
+ },
+ "delta": {
+  "names_equal": true,
+  "tensors": 961,
+  "changed_tensors": 219,
+  "changed_q8_tensors": 219,
+  "survival_median": 1.8696928173155676,
+  "survival_min": 1.0167948014975785,
+  "cosine_median": 0.5348327159881592,
+  "cosine_min": 0.33671194314956665,
+  "random_cosine_median": 0.5157142281532288,
+  "delta_rms_over_step_median": 0.21333469706290664
+ },
+ "steps": [
+  {
+   "step": "converter",
+   "exit": 0,
+   "seconds": 1
+  },
+  {
+   "step": "fetch",
+   "exit": 0,
+   "seconds": 0
+  },
+  {
+   "step": "subset",
+   "exit": 0,
+   "seconds": 0
+  },
+  {
+   "step": "clips",
+   "exit": 0,
+   "seconds": 10
+  },
+  {
+   "step": "convert-base",
+   "exit": 0,
+   "seconds": 17
+  },
+  {
+   "step": "import-base",
+   "exit": 0,
+   "seconds": 3
+  },
+  {
+   "step": "bench-base",
+   "exit": 0,
+   "seconds": 69
+  },
+  {
+   "step": "qorvyx-base",
+   "exit": 0,
+   "seconds": 1
+  },
+  {
+   "step": "nemo-base",
+   "exit": 0,
+   "seconds": 220
+  },
+  {
+   "step": "train",
+   "exit": 0,
+   "seconds": 572
+  },
+  {
+   "step": "convert-tuned",
+   "exit": 0,
+   "seconds": 33
+  },
+  {
+   "step": "import-tuned",
+   "exit": 0,
+   "seconds": 2
+  },
+  {
+   "step": "bench-tuned",
+   "exit": 0,
+   "seconds": 70
+  },
+  {
+   "step": "qorvyx-tuned",
+   "exit": 0,
+   "seconds": 1
+  },
+  {
+   "step": "nemo-tuned",
+   "exit": 0,
+   "seconds": 215
+  },
+  {
+   "step": "delta",
+   "exit": 0,
+   "seconds": 30
+  },
+  {
+   "step": "verdict",
+   "exit": 0,
+   "seconds": 3
+  }
+ ]
+}
