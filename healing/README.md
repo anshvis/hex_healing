@@ -57,6 +57,9 @@ recordings, or `healing collect` has no audio to copy.
 | `healing sets build-general` | Builds the fixed general regression set: 300 LibriSpeech test-other and 200 AMI IHM utterances, seeded and SHA-pinned. A second run prints `unchanged`; a different set is refused. |
 | `healing eval baseline [--model <gguf>]` | Scores a model on the general set with `hex benchmark-transcription` and writes `healing/eval/baseline.json`. |
 | `healing stats paired <a.jsonl> <b.jsonl>` | Δ WER (b − a) with a paired-bootstrap 95% CI, clips as the resampling unit. Takes benchmark JSONL or `nemo_wer.py` output. |
+| `healing label corrections [--since] [--recompute]` | Aligns each edited clip's `edited_text` with `final_text`, maps edits back onto `raw_text`, and classifies them `acoustic` (sounds alike), `rewrite` or `unmapped`. Acoustic edits make `reference_text` and a `strong` label. Skips clips an OpenCode rewrite produced. |
+| `healing report observation [--json]` | Per app: pastes the lab saw, how many were observed, the `span_not_found` rate and the edited rate. |
+| `healing protocol corrections plan\|run\|score` | The seeded edit-recall protocol (X-3). `plan` writes `RUNBOOK.md`; `run` needs a person at a Mac. |
 
 ## M0 spikes
 

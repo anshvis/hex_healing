@@ -64,7 +64,31 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("--min-free", default="10GiB")
     status.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
 
+    label = commands.add_parser("label").add_subparsers(dest="command", required=True)
+    corrected = label.add_parser("corrections", help="classify recorded edits against raw_text")
+    corrected.add_argument("--since", help="3d, a date or RFC 3339")
+    corrected.add_argument("--recompute", action="store_true", help="classify every edited clip again")
+
+    report = commands.add_parser("report").add_subparsers(dest="command", required=True)
+    observation = report.add_parser("observation", help="per app: pastes observed and edited")
+    observation.add_argument("--json", action="store_true")
+
+    protocol = commands.add_parser("protocol").add_subparsers(dest="command", required=True)
+    seeded = protocol.add_parser("corrections", help="the seeded edit-recall protocol (X-3)")
+    seeded.add_argument("step", choices=["plan", "run", "score"])
+    seeded.add_argument("--dir", type=Path, default=None, help="protocol folder (default: $HEALING_HOME/protocol)")
+    seeded.add_argument("--hex", type=Path, default=None, help="path to the hex binary (run, score)")
+    seeded.add_argument("--seed", type=int, default=13)
+    seeded.add_argument("--settle", type=float, default=33.0, help="seconds to wait for Hex's 30 s watch (run)")
+    seeded.add_argument("--apps", help="comma list to run a subset (run)")
+
     args = parser.parse_args(argv)
+    if args.group == "label":
+        return _label(args)
+    if args.group == "report":
+        return _report(args)
+    if args.group == "protocol":
+        return _protocol(args)
     if args.group == "schedule":
         return _schedule(args)
     if args.group == "status":
@@ -88,6 +112,65 @@ def main(argv: list[str] | None = None) -> int:
     if args.group == "eval":
         return _baseline(args)
     return _paired(args)
+
+
+def _label(args) -> int:
+    from healing.collect import CollectError, check_since, since_to_ms
+    from healing.corrections import label_corrections
+    from healing.store import Store, StoreError, now_ms, process_lock
+
+    try:
+        since_ms = None
+        if args.since:
+            check_since(args.since)
+            since_ms = since_to_ms(args.since, now_ms())
+            if since_ms is None:
+                raise CollectError(f"cannot read --since {args.since!r}", 2)
+        with process_lock():
+            store = Store()
+            try:
+                counts = label_corrections(store, since_ms, args.recompute)
+            finally:
+                store.close()
+    except CollectError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return error.code
+    except StoreError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    kinds = " ".join(f"{k} {counts[k]}" for k in ("acoustic", "rewrite", "unmapped"))
+    print(f"clips {counts['clips']}, {kinds}, strong {counts['strong']}, "
+          f"strong_without_audio {counts['strong_without_audio']}")
+    return 0
+
+
+def _report(args) -> int:
+    from healing.corrections import observation_report
+    from healing.store import Store, StoreError
+
+    try:
+        store = Store(sweep=False)
+        try:
+            rows = observation_report(store)
+        finally:
+            store.close()
+    except StoreError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    print(f"{'application':<24}{'pastes':>8}{'observed':>10}{'span_not_found':>16}{'edited':>9}")
+    for r in rows:
+        print(f"{r['application']:<24}{r['pastes']:>8}{r['observed']:>10}"
+              f"{r['span_not_found_rate']:>15.0%} {r['edited_rate']:>8.0%}")
+    return 0
+
+
+def _protocol(args) -> int:
+    from healing import protocol
+
+    return protocol.main(args)
 
 
 def _schedule(args) -> int:
