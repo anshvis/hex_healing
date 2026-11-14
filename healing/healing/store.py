@@ -142,7 +142,7 @@ def _owner_dir(path: Path) -> None:
 
 
 class Store:
-    def __init__(self, root: Path | None = None):
+    def __init__(self, root: Path | None = None, sweep: bool = True):
         self.root = root or dataset_root()
         _owner_dir(self.root)
         _owner_dir(self.root / "audio")
@@ -153,7 +153,8 @@ class Store:
         if fresh:
             os.chmod(database, 0o600)
         self._migrate()
-        self.sweep_temporaries()
+        if sweep:
+            self.sweep_temporaries()
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]

@@ -1,7 +1,8 @@
 """`healing schedule install|remove|show`: the user launchd job that runs collection.
 
-The job runs `healing schedule run` (collect, then prune) every 6 hours and at load; launchd
-runs a missed interval on wake. Absolute paths are stored at install because launchd's PATH has
+The job runs `healing schedule run` (collect, then prune) at hours 0, 6, 12 and 18 and at load.
+StartCalendarInterval is used because launchd runs a firing missed during sleep on wake, while
+StartInterval skips it. Absolute paths are stored at install because launchd's PATH has
 neither `healing` nor `hex`. The log holds counts only: collect and prune print no text (G-4).
 """
 
@@ -19,7 +20,7 @@ from healing.eval.bench import BenchError, hex_binary
 from healing.paths import healing_home
 
 LABEL = "com.hex-healing.collect"
-INTERVAL_S = 6 * 3600
+HOURS = (0, 6, 12, 18)
 TEMPLATE = Path(__file__).resolve().parents[1] / "launchd" / f"{LABEL}.plist.tmpl"
 
 
@@ -64,7 +65,11 @@ def render(command: list[str], hex_path: Path, home: Path, log: Path) -> str:
         arguments=arguments,
         home=escape(str(home)),
         hex=escape(str(hex_path)),
-        interval=INTERVAL_S,
+        calendar="\n".join(
+            f"        <dict><key>Hour</key><integer>{hour}</integer>"
+            "<key>Minute</key><integer>0</integer></dict>"
+            for hour in HOURS
+        ),
         log=escape(str(log)),
     )
 
@@ -117,7 +122,11 @@ def run_once() -> int:
     from healing.collect import main_collect
     from healing.store import Store, StoreError, process_lock
 
-    code = main_collect(None, None)
+    try:
+        code = main_collect(None, None)
+    except Exception as error:  # type name only: a message could carry transcript text (G-4)
+        print(f"error: collect failed ({type(error).__name__})", file=sys.stderr)
+        code = 1
     try:
         with process_lock():
             store = Store()

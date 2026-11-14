@@ -34,7 +34,9 @@ def test_plist_renders_absolute_paths(world):
     target = schedule.install(world.hex, world.agents)
     document = plistlib.loads(target.read_bytes())
     assert document["Label"] == schedule.LABEL
-    assert document["StartInterval"] == 21_600 and document["RunAtLoad"] is True
+    assert document["RunAtLoad"] is True
+    assert "StartInterval" not in document  # a sleeping Mac skips StartInterval firings
+    assert [d["Hour"] for d in document["StartCalendarInterval"]] == [0, 6, 12, 18]
     assert document["ProgramArguments"][-2:] == ["schedule", "run"]
     assert os.path.isabs(document["ProgramArguments"][0])
     assert document["EnvironmentVariables"]["HEX_BIN"] == str(world.hex.resolve())
@@ -60,3 +62,28 @@ def test_remove_deletes_and_is_idempotent(world):
 def test_install_refuses_missing_hex(world, tmp_path):
     with pytest.raises(schedule.ScheduleError):
         schedule.install(tmp_path / "nope", world.agents)
+
+
+def test_run_once_survives_unexpected_collect_error(monkeypatch, capsys):
+    from healing import budget, collect
+
+    monkeypatch.setattr(collect, "main_collect", lambda *_: (_ for _ in ()).throw(ValueError("SECRET TRANSCRIPT TEXT")))
+    pruned = []
+
+    class Fake:
+        def summary(self):
+            return "pruned"
+
+    class FakeStore:
+        def close(self):
+            pass
+
+    import contextlib
+    from healing import store
+
+    monkeypatch.setattr(store, "Store", lambda *a, **k: FakeStore())
+    monkeypatch.setattr(store, "process_lock", contextlib.nullcontext)
+    monkeypatch.setattr(budget, "prune", lambda s: pruned.append(1) or Fake())
+    assert schedule.run_once() == 1
+    seen = capsys.readouterr()
+    assert pruned and "SECRET" not in seen.out + seen.err and "ValueError" in seen.err

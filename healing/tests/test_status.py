@@ -132,3 +132,17 @@ def test_json_shape_and_list(world, capsys):
     assert main(["status", "--list"]) == 0
     listed = capsys.readouterr().out
     assert all(code in listed for code in WARNINGS) 
+
+
+def test_status_does_not_sweep_temporaries(tmp_path, monkeypatch):
+    from healing.store import Store
+
+    monkeypatch.setenv("HEALING_HOME", str(tmp_path / "h"))
+    Store().close()
+    leftover = tmp_path / "h" / "dataset" / "audio" / "ab" / "x.flac.tmp"
+    leftover.parent.mkdir(parents=True, exist_ok=True)
+    leftover.write_bytes(b"x")
+    Store(sweep=False).close()
+    assert leftover.exists()
+    Store().close()
+    assert not leftover.exists()

@@ -111,7 +111,7 @@ def _status(args) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
     try:
-        store = Store()
+        store = Store(sweep=False)  # status is a read: never delete a running collect's temp files
         try:
             result = status_module.compute(store, binary, budget)
         finally:
