@@ -17,12 +17,13 @@
       "reference_words": 5376
     }
   },
-  "median_rtf": 0.018127627723307803,
-  "load_ms": 119.014166,
+  "median_rtf": 0.01807837693248561,
+  "load_ms": 68.757583,
   "hex_binary": "/Applications/Hex.app/Contents/MacOS/hex",
   "hex_version": "hex 3.4.0",
+  "hex_binary_sha256": "33557a93fa33257cf95e83bf50adf7df5e0668b325533b4ca1c4143d1d78cfda",
   "hex_sha": null,
-  "repo_sha": "8847b4f9e751482035427a05df0122b2e2d142e7",
+  "repo_sha": "d7fc20624c369c8410f021e86ae5adb845496fa0",
   "command": "/Applications/Hex.app/Contents/MacOS/hex benchmark-transcription '/Users/anshviswanathan/Library/Application Support/hex-healing/sets/general/manifest.json' --model '/Users/anshviswanathan/Library/Application Support/hex/models/parakeet-unified-en-0.6b-Q8_0.gguf' --runs 1 --warmups 1",
-  "measured_at": "2026-11-14T08:44:25+00:00"
+  "measured_at": "2026-11-14T09:01:02+00:00"
 }
