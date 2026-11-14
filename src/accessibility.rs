@@ -5,6 +5,11 @@ use std::time::{Duration, Instant};
 
 use crate::dictation::caret_text::{Keep, bounded_units};
 
+mod watch;
+pub use watch::{
+    Notification, Observer, ReadError, read_value_bounded, return_down, run_loop_once,
+};
+
 type CfTypeRef = *const c_void;
 type CfStringRef = *const c_void;
 type AxUiElementRef = *const c_void;
@@ -513,8 +518,6 @@ fn parameterized_string(element: &CfObject, range: CfRange) -> Option<CfObject> 
 /// read that found it so the correction watcher can read its value later.
 /// It holds one retain and releases it exactly once when dropped, on every
 /// path (a dropped queue item, a lab turned off, a quit).
-// The watcher that reads it lands with T2.2.
-#[allow(dead_code)]
 pub struct RetainedElement(CfObject);
 
 // SAFETY: the wrapped `AXUIElementRef` is a Core Foundation object. CFRetain

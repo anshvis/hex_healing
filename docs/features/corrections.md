@@ -22,7 +22,24 @@ Dictation pasted, History entry recorded                // corrections.watch
 └── Never logged -> any text; logs carry counts, durations and outcome IDs only
 ```
 
+Watch rules (`dictation/correction_watch`, constants in `session.rs` and
+`worker.rs`): a value change is read at once, then at most once a second, at
+most 30 times per target, plus one closing read on focus-out (ignored in the
+first 300 ms), Return (a key-state poll every 50 ms, no event tap), or 30 s.
+The kept read is the last one in which the field still held the pasted text,
+so a chat field cleared by send still yields the edit. A read is the whole
+value up to 8,192 characters, else 8,192 around the caret. The gate (lab and
+managed lock) is checked before every read, and Hex's own pid is never
+observed. Outcome IDs: `unchanged`, `edited`, and the lost reasons
+`element_gone`, `secure`, `too_large`, `span_not_found`, `read_timeout`,
+`cleared_before_read`; triggers: `value_changed`, `focus_out`, `return`,
+`timeout`. The log line carries those IDs, a character count and milliseconds
+only. Alignment (`locate.rs`) treats a one-letter-off word of three or more
+letters as a near match, so "Kip" to "Kit" aligns even alone; it cannot tell a
+pasted text pasted twice apart while one copy is intact. Proof so far: unit
+tests only; no live AX run (needs T2.3's History field).
+
 Outcome IDs and proof limits are recorded beside the implementation as it
-lands (T2.2 reads, T2.3 keeps). Each bound above must match those constants;
+lands (T2.3 keeps). Each bound above must match those constants;
 a change to either updates this file in the same commit. A managed lock is
 listed under [Managed feature locks](README.md#managed-feature-locks-macos).

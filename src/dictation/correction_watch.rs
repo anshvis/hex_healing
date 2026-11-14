@@ -17,12 +17,19 @@ use std::time::Instant;
 use crate::accessibility::{self, RetainedElement};
 use crate::policy::{Lock, Policy};
 
+mod locate;
+mod session;
+mod worker;
+
+#[allow(unused_imports)]
+pub use session::{CorrectionObservation, Lost, Outcome, Trigger};
+#[allow(unused_imports)]
+pub use worker::{Sink, set_sink};
+
 /// Targets waiting for the watcher. A full queue drops the oldest.
 pub const QUEUE_CAPACITY: usize = 8;
 
 /// A pasted dictation and where it landed. Dropping it releases the element.
-// The watcher that reads these fields lands with the timer.
-#[allow(dead_code)]
 pub struct PasteTarget {
     /// The process the text was pasted into.
     pub pid: i32,
@@ -110,6 +117,22 @@ impl Queue {
         dropped
     }
 
+    /// The oldest waiting target.
+    fn take(&self) -> Option<PasteTarget> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop_front()
+    }
+
+    /// Drops every waiting target, releasing their elements.
+    fn clear(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.0
@@ -135,6 +158,7 @@ fn submit_to(allowed: bool, queue: &Queue, target: PasteTarget) {
     if dropped > 0 {
         tracing::debug!(dropped, "correction watch dropped");
     }
+    worker::wake();
 }
 
 #[cfg(test)]
