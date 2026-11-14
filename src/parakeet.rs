@@ -120,6 +120,8 @@ struct InferenceJob {
     return_to: Option<i32>,
     /// The language the model was asked for at submission.
     language: String,
+    /// The selection the job ran, read at submission (History's `model_id`).
+    selection: TranscriptionSelection,
     /// The clip, kept for History while Labs › Keep recordings is on.
     recording: Option<crate::history::Recording>,
     /// See [`JobTimings::held_ms`].
@@ -136,6 +138,7 @@ struct ProcessorJob {
     context: ContextSnapshot,
     return_to: Option<i32>,
     language: String,
+    selection: TranscriptionSelection,
     timings: JobTimings,
     recording: Option<crate::history::Recording>,
 }
@@ -171,6 +174,8 @@ struct CompletedTranscript {
     timings: JobTimings,
     processing: Option<ProcessingObservation>,
     recording: Option<crate::history::Recording>,
+    /// The selection the job ran, for History's `model_id`.
+    selection: TranscriptionSelection,
 }
 
 enum OutputJob {
@@ -442,6 +447,7 @@ impl DictationWorker {
         });
         let (_, selection) = crate::app_settings::transcription_selection();
         let language = selection.language.clone();
+        let job_selection = selection.clone();
         let submitted_at = Instant::now();
         let audio_ms = clip.duration_ms();
         // Labs › YOLO mode: only a shortcut dictation's processed
@@ -488,6 +494,7 @@ impl DictationWorker {
             context,
             return_to,
             language,
+            selection: job_selection,
             recording,
             held_ms,
             send_gate,
@@ -677,6 +684,7 @@ fn run_processor_worker(
                     timings: job.timings,
                     processing: processed.observation,
                     recording: job.recording,
+                    selection: job.selection,
                 })),
             })
             .is_err()
@@ -884,6 +892,7 @@ fn run_inference_worker(
                         context: job.context,
                         return_to: job.return_to,
                         language: job.language,
+                        selection: job.selection,
                         timings,
                         recording: job.recording,
                     })
@@ -904,6 +913,7 @@ fn run_inference_worker(
                     timings,
                     processing: None,
                     recording,
+                    selection: job.selection,
                 });
                 if output
                     .send(OutputJob::Completed {
@@ -1219,6 +1229,7 @@ fn record_history(
         TranscriptionTarget::Print | TranscriptionTarget::RawPrint => HistoryKind::Printed,
         TranscriptionTarget::Service => return,
     };
+    let (model, model_id) = crate::history::model_fields(&completed.selection);
     let draft = HistoryDraft {
         kind,
         raw_text: completed.raw.clone(),
@@ -1229,7 +1240,8 @@ fn record_history(
         inference_ms: completed.timings.inference_ms as u64,
         total_ms: completed.timings.total_started.elapsed().as_millis() as u64,
         recording: completed.recording.take(),
-        model: crate::history::dictation_model(),
+        model,
+        model_id,
     };
     if let Err(error) = history.record(draft) {
         tracing::warn!(%error, "could not record dictation history");
@@ -1496,6 +1508,7 @@ mod tests {
             context: ContextSnapshot::default(),
             return_to: None,
             language: "en".into(),
+            selection: Default::default(),
             timings: JobTimings {
                 total_started: Instant::now(),
                 queue_ms: 0,
@@ -1632,6 +1645,7 @@ mod tests {
                     },
                     processing: None,
                     recording: None,
+                    selection: Default::default(),
                 })),
             },
             &mut |_, _| Err(eyre!("clipboard changed while Hex was preserving it")),
@@ -1690,6 +1704,7 @@ mod tests {
                         },
                         processing: None,
                         recording: None,
+                        selection: Default::default(),
                     })),
                 },
                 &mut |pasted_text, mode| {
@@ -1780,6 +1795,7 @@ mod tests {
                 },
                 processing: None,
                 recording: None,
+                selection: Default::default(),
             };
             record_history(&history, TranscriptionTarget::Paste, sent, &mut completed);
         }

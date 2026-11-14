@@ -81,6 +81,7 @@ impl ActivityPane {
                     profile: "Chat".into(),
                     latency_ms: 910,
                     fallback: None,
+                    rewrote: true,
                 }),
                 reason: None,
             },

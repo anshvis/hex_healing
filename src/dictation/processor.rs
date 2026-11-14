@@ -815,6 +815,7 @@ fn generate_observed(
     let observation = ProcessingObservation {
         profile: profile_name.into(),
         latency_ms: started.elapsed().as_millis() as u64,
+        rewrote: text.is_some(),
         fallback,
     };
     (text, observation)
@@ -1158,6 +1159,7 @@ impl Processed {
                 profile: "Custom transformations".into(),
                 latency_ms: 0,
                 fallback: None,
+                rewrote: false,
             });
         observation.latency_ms = observation
             .latency_ms
@@ -2137,6 +2139,50 @@ mod tests {
         );
         assert_eq!(processed.text, "one two three four five");
         assert!(processed.observation.is_none());
+    }
+
+    #[test]
+    fn rewrote_set_only_by_opencode_rewrite() {
+        let client = crate::personal_commands::TransformationClient::default();
+        let run = |observation: Option<ProcessingObservation>| {
+            let mut processed = Processed {
+                text: "as heard".into(),
+                nothing: false,
+                observation,
+                transformations: vec!["not-registered".into()],
+            };
+            processed.apply_transformations(
+                &client,
+                &context("Zed", None),
+                &AtomicBool::new(false),
+                Source::Dictation,
+            );
+            processed.observation.unwrap()
+        };
+        // Transformations alone make an observation, but no rewrite.
+        let alone = run(None);
+        assert!(alone.fallback.is_some(), "the transformation fails here");
+        assert!(!alone.rewrote);
+        // A rewrite followed by a failed transformation is still a rewrite.
+        let after = run(Some(ProcessingObservation {
+            profile: "Chat".into(),
+            latency_ms: 5,
+            fallback: None,
+            rewrote: true,
+        }));
+        assert!(after.fallback.is_some());
+        assert!(after.rewrote);
+        // A rewrite that failed or came back empty used no rewritten text.
+        let (text, observation) = generate_observed(
+            "x",
+            None,
+            Duration::from_millis(1),
+            &AtomicBool::new(true),
+            "Chat",
+            Instant::now(),
+        );
+        assert!(text.is_none());
+        assert!(!observation.rewrote);
     }
 
     #[test]

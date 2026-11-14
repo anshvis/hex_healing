@@ -136,6 +136,10 @@ pub struct HistoryEntry {
     /// The speech model that made the text, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The stable selection id of the model that ran the job (the catalog
+    /// id, or `custom-<16hex>` for an import); absent on older entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
     /// The language chosen for the run that made the text; `None` when the
     /// model or the saved setting chose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,20 +216,23 @@ pub struct HistoryDraft {
     pub total_ms: u64,
     /// The dictation's audio, while Labs › Keep recordings is on.
     pub recording: Option<Recording>,
-    /// The speech model that transcribed it ([`dictation_model`]).
+    /// The speech model's display name ([`model_fields`]).
     pub model: Option<String>,
+    /// The stable id of the model the job ran ([`model_fields`]).
+    pub model_id: Option<String>,
 }
 
-/// The name of the speech model dictation runs: the one the engine holds,
-/// else the saved one (Apple Speech, which the engine never holds).
-pub fn dictation_model() -> Option<String> {
-    let selection = crate::transcription::engine::TranscriptionEngine::shared()
-        .and_then(|engine| engine.held_selection())
-        .unwrap_or_else(|| crate::app_settings::transcription_selection().1);
-    Some(
-        crate::transcription::models::definition(selection.model)
-            .name
-            .to_string(),
+/// A job's History model fields (display name, stable id) from its selection.
+pub fn model_fields(
+    selection: &crate::transcription::models::TranscriptionSelection,
+) -> (Option<String>, Option<String>) {
+    (
+        Some(
+            crate::transcription::models::definition(selection.model)
+                .name
+                .to_string(),
+        ),
+        Some(selection.model.as_str().to_string()),
     )
 }
 
@@ -422,12 +429,16 @@ impl HistoryStore {
                 fallback: processing
                     .fallback
                     .map(|fallback| truncated(&fallback, MAX_FALLBACK_BYTES)),
+                rewrote: processing.rewrote,
             }),
             audio_ms: draft.audio_ms,
             inference_ms: draft.inference_ms,
             total_ms: draft.total_ms,
             recording_bytes,
             model: draft.model.map(|model| truncated(&model, MAX_LABEL_BYTES)),
+            model_id: draft
+                .model_id
+                .map(|model_id| truncated(&model_id, MAX_LABEL_BYTES)),
             language: None,
             text_ms: None,
             versions: Vec::new(),
@@ -871,12 +882,14 @@ mod tests {
                 profile: "Messages".into(),
                 latency_ms: 120,
                 fallback: None,
+                rewrote: false,
             }),
             audio_ms: 900,
             inference_ms: 80,
             total_ms: 1_100,
             recording: None,
             model: None,
+            model_id: None,
         }
     }
 
@@ -1207,6 +1220,34 @@ mod tests {
             .map(|entry| entry.final_text.as_str())
             .collect();
         assert_eq!(texts, ["third", "first"]);
+    }
+
+    #[test]
+    fn model_id_persisted_and_loaded() {
+        let path = temp_path("model-id");
+        let mut store = HistoryStore::open(path.clone(), HistoryRetention::Week, 1_000);
+        let mut with = draft("with id");
+        with.model_id = Some("parakeet_v3".into());
+        store.record(with, 1_000).unwrap();
+        let reopened = HistoryStore::open(path, HistoryRetention::Week, 1_500);
+        let entry = reopened.entries().next().unwrap();
+        assert_eq!(entry.model_id.as_deref(), Some("parakeet_v3"));
+    }
+
+    #[test]
+    fn loads_entry_without_model_id() {
+        let json =
+            r#"{"id":1,"timestamp_ms":5,"kind":"dictation","raw_text":"a","final_text":"a"}"#;
+        let entry: HistoryEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.model_id.is_none());
+        assert!(
+            !serde_json::to_string(&entry).unwrap().contains("model_id"),
+            "an absent id is never written"
+        );
+        assert!(entry.processing.is_none());
+        let processing: HistoryProcessing =
+            serde_json::from_str(r#"{"profile":"p","latency_ms":1}"#).unwrap();
+        assert!(!processing.rewrote);
     }
 
     #[test]

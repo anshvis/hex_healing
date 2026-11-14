@@ -282,6 +282,7 @@ impl HistoryPane {
                     total_ms: 640,
                     recording_bytes: 0,
                     model: Some("Parakeet v3".into()),
+                    model_id: None,
                     language: None,
                     text_ms: None,
                     versions: Vec::new(),
@@ -299,6 +300,7 @@ impl HistoryPane {
             profile: "Chat".into(),
             latency_ms: 910,
             fallback: None,
+            rewrote: true,
         });
         Self {
             entries: vec![

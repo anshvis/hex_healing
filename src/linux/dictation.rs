@@ -47,6 +47,9 @@ struct Job {
     audio_ms: u64,
     /// The language the model was asked for at submission.
     language: String,
+    /// The model selection the job ran, read once at submission (History's
+    /// `model_id`), never at record time.
+    selection: crate::transcription::models::TranscriptionSelection,
     /// The clip, kept for History while Labs › Keep recordings is on.
     recording: Option<crate::history::Recording>,
     /// `hex dictation stop --print`: the text goes here, never pasted.
@@ -301,6 +304,7 @@ pub(crate) fn run(
                         text,
                         job.flavour,
                         &job.language,
+                        &job.selection,
                         None,
                         &mut last_dictation,
                         job.audio_ms,
@@ -324,6 +328,7 @@ pub(crate) fn run(
                     text,
                     job.flavour,
                     &job.language,
+                    &job.selection,
                     Some(&mut paste),
                     &mut last_dictation,
                     job.audio_ms,
@@ -1296,16 +1301,17 @@ fn submit_capture(
                 (by_shortcut && !flavour.raw() && print.is_none()).then(|| clip.held_ms());
             let stream = clip.take_stream();
             let samples = clip.into_transcription_samples();
-            let language = engine
+            let selection = engine
                 .held_selection()
-                .unwrap_or_else(|| crate::app_settings::transcription_selection().1)
-                .language;
+                .unwrap_or_else(|| crate::app_settings::transcription_selection().1);
+            let language = selection.language.clone();
             let recording = crate::history::Recording::keep(&samples);
             let job = OutputJob::Dictation(Box::new(Job {
                 transcript: engine.finish(stream, samples)?,
                 context,
                 audio_ms,
                 language,
+                selection,
                 recording,
                 print,
                 flavour,
@@ -1902,6 +1908,7 @@ mod tests {
             text.to_string(),
             crate::dictation::DictationFlavour::Normal,
             "en",
+            &Default::default(),
             Some(&mut paste),
             &mut last_dictation,
             2_000,

@@ -139,6 +139,10 @@ pub struct DictationProcessing {
     pub latency_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<String>,
+    /// An OpenCode rewrite produced the text that was used. Set only where
+    /// the rewrite's output was taken, and never cleared by a later step.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rewrote: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -654,6 +658,7 @@ mod tests {
                 profile: "slack".into(),
                 latency_ms: 321,
                 fallback: Some("deadline exceeded".into()),
+                rewrote: false,
             }),
             reason: None,
         };
@@ -668,6 +673,7 @@ mod tests {
                     profile,
                     latency_ms: 321,
                     fallback: Some(fallback),
+                    ..
                 }),
                 ..
             } if profile == "slack" && fallback == "deadline exceeded"

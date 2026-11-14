@@ -182,6 +182,19 @@ struct HistoryRow<'a> {
     /// still beside the store.
     #[serde(skip_serializing_if = "Option::is_none")]
     recording: Option<String>,
+    /// The stable id of the model that ran the job; absent on older entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_id: Option<&'a str>,
+    /// The clip's length; omitted when unknown (0).
+    #[serde(skip_serializing_if = "is_zero")]
+    audio_ms: u64,
+    /// An OpenCode rewrite produced `final_text`; omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    rewritten: bool,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Serialize)]
@@ -251,6 +264,9 @@ fn history_output<'a>(
             recording: recordings
                 .and_then(|recordings| recordings::saved(recordings, entry))
                 .map(|path| path.to_string_lossy().into_owned()),
+            model_id: entry.model_id.as_deref(),
+            audio_ms: entry.audio_ms,
+            rewritten: entry.processing.as_ref().is_some_and(|p| p.rewrote),
         })
         .collect();
     Ok(HistoryOutput {
