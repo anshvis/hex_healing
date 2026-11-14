@@ -207,16 +207,30 @@ def _refresh_clusters(store: Store) -> None:
         )
 
 
-def _unlink_inside(root, path) -> None:
-    """Delete only a regular file whose real parent is inside `root` (G-6: never through a link)."""
+def real_file_under(home, path) -> bool:
+    """True when `path` is a regular file and every component from `home` down is a real directory
+    (checked with lstat, never resolved), so a link at any level is refused (G-6)."""
     import stat as _stat
 
     try:
-        info = path.lstat()
-        if _stat.S_ISREG(info.st_mode) and path.parent.resolve().is_relative_to(root.resolve()):
+        relative = path.relative_to(home)
+        current = home
+        for part in relative.parts[:-1]:
+            current = current / part
+            if not _stat.S_ISDIR(current.lstat().st_mode):
+                return False
+        return _stat.S_ISREG(path.lstat().st_mode)
+    except (OSError, ValueError):
+        return False
+
+
+def _unlink_inside(home, path) -> None:
+    """Delete only a regular file reached through real directories under `home` (G-6)."""
+    if real_file_under(home, path):
+        try:
             path.unlink()
-    except OSError:
-        pass
+        except OSError:
+            pass
 
 
 def prune(
@@ -305,7 +319,7 @@ def prune(
         return result
     store.db.commit()
     for row in store.db.execute("SELECT path FROM audio WHERE evicted_at_ms IS NOT NULL").fetchall():
-        _unlink_inside(store.root, store.root / row["path"])
+        _unlink_inside(store.root.parent, store.root / row["path"])
     if result.over_by:
         raise PruneError(
             f"still over the budget by {result.over_by} bytes: what is left is protected or "

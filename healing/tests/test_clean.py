@@ -380,8 +380,58 @@ def test_floor_shortfall_larger_than_weak_audio_evicts_all_weak(store, home):
     assert all(row(store, s)["evicted_at_ms"] is None for s in strong)
 
 
-def test_cli_dry_run_keeps_fresh_temp(store, home):
-    tmp = store.root / "audio" / "x.flac.tmp"
+def _shard_temp(store, name="x.flac.tmp", hours=0):
+    shard = store.root / "audio" / "ab"
+    shard.mkdir(parents=True, exist_ok=True)
+    tmp = shard / name
     tmp.write_bytes(b"x")
+    if hours:
+        age(tmp, hours)
+    return tmp
+
+
+def test_cli_dry_run_keeps_fresh_temp(store, home):
+    tmp = _shard_temp(store)
+    store.close()
     assert main(["clean", "--dry-run", "--min-free", "0"]) == 0
     assert tmp.exists()
+
+
+def test_cli_dry_run_lists_but_keeps_old_temp(store, home, capsys):
+    tmp = _shard_temp(store, hours=2)
+    store.close()
+    assert main(["clean", "--dry-run", "--min-free", "0"]) == 0
+    assert tmp.exists()
+    assert "remove temp" in capsys.readouterr().out
+
+
+def test_linked_dataset_changes_nothing(tmp_path, home):
+    store = Store()
+    pcm = add(store, 1)
+    store.close()
+    external = tmp_path / "external"
+    (home / "dataset").rename(external)
+    os.symlink(external, home / "dataset")
+    before = sorted(str(p) for p in external.rglob("*"))
+    store = Store(sweep=False)
+    with pytest.raises(CleanError):
+        clean(store, 0)
+    from healing.budget import prune
+
+    prune(store, 10**12)
+    store.close()
+    assert sorted(str(p) for p in external.rglob("*")) == before
+    assert (external / "audio" / pcm.sha256[:2] / f"{pcm.sha256}.flac").exists()
+
+
+def test_linked_audio_dir_changes_nothing(tmp_path, store, home):
+    out = tmp_path / "out"
+    (out / "ab").mkdir(parents=True)
+    victim = out / "ab" / "x.flac"
+    victim.write_bytes(b"x")
+    (store.root / "audio").rmdir()
+    os.symlink(out, store.root / "audio")
+    with pytest.raises(CleanError):
+        clean(store, 0)
+    assert victim.exists()
+    assert not (home / "quarantine").exists()

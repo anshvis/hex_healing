@@ -19,7 +19,7 @@ from typing import Callable
 
 import soundfile
 
-from healing.budget import PruneError, prune
+from healing.budget import PruneError, prune, real_file_under
 from healing.paths import healing_home
 from healing.store import Store, now_ms
 
@@ -82,14 +82,6 @@ def _is_regular(info: os.stat_result | None) -> bool:
     return info is not None and stat.S_ISREG(info.st_mode)
 
 
-def _inside(home: Path, path: Path) -> bool:
-    """True when `path`, with its parent links resolved, is inside `home` (the file itself is not)."""
-    try:
-        return path.parent.resolve().is_relative_to(home.resolve())
-    except OSError:
-        return False
-
-
 def _tree_bytes(path: Path) -> int:
     total = 0
     for folder, _dirs, names in os.walk(path, followlinks=False):
@@ -112,7 +104,7 @@ def _orphans(store: Store) -> list[Path]:
     known = {row["path"] for row in store.db.execute("SELECT path FROM audio")}
     found = []
     audio = store.root / "audio"
-    for shard in sorted(audio.iterdir()) if audio.is_dir() else []:
+    for shard in sorted(audio.iterdir()) if _real_dir(audio) else []:
         if not stat.S_ISDIR(shard.lstat().st_mode):  # a linked shard is never entered
             continue
         for candidate in sorted(shard.glob("*.flac")):
@@ -255,7 +247,7 @@ def _check_index(store: Store, now: int, deep: bool, report: Report, dry_run: bo
     ).fetchall():
         path = store.root / row["path"]
         info = _lstat(path)
-        if not _is_regular(info) or not _inside(home, path):
+        if not real_file_under(home, path):
             report.missing_marked += 1
             report.actions.append(f"mark missing {row['sha256'][:12]}")
             if not dry_run:
@@ -292,6 +284,10 @@ def clean(
     free_fn = free_fn or (lambda: free_bytes(store.root.parent))
     home = store.root.parent
     report = Report()
+    for linked in (store.root, store.root / "audio"):  # a linked dataset or audio dir: change nothing
+        info = _lstat(linked)
+        if info is not None and not stat.S_ISDIR(info.st_mode):
+            raise CleanError(f"{linked.relative_to(home)} is a link or not a directory; refusing to clean", 1)
 
     _sweep_temp(home, now, report, dry_run)
     _check_index(store, now, deep, report, dry_run)
