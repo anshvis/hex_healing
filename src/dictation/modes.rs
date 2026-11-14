@@ -120,6 +120,7 @@ pub(crate) fn uses_page(settings: &DictationProcessingSettings) -> bool {
 }
 
 /// The history entry for one pasted dictation.
+#[allow(clippy::too_many_arguments)]
 pub fn history_draft(
     raw_text: String,
     processed: &Processed,

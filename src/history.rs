@@ -1078,6 +1078,7 @@ mod tests {
         let fixed = |text: &str| Transcript {
             text: text.into(),
             model: None,
+            model_id: None,
             language: None,
         };
         assert!(store.replace_text(id, fixed("before"), 1_500).unwrap());

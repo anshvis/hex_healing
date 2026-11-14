@@ -80,6 +80,8 @@ pub(super) struct Again {
     pub(super) id: u64,
     /// The model's name.
     pub(super) model: String,
+    /// The model's stable id.
+    model_id: String,
     /// The language chosen for the run; `None` when the model chose.
     pub(super) language: Option<String>,
     worker: Option<Receiver<Result<String, String>>>,
@@ -94,6 +96,7 @@ impl Again {
         Self {
             id,
             model: model.into(),
+            model_id: model.into(),
             language: None,
             worker: None,
             result: Some(result),
@@ -500,6 +503,7 @@ fn transcribe_again(
     ui.history.again = Some(Again {
         id,
         model: name.into(),
+        model_id: model.as_str().to_string(),
         language: language
             .filter(|language| *language != crate::transcription::models::AUTO_LANGUAGE)
             .map(str::to_owned),
@@ -547,6 +551,7 @@ fn replace(ui: &mut Ui, id: u64) {
             Some(Ok(text)) => Some(Transcript {
                 text: text.clone(),
                 model: Some(again.model.clone()),
+                model_id: Some(again.model_id.clone()),
                 language: again.language.clone(),
             }),
             _ => None,
