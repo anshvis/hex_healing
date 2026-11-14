@@ -266,3 +266,19 @@ def test_relative_hex_path_runs_that_file(world, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert main(["collect", "--hex", "./hex"]) == 0
     assert len(clips(world)) == 3
+
+
+def test_future_stamped_entry_does_not_hide_later_ones(world):
+    now = int(__import__("time").time() * 1000)
+    day = 24 * 3600 * 1000
+
+    def entry(i, ts):
+        return {"id": i, "timestamp_ms": ts, "kind": "dictation", "final_text": f"t{i}", "raw_text": f"t{i}"}
+
+    world.doc["entries"] = [entry(1, now + 5 * day)]
+    world.save()
+    world.run()
+    world.doc["entries"].append(entry(2, now))
+    world.save()
+    world.run()
+    assert sorted(r["hex_id"] for r in clips(world)) == [1, 2]

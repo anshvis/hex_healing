@@ -137,7 +137,8 @@ def collect(store: Store, binary: Path, since: str | None = None) -> Summary:
     started = now_ms()
     if since is None:
         newest = store.db.execute("SELECT MAX(timestamp_ms) FROM clips").fetchone()[0]
-        since = rfc3339(max(newest - RESCAN_MS, 0)) if newest is not None else None
+        # Bound by this run's clock too: an entry stamped in the future must not hide later ones.
+        since = rfc3339(max(min(newest, started) - RESCAN_MS, 0)) if newest is not None else None
     run = store.db.execute(
         "INSERT INTO runs (started_at_ms, since_ms) VALUES (?, ?)", (started, since_to_ms(since, started))
     ).lastrowid
