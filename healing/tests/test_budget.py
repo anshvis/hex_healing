@@ -246,3 +246,50 @@ def test_parse_size():
     assert parse_size("5GiB") == 5 * 1024**3
     assert parse_size("10") == 10
     assert parse_size("2k") == 2048
+
+
+def test_shared_with_singleton_is_judged_unique_under_budget_pressure(store):
+    pcm = tone(1, 300)
+    store.write_audio(pcm)
+    unique = "a completely unique sentence about gardening tomatoes"
+    for n, text in ((1, PHRASE), (50, unique)):
+        store.db.execute(
+            "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text,"
+            " audio_sha256, label, golden, audio_ms, collected_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (clip_id(1, n), n, 1, NOW - 60 * DAY + n, "dictation", text, text, pcm.sha256, "weak", 0, 1000, NOW),
+        )
+    store.db.commit()
+    add(store, 10, PHRASE, 700)
+    add(store, 11, PHRASE, 1500)
+    size = store.db.execute("SELECT MAX(bytes) FROM audio").fetchone()[0]
+    prune(store, budget=2 * size, k=3, now=NOW)
+    assert clip_id(1, 50) in live(store)
+
+
+def test_emptied_representative_is_not_clustered(store):
+    ids = [add(store, i, PHRASE, 200 + 400 * i) for i in range(4)]
+    prune(store, k=3, now=NOW)
+    store.db.execute("UPDATE clips SET raw_text = '' WHERE clip_id = ?", (ids[0],))
+    store.db.commit()
+    prune(store, k=1, now=NOW)
+    assert ids[0] in live(store)
+    assert store.db.execute("SELECT cluster_id FROM clips WHERE clip_id = ?", (ids[0],)).fetchone()[0] is None
+
+
+def test_prune_at_20k_rows_is_fast(store):
+    rows = [
+        (clip_id(1, n), n, 1, NOW - 30 * DAY + n, "dictation", f"sentence {n} word{n % 97}", "x",
+         f"{n:064x}", "weak", 0, 1000, NOW)
+        for n in range(20_000)
+    ]
+    store.db.executemany(
+        "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text,"
+        " audio_sha256, label, golden, audio_ms, collected_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    store.db.executemany(
+        "INSERT INTO audio (sha256, path, bytes, samples) VALUES (?,?,?,?)",
+        [(r[7], f"audio/missing/{r[7]}.flac", 100, 16000) for r in rows])
+    store.db.commit()
+    import time
+    t = time.time()
+    prune(store, budget=10**12, k=3, now=NOW, dry_run=True)
+    assert time.time() - t < 20

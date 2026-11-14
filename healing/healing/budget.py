@@ -41,7 +41,7 @@ class Unit:
     timestamp_ms: int
     cluster_id: str | None
     protected: bool
-    redundancy: float = 0.0
+    redundancy: float | None = None  # min over its clusters; None until a cluster judges it
     cluster_ids: set[str] = field(default_factory=set)
 
 
@@ -131,6 +131,8 @@ def _release_stale(store: Store) -> None:
                 "UPDATE clusters SET norm_text = ? WHERE cluster_id = ? AND norm_text != ?",
                 (fresh, row["cluster_id"], fresh),
             )
+        else:  # emptied text belongs to no cluster; the clusters row stays as a key
+            store.db.execute("UPDATE clips SET cluster_id = NULL WHERE clip_id = ?", (row["cluster_id"],))
     texts = {r["cluster_id"]: r["norm_text"] for r in store.db.execute("SELECT * FROM clusters")}
     for row in store.db.execute(
         "SELECT clip_id, cluster_id, raw_text FROM clips WHERE cluster_id IS NOT NULL"
@@ -236,6 +238,9 @@ def prune(
                 by_cluster.setdefault(cluster_id, []).append(unit)
         for cluster_id, members in sorted(by_cluster.items()):
             _spread(store, members, k, young, chosen)
+        for unit in units:
+            if unit.redundancy is None:
+                unit.redundancy = 0.0
 
         remaining = result.total_bytes - sum(u.bytes for u in units if u.sha256 in chosen)
         if remaining > budget:
@@ -299,6 +304,8 @@ def prune(
 def _spread(store: Store, members: list[Unit], k: int, young: set[str], chosen: dict[str, str]) -> None:
     """Keep k unprotected files per cluster by acoustic spread; set every member's redundancy."""
     if len(members) < 2:
+        for unit in members:
+            unit.redundancy = 0.0  # a sole member is not redundant
         return
     members.sort(key=lambda u: (u.timestamp_ms, u.newest_id))
     dist = dedupe.distances(np.array([_features(store, u) for u in members]))
@@ -318,4 +325,5 @@ def _spread(store: Store, members: list[Unit], k: int, young: set[str], chosen: 
             chosen[members[i].sha256] = "k"
     for i, unit in enumerate(members):
         others = [j for j in keep if j != i]
-        unit.redundancy = 1 / (1 + min(dist[i][j] for j in others)) if others else 0.0
+        value = 1 / (1 + min(dist[i][j] for j in others)) if others else 0.0
+        unit.redundancy = value if unit.redundancy is None else min(unit.redundancy, value)

@@ -21,7 +21,7 @@ import soundfile
 from healing.paths import healing_home
 
 SAMPLE_RATE = 16_000
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE audio (
@@ -77,7 +77,11 @@ CREATE TABLE clusters (
 CREATE INDEX clips_cluster ON clips(cluster_id);
 """
 
-MIGRATIONS = [SCHEMA, SCHEMA_V2]
+SCHEMA_V3 = """
+CREATE INDEX clips_audio ON clips(audio_sha256);
+"""
+
+MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3]
 
 
 class StoreError(Exception):
