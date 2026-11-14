@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from healing.eval.bench import BenchError, hex_binary
-from healing.store import Store, StoreError, clip_id, now_ms, read_wav
+from healing.store import Store, StoreError, process_lock, clip_id, now_ms, read_wav
 
 PAGE_LIMIT = 10_000
 BATCH = 500
@@ -252,11 +252,12 @@ def main_collect(since: str | None, hex_path: Path | None) -> int:
             raise CollectError(str(error), 2) from error
         if not Path(binary).is_file():
             raise CollectError(f"no hex at {binary}", 2)
-        store = Store()
-        try:
-            summary = collect(store, Path(binary), since)
-        finally:
-            store.close()
+        with process_lock():
+            store = Store()
+            try:
+                summary = collect(store, Path(binary), since)
+            finally:
+                store.close()
     except CollectError as error:
         print(f"error: {error}", file=sys.stderr)
         return error.code

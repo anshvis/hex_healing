@@ -6,6 +6,8 @@ Mirrors Hex's own recordings: temp file, fsync, rename, mode 0600 (directories 0
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import os
 import sqlite3
@@ -19,7 +21,7 @@ import soundfile
 from healing.paths import healing_home
 
 SAMPLE_RATE = 16_000
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE audio (
@@ -63,7 +65,19 @@ CREATE TABLE runs (
 """
 
 # Migrations run in order from the stored `user_version`; index i upgrades i -> i + 1.
-MIGRATIONS = [SCHEMA]
+SCHEMA_V2 = """
+ALTER TABLE clips ADD COLUMN redundancy REAL NOT NULL DEFAULT 0;
+CREATE TABLE clusters (
+    cluster_id TEXT PRIMARY KEY,
+    norm_text TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    audio_kept INTEGER NOT NULL,
+    last_seen_ms INTEGER NOT NULL
+);
+CREATE INDEX clips_cluster ON clips(cluster_id);
+"""
+
+MIGRATIONS = [SCHEMA, SCHEMA_V2]
 
 
 class StoreError(Exception):
@@ -72,6 +86,22 @@ class StoreError(Exception):
 
 def dataset_root() -> Path:
     return healing_home() / "dataset"
+
+
+@contextlib.contextmanager
+def process_lock():
+    """One healing writer at a time (`collect`, `prune`): `$HEALING_HOME/.lock`."""
+    home = healing_home()
+    _owner_dir(home)
+    descriptor = os.open(home / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise StoreError("another healing process is running") from error
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def now_ms() -> int:

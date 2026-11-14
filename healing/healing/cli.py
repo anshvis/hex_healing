@@ -42,7 +42,14 @@ def main(argv: list[str] | None = None) -> int:
     collect.add_argument("--since", help="3d, a date or RFC 3339 (default: last run minus 2 days)")
     collect.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
 
+    prune = commands.add_parser("prune", help="cluster clips, keep k audio each, hold the budget")
+    prune.add_argument("--budget", default="5GiB")
+    prune.add_argument("--k", type=int, default=3)
+    prune.add_argument("--dry-run", action="store_true")
+
     args = parser.parse_args(argv)
+    if args.group == "prune":
+        return _prune(args)
     if args.group == "collect":
         from healing.collect import main_collect
 
@@ -52,6 +59,35 @@ def main(argv: list[str] | None = None) -> int:
     if args.group == "eval":
         return _baseline(args)
     return _paired(args)
+
+
+def _prune(args) -> int:
+    from healing.budget import PruneError, parse_size, prune
+    from healing.store import Store, StoreError, process_lock
+
+    try:
+        budget = parse_size(args.budget)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    try:
+        with process_lock():
+            store = Store()
+            try:
+                result = prune(store, budget, args.k, args.dry_run)
+            finally:
+                store.close()
+    except PruneError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return error.code
+    except StoreError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if args.dry_run:
+        for eviction in result.evictions:
+            print(eviction)
+    print(result.summary())
+    return 0
 
 
 def _build_general(args) -> int:
