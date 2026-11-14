@@ -1,7 +1,7 @@
 //! Feature locks an organization sets through managed preferences (macOS
 //! configuration profiles) in the `anomaly.hex` domain: `DisableMeetings`,
 //! `DisableAnnotate`, `DisableOpenCodeProcessing`, `DisableTransforms`, and
-//! `DisableLabs`, plus `RestrictTransformsToLoopback`, which keeps
+//! `DisableLabs`, `DisableCorrections`, plus `RestrictTransformsToLoopback`, which keeps
 //! transformations on but holds their `fetch` to this computer and runs no
 //! programs. Only a value the profile forces counts, so a key a person
 //! wrote with `defaults write` locks nothing. Other OSes have no locks.
@@ -35,16 +35,20 @@ pub enum Lock {
     /// (after DNS, on every redirect) and no program runs
     /// (`personal_commands::script`).
     LoopbackTransforms,
+    /// No Learn from corrections: Hex reads back no text from other apps'
+    /// fields after a paste.
+    Corrections,
 }
 
 impl Lock {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Meetings,
         Self::Annotate,
         Self::OpenCodeProcessing,
         Self::Transforms,
         Self::Labs,
         Self::LoopbackTransforms,
+        Self::Corrections,
     ];
 
     /// Its key in the `anomaly.hex` managed preferences.
@@ -56,6 +60,7 @@ impl Lock {
             Self::Transforms => "DisableTransforms",
             Self::Labs => "DisableLabs",
             Self::LoopbackTransforms => "RestrictTransformsToLoopback",
+            Self::Corrections => "DisableCorrections",
         }
     }
 
@@ -74,6 +79,7 @@ impl Lock {
             Self::LoopbackTransforms => {
                 "Transformations may only reach this computer, by your organization's policy"
             }
+            Self::Corrections => "Your organisation turned off Learn from corrections.",
         }
     }
 }
@@ -178,7 +184,8 @@ impl Policy {
             // `meetings.summaries` is a choice, not a switch; see `enforce`.
             // A voice prompt is one of the OpenCode requests the lock stops.
             Lock::OpenCodeProcessing => vec![&mut settings.labs.voice_prompt],
-            Lock::Transforms | Lock::LoopbackTransforms => Vec::new(),
+            // T2.1 adds the `labs.learn_from_corrections` switch here.
+            Lock::Transforms | Lock::LoopbackTransforms | Lock::Corrections => Vec::new(),
             Lock::Labs => crate::labs::Feature::switches(settings),
         }
     }
@@ -287,9 +294,32 @@ mod tests {
                 "DisableOpenCodeProcessing",
                 "DisableTransforms",
                 "DisableLabs",
-                "RestrictTransformsToLoopback"
+                "RestrictTransformsToLoopback",
+                "DisableCorrections"
             ]
         );
+    }
+
+    #[test]
+    fn all_locks_fit_bits() {
+        let mut seen = 0u8;
+        for lock in Lock::ALL {
+            assert_eq!(seen & lock.bit(), 0, "{} shares a bit", lock.key());
+            seen |= lock.bit();
+        }
+        assert!(Lock::ALL.len() <= u8::BITS as usize);
+    }
+
+    #[test]
+    fn disable_corrections_locks_the_lab() {
+        let policy = Policy::from_forced(|key| key == "DisableCorrections");
+        assert!(policy.locks(Lock::Corrections));
+        assert!(!policy.locks(Lock::Labs));
+        assert_eq!(
+            Lock::Corrections.refusal(),
+            "Your organisation turned off Learn from corrections."
+        );
+        // T2.1 extends this with `labs_lock(Feature::LearnFromCorrections)`.
     }
 
     #[test]
