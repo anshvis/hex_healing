@@ -1,6 +1,6 @@
 """The M0 round trip's pass/fail, from the runs `roundtrip.sh` wrote.
 
-    uv run python spikes/m0/verdict.py <spike dir> <base> <transcribe.cpp> <base .nemo> <revision>
+    uv run python spikes/m0/verdict.py <spike dir> <base> <transcribe.cpp> <base .nemo> <revision> <slug>
 
 Checks (AC-2):
 - base control: NeMo base vs base Q8_0 GGUF, paired 95% CI of Δ WER ⊂ ±1.0 pt;
@@ -61,7 +61,7 @@ def recall(run_path: Path) -> float:
 
 
 def main() -> int:
-    spike, base, tcpp, base_nemo, revision = Path(sys.argv[1]), sys.argv[2], *sys.argv[3:6]
+    spike, base, tcpp, base_nemo, revision, slug = Path(sys.argv[1]), sys.argv[2], *sys.argv[3:7]
     runs = spike / "runs"
     base_ci = paired_bootstrap(read_clip_scores(runs / "nemo-base-ls.jsonl"),
                                read_clip_scores(runs / "gguf-base-ls.jsonl"))
@@ -75,7 +75,6 @@ def main() -> int:
     steps = [json.loads(line) for line in (spike / "steps.jsonl").read_text().splitlines()]
     target_base, target_tuned = recall(runs / "gguf-base-qorvyx.jsonl"), recall(runs / "gguf-tuned-qorvyx.jsonl")
     speed_ratio = tuned_run["median_rtf"] / base_run["median_rtf"]
-    slug = next((spike / "base").iterdir()).name
     imports = {
         "base": import_identity(spike, "base", spike / "base" / slug / "base-Q8_0.gguf"),
         "tuned": import_identity(spike, "tuned", spike / "tuned" / slug / "tuned-Q8_0.gguf"),
@@ -84,12 +83,18 @@ def main() -> int:
         ["git", "-C", tcpp, "rev-parse", "HEAD"], capture_output=True, text=True
     ).stdout.strip()
     built = (Path(tcpp) / "build" / ".healing-built-rev").read_text().strip()
+    clean = not subprocess.run(
+        ["git", "-C", tcpp, "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True,
+    ).stdout.strip()
 
     checks = {
         "import_base": imports["base"]["ok"],
         "import_tuned": imports["tuned"]["ok"],
         "converter_pinned": converter.startswith(os.environ.get("TRANSCRIBE_CPP_REV", "7045d1c"))
-        and built == converter,
+        and built == converter
+        and clean,
+        "every_step_ok": bool(steps) and all(step["exit"] == 0 for step in steps),
         "base_parity": -PARITY <= base_ci.ci_low and base_ci.ci_high <= PARITY,
         "tuned_parity": -PARITY <= tuned_ci.ci_low and tuned_ci.ci_high <= PARITY,
         "target_base_miss": target_base <= MISS_AT_MOST,

@@ -69,6 +69,9 @@ checkout_converter() {
     git -C "$tcpp" checkout -q "$rev"
     local head; head="$(git -C "$tcpp" rev-parse HEAD)"
     [[ "$head" == "$rev"* ]] || { echo "transcribe.cpp is at $head, not $rev"; return 1; }
+    # A patched converter is another repo's change (X-4): refuse a dirty tree.
+    [[ -z "$(git -C "$tcpp" status --porcelain --untracked-files=no)" ]] ||
+        { echo "transcribe.cpp has local changes; refusing to convert"; return 1; }
     local stamp="$tcpp/build/.healing-built-rev"
     if [[ ! -x "$tcpp/build/bin/transcribe-quantize" || "$(cat "$stamp" 2>/dev/null)" != "$head" ]]; then
         cmake -S "$tcpp" -B "$tcpp/build" -DCMAKE_BUILD_TYPE=Release \
@@ -148,5 +151,5 @@ step nemo-tuned nemo_score "$spike/tuned/merged.nemo" "$general/ls300.json" "$sp
 step delta "${nemo_env[@]}" python "$here/tensor_delta.py" \
     "$spike/base/$slug/base-F32.gguf" "$spike/tuned/$slug/tuned-F32.gguf" \
     "$spike/base/$slug/base-Q8_0.gguf" "$spike/tuned/$slug/tuned-Q8_0.gguf" "$spike/runs/delta.json"
-step verdict env TRANSCRIBE_CPP_REV="$rev" bash -c "cd '$healing' && uv run python spikes/m0/verdict.py '$spike' '$base' '$tcpp' '$base_nemo' '$revision'"
+step verdict env TRANSCRIBE_CPP_REV="$rev" bash -c "cd '$healing' && uv run python spikes/m0/verdict.py '$spike' '$base' '$tcpp' '$base_nemo' '$revision' '$slug'"
 cat "$spike/verdict.json"

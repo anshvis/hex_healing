@@ -5,6 +5,7 @@
   "import_base": true,
   "import_tuned": true,
   "converter_pinned": true,
+  "every_step_ok": true,
   "base_parity": true,
   "tuned_parity": true,
   "target_base_miss": true,
@@ -173,6 +174,11 @@
    "step": "delta",
    "exit": 0,
    "seconds": 30
+  },
+  {
+   "step": "verdict",
+   "exit": 0,
+   "seconds": 3
   }
  ]
 }
