@@ -155,6 +155,9 @@ impl Policy {
         if feature == crate::labs::Feature::VoicePrompt && self.locks(Lock::OpenCodeProcessing) {
             return Some(Lock::OpenCodeProcessing);
         }
+        if feature == crate::labs::Feature::LearnFromCorrections && self.locks(Lock::Corrections) {
+            return Some(Lock::Corrections);
+        }
         self.locks(Lock::Labs).then_some(Lock::Labs)
     }
 
@@ -184,8 +187,8 @@ impl Policy {
             // `meetings.summaries` is a choice, not a switch; see `enforce`.
             // A voice prompt is one of the OpenCode requests the lock stops.
             Lock::OpenCodeProcessing => vec![&mut settings.labs.voice_prompt],
-            // T2.1 adds the `labs.learn_from_corrections` switch here.
-            Lock::Transforms | Lock::LoopbackTransforms | Lock::Corrections => Vec::new(),
+            Lock::Corrections => vec![&mut settings.labs.learn_from_corrections],
+            Lock::Transforms | Lock::LoopbackTransforms => Vec::new(),
             Lock::Labs => crate::labs::Feature::switches(settings),
         }
     }
@@ -319,7 +322,17 @@ mod tests {
             Lock::Corrections.refusal(),
             "Your organisation turned off Learn from corrections."
         );
-        // T2.1 extends this with `labs_lock(Feature::LearnFromCorrections)`.
+        let feature = crate::labs::Feature::LearnFromCorrections;
+        assert_eq!(policy.labs_lock(feature), Some(Lock::Corrections));
+        assert_eq!(
+            policy.setting_lock("labs.learn_from_corrections"),
+            Some(Lock::Corrections)
+        );
+        assert_eq!(Policy::default().labs_lock(feature), None);
+        let mut settings = AppSettings::default();
+        settings.labs.learn_from_corrections = true;
+        policy.enforce(&mut settings);
+        assert!(!settings.labs.learn_from_corrections);
     }
 
     #[test]
