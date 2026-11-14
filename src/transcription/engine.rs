@@ -2330,6 +2330,48 @@ mod tests {
             assert_eq!(transcribed.source, Source::Offline);
         }
 
+        /// The clip a finish hands the engine is the one the offline run
+        /// transcribes, sample for sample, with or without a failed stream.
+        /// Dictation keeps its History recording from that same buffer
+        /// (`parakeet.rs`), so the kept audio is the model's input.
+        #[test]
+        fn the_offline_run_receives_the_finished_clip_unchanged() {
+            let clip: Vec<f32> = (0..48_000)
+                .map(|index| ((index as f32) * 0.001).sin() * 0.8)
+                .collect();
+            let engine = TranscriptionEngine::start(Model::default()).unwrap();
+            let unusable = {
+                engine.streams.store(true, Ordering::Release);
+                let mut stream = engine.begin().expect("streaming was claimed");
+                stream.feed(&clip[..1_600]);
+                Some(stream)
+            };
+            for stream in [None, unusable] {
+                let (sender, received) = mpsc::channel();
+                engine
+                    .finish_with(
+                        stream,
+                        clip.clone(),
+                        Box::new(move |_, samples| {
+                            sender.send(samples).unwrap();
+                            Ok(String::new())
+                        }),
+                    )
+                    .unwrap()
+                    .wait()
+                    .unwrap();
+                let samples = received.recv().unwrap();
+                assert_eq!(samples.len(), clip.len());
+                assert!(
+                    samples
+                        .iter()
+                        .zip(&clip)
+                        .all(|(got, sent)| got.to_bits() == sent.to_bits()),
+                    "the offline run must see the finished clip bit for bit"
+                );
+            }
+        }
+
         #[test]
         fn an_unusable_stream_falls_back_to_the_complete_clip() {
             let engine = TranscriptionEngine::start(Model::default()).unwrap();
