@@ -48,10 +48,10 @@ T1.3 and T1.4 can run in parallel after T1.2. T1.5 follows T1.3.
 ## How you validate this milestone
 1. Turn on Labs › Keep recordings. Dictate about 10 times, including the same phrase three times.
 2. Run `healing collect` twice. The second run reports `0 new`.
-3. Run `healing status`. It shows the count, the bytes against the budget, and the cluster of 3.
-4. Delete an entry in Hex's History, then run `healing collect`. The entry is still in `healing status --list`.
+3. Run `healing prune`, then `healing status`. It shows the count, the bytes against the budget, and the cluster of 3 (clusters are built by `prune`).
+4. Delete an entry in Hex's History, then run `healing collect`. `healing status` still counts it (`--list` lists warning codes, not clips).
 5. Run `healing prune --budget 1MiB --dry-run`. It names only weak, redundant clips for eviction.
-6. Copy any FLAC into `$HEALING_HOME/audio/` by hand, then run `healing clean --deep`. It moves that file to quarantine and reports 0 mismatches. A second run reports nothing.
+6. Copy any FLAC into `$HEALING_HOME/dataset/audio/<xx>/` under a new 64-hex name by hand, then run `healing clean --deep`. It moves that file to quarantine and reports 0 mismatches. A second run reports nothing.
 
 ## Exit gate
 Every T1.x check is green at the head SHA. The validation above passes on your Mac with a real dictation.
