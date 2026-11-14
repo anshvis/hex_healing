@@ -786,6 +786,7 @@ impl History {
     }
 
     /// Keep a correction observation on entry `id` ([`corrections`]).
+    #[cfg(target_os = "macos")]
     pub fn observe_correction(
         &self,
         id: u64,

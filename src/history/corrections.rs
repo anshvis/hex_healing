@@ -6,25 +6,31 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{History, HistoryEntry, HistoryStore, MAX_TEXT_BYTES, truncated};
+use super::HistoryEntry;
+#[cfg(target_os = "macos")]
+use super::{History, HistoryStore, MAX_TEXT_BYTES, truncated};
+#[cfg(target_os = "macos")]
 use crate::dictation::correction_watch::{self, CorrectionObservation, Outcome};
 
+#[cfg(target_os = "macos")]
 static SHARED: std::sync::OnceLock<History> = std::sync::OnceLock::new();
 
 /// Sends every finished observation to `history`, once, at startup (the
 /// first call wins, as the watcher's sink does).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(target_os = "macos")]
 pub fn install_sink(history: &History) {
     let _ = SHARED.set(history.clone());
     correction_watch::set_sink(deliver);
 }
 
+#[cfg(target_os = "macos")]
 fn deliver(entry_id: u64, observation: CorrectionObservation) {
     if let Some(history) = SHARED.get() {
         deliver_to(history, entry_id, observation);
     }
 }
 
+#[cfg(target_os = "macos")]
 fn deliver_to(history: &History, entry_id: u64, observation: CorrectionObservation) {
     let outcome = observation.outcome.as_str();
     // Ids and outcome only: never the text.
@@ -50,6 +56,7 @@ pub struct HistoryCorrection {
     pub edited_text: Option<String>,
 }
 
+#[cfg(target_os = "macos")]
 impl HistoryCorrection {
     fn from_observation(observation: CorrectionObservation) -> Self {
         let (outcome, reason) = match observation.outcome {
@@ -67,7 +74,9 @@ impl HistoryCorrection {
                 .map(|text| truncated(&text, MAX_TEXT_BYTES)),
         }
     }
+}
 
+impl HistoryCorrection {
     pub(super) fn text_bytes(&self) -> usize {
         self.edited_text.as_ref().map_or(0, String::len)
     }
@@ -81,6 +90,7 @@ impl HistoryEntry {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl HistoryStore {
     /// Keep `observation` on entry `id`. Returns false when the entry is gone
     /// or already has one. A failed save keeps the entry as it was.
@@ -100,7 +110,7 @@ impl HistoryStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
