@@ -10,7 +10,8 @@ over each 32-value block, the step between adjacent codes), and the share of
 the change still present after quantization: ‖Q(merged) − Q(base)‖ / ‖ΔW‖,
 and the cosine between Q(merged) − Q(base) and ΔW. When ΔW is smaller than a
 rounding step the norm ratio exceeds 1 (rounding noise), so the cosine is the
-measure of whether the change's direction survived.
+measure of whether the change's direction survived. A random change of the
+same size, quantized the same way, gives the cosine rounding alone produces.
 It also asserts that both conversions have identical tensor names.
 """
 
@@ -21,7 +22,7 @@ import sys
 
 import numpy as np
 from gguf import GGUFReader, GGMLQuantizationType
-from gguf.quants import dequantize
+from gguf.quants import dequantize, quantize
 
 
 def tensors(path: str) -> dict[str, np.ndarray]:
@@ -35,6 +36,17 @@ def tensors(path: str) -> dict[str, np.ndarray]:
     return out
 
 
+def q8_round_trip(values: np.ndarray) -> np.ndarray:
+    """Q8_0 then back, in 32-value blocks along the flattened tensor."""
+    rows = values.reshape(1, -1)
+    return dequantize(quantize(rows, GGMLQuantizationType.Q8_0), GGMLQuantizationType.Q8_0).reshape(-1)
+
+
+def cosine(a: np.ndarray, b: np.ndarray) -> float:
+    norms = float(np.linalg.norm(a) * np.linalg.norm(b))
+    return float(a @ b / norms) if norms else 0.0
+
+
 def q8_step(values: np.ndarray) -> float:
     usable = values[: len(values) // 32 * 32].reshape(-1, 32)
     return float((np.abs(usable).max(axis=1) / 127.0).mean())
@@ -46,6 +58,7 @@ def main() -> int:
     qbase, qtuned = tensors(base_q8), tensors(tuned_q8)
     names_equal = list(base) == list(tuned) and list(qbase) == list(qtuned) and set(base) == set(qbase)
     rows = []
+    rng = np.random.default_rng(13)
     for name in base:
         delta = tuned[name] - base[name]
         norm = float(np.linalg.norm(delta))
@@ -53,7 +66,15 @@ def main() -> int:
             continue
         quantized = qtuned[name] - qbase[name]
         quantized_delta = float(np.linalg.norm(quantized))
-        cosine = float(quantized @ delta / (quantized_delta * norm)) if quantized_delta else 0.0
+        requantized = not np.array_equal(qbase[name], base[name])
+        # A random change of the same size, quantized the same way: the cosine
+        # rounding alone gives, against which the learned change's is read.
+        random_cosine = None
+        if requantized and base[name].size % 32 == 0:
+            noise = rng.standard_normal(delta.size).astype(np.float32)
+            noise *= norm / float(np.linalg.norm(noise))
+            q_base = q8_round_trip(base[name])
+            random_cosine = cosine(q8_round_trip(base[name] + noise) - q_base, noise)
         rows.append(
             {
                 "tensor": name,
@@ -61,9 +82,9 @@ def main() -> int:
                 "delta_rms": norm / np.sqrt(delta.size),
                 "q8_step_mean": q8_step(base[name]),
                 "survival": quantized_delta / norm,
-                "cosine": cosine,
-                "q8_requantized": qbase[name].shape == base[name].shape
-                and not np.array_equal(qbase[name], base[name]),
+                "cosine": cosine(quantized, delta),
+                "random_cosine": random_cosine,
+                "q8_requantized": requantized,
             }
         )
     survival = [row["survival"] for row in rows if row["q8_requantized"]]
@@ -77,6 +98,9 @@ def main() -> int:
         "survival_min": float(np.min(survival)) if survival else None,
         "cosine_median": float(np.median(cosines)) if cosines else None,
         "cosine_min": float(np.min(cosines)) if cosines else None,
+        "random_cosine_median": float(np.median(
+            [row["random_cosine"] for row in rows if row["random_cosine"] is not None]
+        )) if rows else None,
         "delta_rms_over_step_median": float(
             np.median([row["delta_rms"] / row["q8_step_mean"] for row in rows])
         ) if rows else None,

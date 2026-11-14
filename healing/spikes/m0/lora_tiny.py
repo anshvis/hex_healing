@@ -11,8 +11,9 @@ the joint's linears. The predictor is an LSTM, which has no linear layers to
 wrap, so it stays frozen. After training, each wrapped weight becomes
 W + (alpha / rank) · B·A and the wrapper is removed, so the merged checkpoint
 has exactly the base's parameter names and shapes, which the converter needs.
-Trains on CPU (NeMo's RNN-T loss is unreliable on MPS); dropout and
-SpecAugment stay off, so the run is deterministic for a seed.
+Trains on CPU (NeMo's RNN-T loss is unreliable on MPS) with dropout and
+SpecAugment off. A seed fixes the data order and LoRA init, but multithreaded
+CPU sums make runs differ in the last bits.
 """
 
 from __future__ import annotations
@@ -129,7 +130,7 @@ def main() -> int:
     torch.manual_seed(args.seed)
     torch.set_num_threads(args.threads)
     model = load(args.base)
-    model.eval()  # no dropout, no SpecAugment: a deterministic tiny run
+    model.eval()  # no dropout, no SpecAugment
     for parameter in model.parameters():
         parameter.requires_grad_(False)
 
