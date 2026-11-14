@@ -1,0 +1,23 @@
+[project]
+name = "healing"
+version = "0.1.0"
+description = "Hex's self-healing pipeline: capture, labels, evaluation, vocabulary and fine-tuning"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=1.26",
+    "soundfile>=0.12",
+    "pyarrow>=15",
+]
+
+[project.scripts]
+healing = "healing.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
