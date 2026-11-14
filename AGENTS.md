@@ -43,7 +43,7 @@ hidden while off; a behaviour-only feature is just its toggle. Today: Meetings
 (beta), Voice Filter (Dev; locked on while its macOS driver is installed, and
 a stable build with the driver keeps its pane for Uninstall alone), Playground
 (Dev), Live text, Live chapters, Vocabulary biasing, Screen vocabulary
-(macOS), Rewrite reads nearby text (macOS), Switch model with keyboard
+(macOS), Rewrite reads nearby text (macOS), Learn from corrections (macOS), Switch model with keyboard
 language (#216), Mouse shortcuts (#209, macOS), Also pause the browser (#301,
 macOS), Share dictation shortcut (#176, Windows), Unload model when idle
 (#442), Smaller model files (macOS), Terminal paste (Windows), and Terminal

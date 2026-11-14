@@ -2097,6 +2097,10 @@ fn labs_lists_every_toggle_off_by_default() {
         ("lab-vocabulary-biasing", settings.labs.vocabulary_biasing),
         ("lab-screen-vocabulary", settings.labs.screen_vocabulary),
         ("lab-cursor-context", settings.labs.cursor_context),
+        (
+            "lab-learn-from-corrections",
+            settings.labs.learn_from_corrections,
+        ),
         ("lab-return-to-app", settings.labs.return_to_app),
         ("lab-speakers-only", settings.labs.speakers_only),
         (

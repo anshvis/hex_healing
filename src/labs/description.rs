@@ -223,6 +223,9 @@ impl Feature {
             Self::CursorContext => {
                 "The mode's OpenCode rewrite uses the text around the cursor to spell names and terms right and fit where it pastes. That text goes to the mode's model, which may be a cloud provider; password fields are never read"
             }
+            Self::LearnFromCorrections => {
+                "When you edit a dictation right after it pastes, Hex reads that one text field for up to 30 seconds and keeps only the edited span on the History entry. Password fields are never read"
+            }
             Self::ShellCompletions => {
                 "Print a completion script for bash, zsh, fish, elvish, or PowerShell with hex completions <shell>"
             }

@@ -77,6 +77,9 @@ pub struct LabsSettings {
     /// The mode's OpenCode rewrite reads the text around the cursor as
     /// context (macOS); password fields are never read.
     pub cursor_context: bool,
+    /// After a paste, Hex watches the pasted-into field briefly and keeps the
+    /// edited span on the History entry (macOS).
+    pub learn_from_corrections: bool,
     /// Mouse buttons may be recorded as shortcuts (macOS, issue 209).
     pub mouse_shortcuts: bool,
     /// The engine unloads the speech model after `unload_idle_minutes` (5, 15 default, 30, 60) unused (issue 442).
@@ -362,6 +365,7 @@ impl Default for LabsSettings {
             vocabulary_biasing: false,
             screen_vocabulary: false,
             cursor_context: false,
+            learn_from_corrections: false,
             mouse_shortcuts: false,
             unload_idle: false,
             unload_idle_minutes: 15,
