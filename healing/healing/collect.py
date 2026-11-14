@@ -143,11 +143,15 @@ def collect(store: Store, binary: Path, since: str | None = None) -> Summary:
         "INSERT INTO runs (started_at_ms, since_ms) VALUES (?, ?)", (started, since_to_ms(since, started))
     ).lastrowid
     store.db.commit()
+    error: str | None = None
     try:
         _collect_pages(store, binary, since, summary)
-        error = None
     except (CollectError, StoreError, OSError) as failure:
         error = str(failure)
+        raise
+    except BaseException as failure:
+        # Name only the type: a message could carry transcript text (G-4).
+        error = type(failure).__name__
         raise
     finally:
         store.db.execute(
@@ -188,7 +192,7 @@ def _store_entry(store: Store, epochs: Epochs, entry: dict, summary: Summary) ->
         "model_name": entry.get("model_name"),
         "rewritten": 1 if entry.get("rewritten") else 0,
         "audio_ms": entry.get("audio_ms"),
-        "raw_text": entry.get("raw_text", entry["final_text"]),
+        "raw_text": entry["raw_text"],
         "final_text": entry["final_text"],
     }
     existing = store.db.execute(

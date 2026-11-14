@@ -282,3 +282,12 @@ def test_future_stamped_entry_does_not_hide_later_ones(world):
     world.save()
     world.run()
     assert sorted(r["hex_id"] for r in clips(world)) == [1, 2]
+
+
+def test_unexpected_error_is_recorded_not_masked(world):
+    del world.doc["entries"][0]["kind"]
+    world.save()
+    with pytest.raises(KeyError):
+        world.run()
+    row = world.db().execute("SELECT error FROM runs").fetchone()
+    assert row["error"] == "KeyError"
