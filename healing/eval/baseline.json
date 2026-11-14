@@ -1,0 +1,28 @@
+{
+  "model": "parakeet-unified-en-0.6b",
+  "gguf_sha256": "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795",
+  "set_sha256": "5d8139f98f87e442db54ed40e90cc8af54baa48ed14a626cb06023d24f6fb149",
+  "clips": 500,
+  "reference_words": 7818,
+  "wer": 0.05717574827321566,
+  "wer_by_source": {
+    "ami": {
+      "wer": 0.10401310401310401,
+      "word_errors": 254,
+      "reference_words": 2442
+    },
+    "librispeech": {
+      "wer": 0.035900297619047616,
+      "word_errors": 193,
+      "reference_words": 5376
+    }
+  },
+  "median_rtf": 0.018127627723307803,
+  "load_ms": 119.014166,
+  "hex_binary": "/Applications/Hex.app/Contents/MacOS/hex",
+  "hex_version": "hex 3.4.0",
+  "hex_sha": null,
+  "repo_sha": "8847b4f9e751482035427a05df0122b2e2d142e7",
+  "command": "/Applications/Hex.app/Contents/MacOS/hex benchmark-transcription '/Users/anshviswanathan/Library/Application Support/hex-healing/sets/general/manifest.json' --model '/Users/anshviswanathan/Library/Application Support/hex/models/parakeet-unified-en-0.6b-Q8_0.gguf' --runs 1 --warmups 1",
+  "measured_at": "2026-11-14T08:44:25+00:00"
+}
