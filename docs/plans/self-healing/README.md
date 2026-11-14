@@ -90,10 +90,11 @@ review, not picked because the current model got them wrong.
 | [M3](M3-labels-eval/README.md) | Labels, holdouts, evaluation | Three leak-free test sets and one command that scores any GGUF. | M2 |
 | [M4](M4-vocabulary/README.md) | Tier 1: vocabulary mining | Repeated corrections become biased terms, and the benchmark shows the gain. | M2, M3 |
 | [M5](M5-registry/README.md) | Model registry | Every model is versioned with its data and scores, and can be rolled back. | M3 |
-| [M6](M6-training/README.md) | Tier 2: LoRA training | Training triggers at 200 or more new strong clips and yields an importable Q8_0 GGUF. | M0, M3, M5 |
+| [M6](M6-training/README.md) | Tier 2: LoRA training | Training triggers after 200 or more minutes of new strong speech and yields an importable Q8_0 GGUF. | M0, M3, M5 |
 | [M7](M7-promote/README.md) | Promotion, ship, rollback | A model ships only if it wins with statistical confidence, keeps streaming and formatting, and reverts automatically only if it is significantly worse. | M3 (incl. T3.4), M5, M6 |
+| [M8](M8-tidy/README.md) | Tidy after paste | After a paste, Hex suggests removing fillers and spoken self-corrections. You accept each edit, and Hex applies it through Accessibility. Tidied text never trains the speech model. | M2, M1 (runs after M7) |
 
-M4 and M5 are independent of each other and can run in parallel once M3 is done.
+M4 and M5 are independent of each other and can run in parallel once M3 is done. M8 is a follow-up after M7.
 
 ## Goal-level criteria
 
@@ -145,6 +146,9 @@ M4 and M5 are independent of each other and can run in parallel once M3 is done.
 
   Every refusal is logged with the failing check. Promotion is `hex model import` followed by `hex model use`. (M7)
 - **AC-14** After a promotion, a non-inferiority check re-runs on fresh post-promotion verified clips. Hex reverts to the previous version automatically only when the promoted model is significantly worse, logging why. (M7)
+- **AC-15** Tidy suggests removing fillers, repeats and abandoned self-corrections. It never adds content, and a model edit that adds a word is dropped. (M8)
+- **AC-16** Tidy learns which habits you accept removing: a phrase you mostly accept is suggested, and one you mostly skip isn't. (M8)
+- **AC-17** Tidy runs only when you ask, after the paste. It applies only accepted edits, only to the pasted range, as one undoable edit. It changes nothing when the text moved. The speech model's labels stay what was heard. (M8)
 
 ### Guardrails
 - **G-1 Nothing Vitalize.** No Vitalize Linear, Slack, repositories, data, agents or tickets, in planning or in code. *Check:* `git diff origin/dev...HEAD | rg -i vitalize` → only this guardrail's own line. No Linear or Slack calls were made for this goal.
