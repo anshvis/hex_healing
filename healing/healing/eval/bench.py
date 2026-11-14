@@ -13,7 +13,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from healing.paths import repo_root
+from healing.paths import healing_home, repo_root
 
 INSTALLED_HEX = Path("/Applications/Hex.app/Contents/MacOS/hex")
 
@@ -78,6 +78,22 @@ def hex_binary() -> Path:
     )
 
 
+def isolated_env() -> dict[str, str]:
+    """The environment every `hex` call runs in: its own data folder.
+
+    `hex` opens its process log in its data folder before dispatching any
+    command, so without this a benchmark appends to the real Hex's logs
+    (AGENTS.md: a benchmarked copy never points at the user's data folder).
+    """
+    support = healing_home() / "hex-support"
+    support.mkdir(parents=True, exist_ok=True)
+    return {
+        **os.environ,
+        "HEX_APPLICATION_SUPPORT_DIR": str(support),
+        "HEX_DISABLE_UPDATES": "1",
+    }
+
+
 def benchmark_command(
     manifest: Path, *, model: Path | None, runs: int, warmups: int, binary: Path | None = None
 ) -> list[str]:
@@ -96,7 +112,7 @@ def run_benchmark(
     output: Path | None = None,
 ) -> tuple[BenchRun, list[str]]:
     command = benchmark_command(manifest, model=model, runs=runs, warmups=warmups)
-    completed = subprocess.run(command, capture_output=True, text=True)
+    completed = subprocess.run(command, capture_output=True, text=True, env=isolated_env())
     if completed.returncode != 0:
         tail = "\n".join(completed.stderr.strip().splitlines()[-15:])
         raise BenchError(f"benchmark exited {completed.returncode}:\n{tail}")
