@@ -3,6 +3,10 @@
 A port of `normalized_words` and `word_errors` in
 `src/transcription/benchmark.rs`: split on anything that isn't alphanumeric,
 lowercase, then word-level edit distance against the reference.
+
+Exact for the English sets healing uses. Python's `str.isalnum` and Rust's
+`char::is_alphanumeric` disagree on some combining marks (Indic, Thai), so
+check a non-English set against the benchmark before trusting this port.
 """
 
 from __future__ import annotations

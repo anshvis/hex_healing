@@ -102,15 +102,13 @@ def build(
     manifest_path = out / "manifest.json"
     pin_path = out / "manifest.sha256"
 
-    if manifest_path.exists():
-        existing = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-        pinned = pin_path.read_text().split()[0] if pin_path.exists() else None
-        if existing != digest or pinned != digest:
+    if manifest_path.exists() or pin_path.exists():
+        existing = verify(out)
+        if existing != digest:
             raise BuildError(
                 f"{manifest_path} exists with a different clip list "
                 f"(have {existing[:12]}, built {digest[:12]}); the general set never changes"
             )
-        _verify_audio(out)
         return BuildResult(manifest_path, digest, len(chosen), unchanged=True)
 
     audio_dir = out / "audio"
@@ -129,6 +127,7 @@ def build(
                 "audio_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             }
         )
+    # The pin goes last: a set without it is incomplete, never "different".
     (out / "clips.jsonl").write_text("".join(json.dumps(row) + "\n" for row in sidecar))
     manifest_path.write_bytes(manifest_bytes)
     pin_path.write_text(f"{digest}  manifest.json\n")
@@ -139,6 +138,30 @@ def sources_by_clip(set_dir: Path) -> dict[str, str]:
     """Clip id → source name, from the sidecar."""
     rows = (json.loads(line) for line in (set_dir / "clips.jsonl").read_text().splitlines())
     return {row["id"]: row["source"] for row in rows}
+
+
+def verify(out: Path) -> str:
+    """Checks a written set against its pins and returns the manifest's sha256."""
+    manifest_path, pin_path, sidecar = out / "manifest.json", out / "manifest.sha256", out / "clips.jsonl"
+    if not (manifest_path.is_file() and pin_path.is_file() and sidecar.is_file()):
+        raise BuildError(f"{out} holds an incomplete set (a build stopped part-way); delete it and build again")
+    digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    if pin_path.read_text().split()[0] != digest:
+        raise BuildError(f"{manifest_path} no longer matches its pin in {pin_path.name}")
+    _verify_audio(out)
+    return digest
+
+
+def subset(out: Path, prefix: str, name: str, expected: int) -> Path:
+    """Writes `<name>.json`: the set's clips whose id starts with `prefix`."""
+    verify(out)
+    manifest = json.loads((out / "manifest.json").read_text())
+    clips = [clip for clip in manifest["clips"] if clip["id"].startswith(prefix)]
+    if len(clips) != expected:
+        raise BuildError(f"{len(clips)} clips start with {prefix!r}, expected {expected}")
+    path = out / f"{name}.json"
+    path.write_text(json.dumps({"clips": clips}, indent=1, sort_keys=True) + "\n")
+    return path
 
 
 def _verify_audio(out: Path) -> None:

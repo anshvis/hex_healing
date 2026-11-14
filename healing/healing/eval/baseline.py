@@ -9,9 +9,9 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from healing.eval.bench import BenchRun, run_benchmark
+from healing.eval.bench import BenchRun, isolated_env, run_benchmark
 from healing.paths import healing_home, repo_root
-from healing.sets.general import sources_by_clip
+from healing.sets.general import sources_by_clip, verify
 
 DEFAULT_MODEL_ID = "parakeet-unified-en-0.6b"
 DEFAULT_GGUF = (
@@ -37,13 +37,14 @@ def baseline(model: Path, model_id: str, output: Path) -> dict:
     manifest = set_dir / "manifest.json"
     if not manifest.is_file():
         raise SystemExit("no general set: run `healing sets build-general` first")
+    set_sha = verify(set_dir)
     jsonl = healing_home() / "evals" / f"baseline-{_stamp()}.jsonl"
     run, command = run_benchmark(manifest, model=model, output=jsonl)
     sources = sources_by_clip(set_dir)
     result = {
         "model": model_id,
         "gguf_sha256": _sha256(model),
-        "set_sha256": (set_dir / "manifest.sha256").read_text().split()[0],
+        "set_sha256": set_sha,
         "clips": run.summary["clips"],
         "reference_words": run.summary["reference_words"],
         "wer": run.summary["wer"],
@@ -52,8 +53,10 @@ def baseline(model: Path, model_id: str, output: Path) -> dict:
         "load_ms": run.summary["load_ms"],
         "hex_binary": command[0],
         "hex_version": _hex_version(command[0]),
-        # The commit the binary was built from, when it is this checkout's own
-        # release build; an installed Hex records only its version.
+        "hex_binary_sha256": _sha256(Path(command[0])),
+        # The checkout's commit when the binary is its own release build (it may
+        # predate HEAD; `hex_binary_sha256` names the exact binary). An
+        # installed Hex records only its version.
         "hex_sha": _git_sha() if _built_here(command[0]) else None,
         "repo_sha": _git_sha(),
         "command": shlex.join(command),
@@ -77,7 +80,9 @@ def _sha256(path: Path) -> str:
 
 
 def _hex_version(binary: str) -> str:
-    completed = subprocess.run([binary, "--version"], capture_output=True, text=True)
+    completed = subprocess.run(
+        [binary, "--version"], capture_output=True, text=True, env=isolated_env()
+    )
     return completed.stdout.strip()
 
 

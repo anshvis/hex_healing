@@ -62,3 +62,21 @@ def test_too_few_utterances_is_an_error(tmp_path):
 def test_ami_reference_drops_fillers_and_tags():
     assert ami_reference("UM I MEAN <laugh> UH-HUH WE'RE NOT MM-HMM THERE") == "I MEAN WE'RE NOT THERE"
     assert ami_reference("YEAH OKAY OH") == "YEAH OKAY OH"
+
+
+def test_an_incomplete_set_is_refused_with_a_clear_reason(tmp_path):
+    build(tmp_path, [(FakeSource("ls", 50), 3)])
+    (tmp_path / "manifest.sha256").unlink()
+    with pytest.raises(BuildError, match="incomplete set"):
+        build(tmp_path, [(FakeSource("ls", 50), 3)])
+
+
+def test_subset_keeps_only_matching_clips(tmp_path):
+    from healing.sets.general import subset
+
+    build(tmp_path, [(FakeSource("ls", 20), 4), (FakeSource("ami", 20), 2)])
+    path = subset(tmp_path, "ls-", "ls4", 4)
+    clips = json.loads(path.read_text())["clips"]
+    assert [clip["id"][:3] for clip in clips] == ["ls-"] * 4
+    with pytest.raises(BuildError, match="expected 5"):
+        subset(tmp_path, "ls-", "ls5", 5)

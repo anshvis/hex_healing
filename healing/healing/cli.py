@@ -20,6 +20,11 @@ def main(argv: list[str] | None = None) -> int:
     general.add_argument("--ami", type=int, default=200)
     general.add_argument("--seed", type=int, default=13)
 
+    sub = sets.add_parser("subset", help="write a sub-manifest of the general set by id prefix")
+    sub.add_argument("--prefix", required=True)
+    sub.add_argument("--name", required=True)
+    sub.add_argument("--expected", type=int, required=True, help="clip count to insist on")
+
     evals = commands.add_parser("eval").add_subparsers(dest="command", required=True)
     base = evals.add_parser("baseline", help="score the shipped model on the general set")
     base.add_argument("--model", type=Path, help="GGUF to score (default: the catalog Unified)")
@@ -35,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.group == "sets":
-        return _build_general(args)
+        return _subset(args) if args.command == "subset" else _build_general(args)
     if args.group == "eval":
         return _baseline(args)
     return _paired(args)
@@ -56,6 +61,17 @@ def _build_general(args) -> int:
         return 1
     state = "unchanged" if result.unchanged else "written"
     print(f"{state}: {result.clips} clips, sha256 {result.sha256}\n{result.manifest}")
+    return 0
+
+
+def _subset(args) -> int:
+    from healing.sets.general import BuildError, subset
+
+    try:
+        print(subset(healing_home() / "sets" / "general", args.prefix, args.name, args.expected))
+    except BuildError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
     return 0
 
 
