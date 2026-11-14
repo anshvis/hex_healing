@@ -509,6 +509,42 @@ fn parameterized_string(element: &CfObject, range: CfRange) -> Option<CfObject> 
     (status == 0 && !value.is_null()).then(|| CfObject(value))
 }
 
+/// An Accessibility element another process's focused field, kept past the
+/// read that found it so the correction watcher can read its value later.
+/// It holds one retain and releases it exactly once when dropped, on every
+/// path (a dropped queue item, a lab turned off, a quit).
+// The watcher that reads it lands with T2.2.
+#[allow(dead_code)]
+pub struct RetainedElement(CfObject);
+
+// SAFETY: the wrapped `AXUIElementRef` is a Core Foundation object. CFRetain
+// and CFRelease are atomic, and Accessibility calls are valid from any
+// thread (`screen_vocabulary` already reads from a background one). The
+// element is never aliased: this type is the only owner of its retain.
+unsafe impl Send for RetainedElement {}
+
+impl RetainedElement {
+    /// A real retained element that names no field, for tests.
+    #[cfg(test)]
+    pub fn for_test() -> Self {
+        // SAFETY: AXUIElementCreateApplication returns a retained object.
+        Self(bounded_element(unsafe { AXUIElementCreateApplication(1) }).unwrap())
+    }
+}
+
+/// The focused element of another process, for the correction watcher to
+/// read after a paste. `None` for Hex's own pid, a secure (password) field,
+/// no focused element, or an Accessibility call that exceeds its 0.25 s
+/// timeout. Reads no text and changes nothing.
+pub fn focused_element(pid: i32) -> Option<RetainedElement> {
+    let application = foreign_application(pid)?;
+    let focused = copy_element(&application, c"AXFocusedUIElement")?;
+    if is_secure_text_field(&focused) {
+        return None;
+    }
+    Some(RetainedElement(focused))
+}
+
 struct CfObject(CfTypeRef);
 
 impl Drop for CfObject {

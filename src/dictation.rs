@@ -11,6 +11,8 @@ pub(crate) mod config;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 pub(crate) mod context;
 #[cfg(target_os = "macos")]
+pub(crate) mod correction_watch;
+#[cfg(target_os = "macos")]
 pub(crate) mod diagnostics;
 pub(crate) mod filler_words;
 pub(crate) mod indicator;

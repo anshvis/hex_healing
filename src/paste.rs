@@ -222,17 +222,22 @@ impl Paster {
         }
     }
 
-    pub fn paste(&mut self, text: &str, mode: PasteMode) -> Result<()> {
+    /// Returns the text that reached the field: `text` after the
+    /// continuation join and smart spacing. Copy only and Return insert
+    /// nothing; copy only returns the text it copied, Return an empty string.
+    pub fn paste(&mut self, text: &str, mode: PasteMode) -> Result<String> {
         if matches!(mode, PasteMode::CopyOnly) {
-            return self.copy_only(text);
+            self.copy_only(text)?;
+            return Ok(text.to_string());
         }
         if matches!(mode, PasteMode::Send) {
-            self.paste(text, PasteMode::Continue)?;
+            let inserted = self.paste(text, PasteMode::Continue)?;
             self.continuation = None;
-            return Ok(());
+            return Ok(inserted);
         }
         if matches!(mode, PasteMode::Return) {
-            return keyboard::post_return();
+            keyboard::post_return()?;
+            return Ok(String::new());
         }
         let revision = self.activity.revision();
         let continuation = self.continuation.as_ref().filter(|continuation| {
@@ -264,11 +269,11 @@ impl Paster {
         } else {
             self.paste_through_clipboard(&text, mode)?;
         }
-        self.continuation = (!matches!(mode, PasteMode::Standalone)).then_some(Continuation {
+        self.continuation = (!matches!(mode, PasteMode::Standalone)).then(|| Continuation {
             revision,
-            inserted: text,
+            inserted: text.clone(),
         });
-        Ok(())
+        Ok(text)
     }
 
     /// Leaves `text` on the clipboard for the user to paste: no ⌘V, no typed

@@ -617,6 +617,7 @@ fn run_output_worker(
                 &mut |text, mode| paster.paste(text, mode),
                 &mut last_transcript,
                 history.as_ref(),
+                &mut crate::dictation::correction_watch::Live,
             );
             let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
             match &event {
@@ -1039,9 +1040,10 @@ fn queue_error(error: TrySendError<impl Sized>) -> &'static str {
 
 fn finish_output(
     job: OutputJob,
-    paste: &mut impl FnMut(&str, PasteMode) -> Result<()>,
+    paste: &mut impl FnMut(&str, PasteMode) -> Result<String>,
     last_transcript: &mut Option<String>,
     history: Option<&History>,
+    corrections: &mut impl crate::dictation::correction_watch::Handoff,
 ) -> WorkerEvent {
     match job {
         OutputJob::PreparePaste => unreachable!("paste preparation bypasses ordered output"),
@@ -1059,6 +1061,8 @@ fn finish_output(
             let result = result.and_then(|mut completed| {
                 let paste_started = Instant::now();
                 let mut sent = false;
+                let mut pending = None;
+                let mut inserted = String::new();
                 if !completed.nothing && !completed.text.trim().is_empty() {
                     match target {
                         TranscriptionTarget::Paste
@@ -1110,10 +1114,20 @@ fn finish_output(
                             // clipboard while Hex saved it) keeps the text
                             // for Paste last dictation, as above, so the
                             // dictation isn't lost.
-                            if let Err(error) = paste(&completed.text, mode) {
-                                *last_transcript = Some(completed.text.clone());
-                                return Err(error.to_string());
+                            // Labs › Learn from corrections: the field is read
+                            // before the paste, since focus may move because
+                            // of it. A Send dictation leaves the field, and
+                            // a copy only never pastes.
+                            if matches!(mode, PasteMode::Continue) {
+                                pending = corrections.read();
                             }
+                            inserted = match paste(&completed.text, mode) {
+                                Ok(inserted) => inserted,
+                                Err(error) => {
+                                    *last_transcript = Some(completed.text.clone());
+                                    return Err(error.to_string());
+                                }
+                            };
                             if matches!(mode, PasteMode::Send) {
                                 sent = send_unless_escaped(
                                     completed.timings.send_gate,
@@ -1135,8 +1149,11 @@ fn finish_output(
                     ) {
                         *last_transcript = Some(completed.text.clone());
                     }
-                    if let Some(history) = history {
-                        record_history(history, target, sent, &mut completed);
+                    let entry_id = history.and_then(|history| {
+                        record_history(history, target, sent, &mut completed)
+                    });
+                    if let (Some(pending), Some(entry_id)) = (pending, entry_id) {
+                        corrections.submit(pending.into_target(entry_id, inserted));
                     }
                 }
                 tracing::info!(
@@ -1193,14 +1210,14 @@ fn finish_output(
 fn send_unless_escaped(
     gate: crate::dictation::yolo_mode::SendGate,
     pasted_at: Instant,
-    paste: &mut impl FnMut(&str, PasteMode) -> Result<()>,
+    paste: &mut impl FnMut(&str, PasteMode) -> Result<String>,
 ) -> bool {
     if !gate.wait(pasted_at) {
         tracing::info!("YOLO mode pasted without Return: Escape after the release");
         return false;
     }
     match paste("", PasteMode::Return) {
-        Ok(()) => {
+        Ok(_) => {
             tracing::info!(
                 after_submit_ms = gate.submitted_at().elapsed().as_millis(),
                 "YOLO mode pressed Return"
@@ -1221,13 +1238,13 @@ fn record_history(
     target: TranscriptionTarget,
     sent: bool,
     completed: &mut CompletedTranscript,
-) {
+) -> Option<u64> {
     let kind = match target {
         TranscriptionTarget::Paste if sent => HistoryKind::Send,
         TranscriptionTarget::Paste | TranscriptionTarget::CopyOnlyPaste => HistoryKind::Dictation,
         TranscriptionTarget::RawPaste | TranscriptionTarget::RawCopyOnlyPaste => HistoryKind::Raw,
         TranscriptionTarget::Print | TranscriptionTarget::RawPrint => HistoryKind::Printed,
-        TranscriptionTarget::Service => return,
+        TranscriptionTarget::Service => return None,
     };
     let (model, model_id) = crate::history::model_fields(&completed.selection);
     let draft = HistoryDraft {
@@ -1243,13 +1260,19 @@ fn record_history(
         model,
         model_id,
     };
-    if let Err(error) = history.record(draft) {
-        tracing::warn!(%error, "could not record dictation history");
+    match history.record(draft) {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::warn!(%error, "could not record dictation history");
+            None
+        }
     }
 }
 
-fn paste_meeting_delta(paste: &mut impl FnMut(&str, PasteMode) -> Result<()>) -> Result<String> {
-    meeting::consume_active_or_latest_delta(|text| paste(text, PasteMode::Standalone))
+fn paste_meeting_delta(
+    paste: &mut impl FnMut(&str, PasteMode) -> Result<String>,
+) -> Result<String> {
+    meeting::consume_active_or_latest_delta(|text| paste(text, PasteMode::Standalone).map(drop))
 }
 
 pub(crate) fn default_model_path() -> Result<std::path::PathBuf> {
@@ -1619,6 +1642,127 @@ mod tests {
         assert!(format_meeting_delta(&[]).is_err());
     }
 
+    /// A handoff with the lab off: nothing is read or submitted.
+    struct NoHandoff;
+
+    impl crate::dictation::correction_watch::Handoff for NoHandoff {
+        fn read(&mut self) -> Option<crate::dictation::correction_watch::Pending> {
+            None
+        }
+        fn submit(&mut self, _: crate::dictation::correction_watch::PasteTarget) {
+            panic!("a target was submitted with the lab off");
+        }
+    }
+
+    /// A handoff with the lab on, over a real retained element.
+    #[derive(Default)]
+    struct Recording {
+        reads: usize,
+        submitted: Vec<(u64, String)>,
+    }
+
+    impl crate::dictation::correction_watch::Handoff for Recording {
+        fn read(&mut self) -> Option<crate::dictation::correction_watch::Pending> {
+            self.reads += 1;
+            Some(crate::dictation::correction_watch::Pending::new(
+                1,
+                crate::accessibility::RetainedElement::for_test(),
+            ))
+        }
+        fn submit(&mut self, target: crate::dictation::correction_watch::PasteTarget) {
+            self.submitted.push((target.entry_id, target.inserted));
+        }
+    }
+
+    fn completed_dictation(text: &str) -> CompletedTranscript {
+        CompletedTranscript {
+            text: text.into(),
+            nothing: false,
+            raw: text.into(),
+            application: None,
+            return_to: None,
+            timings: JobTimings {
+                total_started: Instant::now(),
+                queue_ms: 0,
+                audio_ms: 2_000,
+                prepare_ms: 0,
+                inference_ms: 0,
+                held_ms: None,
+                send_gate: crate::dictation::yolo_mode::SendGate::open(),
+            },
+            processing: None,
+            recording: None,
+            selection: Default::default(),
+        }
+    }
+
+    fn run_output(
+        target: TranscriptionTarget,
+        paste: &mut impl FnMut(&str, PasteMode) -> Result<String>,
+        history: Option<&History>,
+        handoff: &mut Recording,
+    ) {
+        let mut last_transcript = None;
+        finish_output(
+            OutputJob::Completed {
+                job_id: DictationJobId(1),
+                control: Arc::new(JobControl::default()),
+                target,
+                result: Box::new(Ok(completed_dictation("hello there"))),
+            },
+            paste,
+            &mut last_transcript,
+            history,
+            handoff,
+        );
+    }
+
+    #[test]
+    fn one_successful_paste_submits_one_target_with_the_history_id_and_inserted_text() {
+        let directory =
+            std::env::temp_dir().join(format!("hex-parakeet-corrections-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let history = History::new(crate::history::HistoryStore::open(
+            directory.join("history.json"),
+            crate::history::HistoryRetention::Week,
+            crate::history::now_ms(),
+        ));
+        let mut handoff = Recording::default();
+        // The paster adds a leading space: the target carries what landed.
+        let mut paste = |text: &str, _| Ok(format!(" {text}"));
+        run_output(
+            TranscriptionTarget::Paste,
+            &mut paste,
+            Some(&history),
+            &mut handoff,
+        );
+        let id = history.recent(1)[0].id;
+        assert_eq!(handoff.reads, 1);
+        assert_eq!(handoff.submitted, [(id, " hello there".to_string())]);
+
+        // Copy only never pastes, a failed paste submits nothing, and
+        // without a History entry there is nothing to attach to.
+        let mut handoff = Recording::default();
+        run_output(
+            TranscriptionTarget::CopyOnlyPaste,
+            &mut paste,
+            Some(&history),
+            &mut handoff,
+        );
+        let mut failing = |_: &str, _| Err(eyre!("clipboard changed"));
+        run_output(
+            TranscriptionTarget::Paste,
+            &mut failing,
+            Some(&history),
+            &mut handoff,
+        );
+        run_output(TranscriptionTarget::Paste, &mut paste, None, &mut handoff);
+        assert_eq!(handoff.reads, 2, "copy only reads nothing");
+        assert!(handoff.submitted.is_empty());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     #[test]
     fn a_failed_paste_keeps_the_dictation_for_paste_last() {
         let text = "the dictation whose paste failed";
@@ -1651,6 +1795,7 @@ mod tests {
             &mut |_, _| Err(eyre!("clipboard changed while Hex was preserving it")),
             &mut last_transcript,
             None,
+            &mut NoHandoff,
         );
 
         assert!(matches!(
@@ -1709,10 +1854,11 @@ mod tests {
                 },
                 &mut |pasted_text, mode| {
                     pasted = Some((pasted_text.to_string(), mode));
-                    Ok(())
+                    Ok(pasted_text.to_string())
                 },
                 &mut last_transcript,
                 Some(&history),
+                &mut NoHandoff,
             );
 
             assert!(matches!(
@@ -1751,7 +1897,7 @@ mod tests {
             presses
                 .borrow_mut()
                 .push((text.to_owned(), matches!(mode, PasteMode::Return)));
-            Ok(())
+            Ok(String::new())
         };
 
         let gate = SendGate::on(&ESCAPES, submitted);
