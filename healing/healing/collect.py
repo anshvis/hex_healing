@@ -33,7 +33,13 @@ MUTABLE = (
     "audio_ms",
     "raw_text",
     "final_text",
+    "correction_outcome",
+    "correction_reason",
+    "edited_text",
 )
+
+# A change to any of these makes a stored classification stale.
+CLASSIFICATION_INPUTS = ("raw_text", "final_text", "edited_text", "correction_outcome")
 
 
 class CollectError(Exception):
@@ -203,6 +209,10 @@ def _store_entry(
         "raw_text": entry["raw_text"],
         "final_text": entry["final_text"],
     }
+    correction = entry.get("correction") or {}
+    fields["correction_outcome"] = correction.get("outcome")
+    fields["correction_reason"] = correction.get("reason")
+    fields["edited_text"] = correction.get("edited_text")
     existing = store.db.execute(
         "SELECT * FROM clips WHERE hex_epoch_ms = ? AND hex_id = ?", (epoch, hex_id)
     ).fetchone()
@@ -217,12 +227,14 @@ def _store_entry(
         store.db.execute(
             "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, application, mode,"
             " kind, model_id, model_name, rewritten, audio_ms, raw_text, final_text, audio_sha256,"
-            " collected_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " collected_at_ms, correction_outcome, correction_reason, edited_text)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 clip_id(epoch, hex_id), hex_id, epoch, timestamp, fields["application"],
                 fields["mode"], fields["kind"], fields["model_id"], fields["model_name"],
                 fields["rewritten"], fields["audio_ms"], fields["raw_text"], fields["final_text"],
-                audio_sha, now_ms(),
+                audio_sha, now_ms(), fields["correction_outcome"], fields["correction_reason"],
+                fields["edited_text"],
             ),
         )
         return
@@ -233,6 +245,12 @@ def _store_entry(
         return
     if "raw_text" in changed and existing["label"] != "verified":
         changed["label"] = "unlabelled"  # M3 recomputes labels from the new raw text
+    if any(name in changed for name in CLASSIFICATION_INPUTS):
+        # Hex added or changed the correction: `label corrections` classifies it again.
+        store.db.execute("DELETE FROM edits WHERE clip_id = ?", (existing["clip_id"],))
+        changed["reference_text"] = None
+        if existing["label"] == "strong":
+            changed["label"] = "unlabelled"
     assignments = ", ".join(f"{name} = ?" for name in changed)
     store.db.execute(
         f"UPDATE clips SET {assignments} WHERE hex_epoch_ms = ? AND hex_id = ?",
