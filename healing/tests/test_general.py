@@ -80,3 +80,20 @@ def test_subset_keeps_only_matching_clips(tmp_path):
     assert [clip["id"][:3] for clip in clips] == ["ls-"] * 4
     with pytest.raises(BuildError, match="expected 5"):
         subset(tmp_path, "ls-", "ls5", 5)
+
+
+def test_subset_names_cannot_replace_the_set(tmp_path):
+    from healing.sets.general import subset
+
+    build(tmp_path, [(FakeSource("ls", 20), 4)])
+    for name in ["manifest", "clips", "../escape", "a/b"]:
+        with pytest.raises(BuildError, match="plain name"):
+            subset(tmp_path, "ls-", name, 4)
+
+
+def test_a_truncated_sidecar_is_refused(tmp_path):
+    build(tmp_path, [(FakeSource("ls", 20), 4)])
+    sidecar = tmp_path / "clips.jsonl"
+    sidecar.write_text("".join(sidecar.read_text().splitlines(keepends=True)[:-1]))
+    with pytest.raises(BuildError, match="exactly the manifest"):
+        build(tmp_path, [(FakeSource("ls", 20), 4)])

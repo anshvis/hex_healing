@@ -154,6 +154,8 @@ def verify(out: Path) -> str:
 
 def subset(out: Path, prefix: str, name: str, expected: int) -> Path:
     """Writes `<name>.json`: the set's clips whose id starts with `prefix`."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name) or name in {"manifest", "clips"}:
+        raise BuildError(f"subset name {name!r} must be a plain name other than manifest or clips")
     verify(out)
     manifest = json.loads((out / "manifest.json").read_text())
     clips = [clip for clip in manifest["clips"] if clip["id"].startswith(prefix)]
@@ -165,6 +167,10 @@ def subset(out: Path, prefix: str, name: str, expected: int) -> Path:
 
 
 def _verify_audio(out: Path) -> None:
+    ids = {clip["id"] for clip in json.loads((out / "manifest.json").read_text())["clips"]}
+    rows = {json.loads(line)["id"] for line in (out / "clips.jsonl").read_text().splitlines()}
+    if rows != ids:
+        raise BuildError(f"{out / 'clips.jsonl'} doesn't list exactly the manifest's clips")
     for line in (out / "clips.jsonl").read_text().splitlines():
         row = json.loads(line)
         path = out / "audio" / f"{row['id']}.wav"
