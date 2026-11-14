@@ -69,6 +69,12 @@ me to flip any of them. Format: `D-n (agent default): <call>. Instead: <alternat
 - **D-26** Imports of a streaming variant stream only behind Labs › Stream imported models, off by default (T7.4). The gate's streaming check tells you to turn it on. *Instead:* stream such imports by default.
 - **D-25** The replay data's references are the base model's own transcripts (self-distillation). Its punctuation and casing are kept, instead of LibriSpeech's uppercase, unpunctuated text. *Instead:* normalize everything to lowercase, which risks teaching the model to drop formatting.
 
+## Defaults added while building M0
+- **D-27** The round-trip target word is "Qorvyx", not "Zorblax". `say` pronounces "Zorblax" so plainly that the base model already wrote it correctly in 8 of 10 held-out clips. "Qorvyx" is heard as "Corvix" by every voice, so the base misses it every time (0 of 10), which is the failure a fine-tune has to fix. *Instead:* any word whose spelling can't be guessed from its sound.
+- **D-28** LibriSpeech test-other comes from Hugging Face's parquet copy (`openslr/librispeech_asr` at `71cacbf`), pinned by SHA-256, as AMI does (`edinburghcstr/ami` at `46f28f2`). openslr's own mirrors served the tarball at tens of KB/s. The utterances and transcripts are the same release. *Instead:* openslr's tarball, pinned by its hash.
+- **D-29** The M0 spikes run NeMo through transcribe.cpp's pinned Parakeet environment (`scripts/envs/parakeet`, NeMo at `6967f48`), the one its converter and reference WER runner are tested with. `healing`'s own environment stays light (numpy, soundfile, pyarrow) until M6 needs training there. *Instead:* pin NeMo in `healing/pyproject.toml` now.
+- **D-30** AMI references drop disfluencies dictation never outputs (um, uh, hmm, mm-hmm, uh-huh and the like) and keep real backchannels ("yeah", "oh", "okay"). AMI clips need at least 3 words left. *Instead:* keep fillers, which would add errors no model change can fix.
+
 ## Challenge
 
 **2026-11-13, fresh-context Claude Opus reviewer** (Codex unavailable: not installed). Same model family, not cross-model. It saw the files, not this session's reasoning. Its 21 findings and what happened to each:
