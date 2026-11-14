@@ -1,0 +1,145 @@
+{
+ "base": "unified",
+ "pass": true,
+ "checks": {
+  "import": true,
+  "base_parity": true,
+  "tuned_parity": true,
+  "target_base_miss": true,
+  "target_tuned_hit": true,
+  "tensor_names_equal": true,
+  "speed_within_10pct": true
+ },
+ "base_parity": {
+  "clips": 300,
+  "reference_words": 5376,
+  "wer_a": 0.035342261904761904,
+  "wer_b": 0.035900297619047616,
+  "delta": 0.0005580357142857123,
+  "ci_low": -0.0011769783751245718,
+  "ci_high": 0.0029912133108992334,
+  "resamples": 10000,
+  "seed": 13
+ },
+ "tuned_parity": {
+  "clips": 300,
+  "reference_words": 5376,
+  "wer_a": 0.038318452380952384,
+  "wer_b": 0.03850446428571429,
+  "delta": 0.0001860119047619041,
+  "ci_low": -0.000382923525727652,
+  "ci_high": 0.0008243048691923006,
+  "resamples": 10000,
+  "seed": 13
+ },
+ "tuned_vs_base_gguf": {
+  "clips": 300,
+  "reference_words": 5376,
+  "wer_a": 0.035900297619047616,
+  "wer_b": 0.03850446428571429,
+  "delta": 0.0026041666666666713,
+  "ci_low": -0.0014300925191085684,
+  "ci_high": 0.006491193232995142,
+  "resamples": 10000,
+  "seed": 13
+ },
+ "target_recall": {
+  "base_q8": 0.0,
+  "tuned_q8": 1.0
+ },
+ "speed": {
+  "base_median_rtf": 0.01702558853639466,
+  "tuned_median_rtf": 0.017403966166556584,
+  "base_load_ms": 350.022292,
+  "tuned_load_ms": 68.994083,
+  "ratio": 1.022224055829441
+ },
+ "delta": {
+  "names_equal": true,
+  "tensors": 961,
+  "changed_tensors": 219,
+  "changed_q8_tensors": 219,
+  "survival_median": 1.8326233789717887,
+  "survival_min": 1.017029797836953,
+  "cosine_median": 0.5444455742835999,
+  "cosine_min": 0.3374621570110321,
+  "delta_rms_over_step_median": 0.21990775286623424
+ },
+ "steps": [
+  {
+   "step": "converter",
+   "exit": 0,
+   "seconds": 0
+  },
+  {
+   "step": "fetch",
+   "exit": 0,
+   "seconds": 1
+  },
+  {
+   "step": "clips",
+   "exit": 0,
+   "seconds": 10
+  },
+  {
+   "step": "train",
+   "exit": 0,
+   "seconds": 572
+  },
+  {
+   "step": "convert-base",
+   "exit": 0,
+   "seconds": 21
+  },
+  {
+   "step": "convert-tuned",
+   "exit": 0,
+   "seconds": 18
+  },
+  {
+   "step": "import",
+   "exit": 0,
+   "seconds": 5
+  },
+  {
+   "step": "bench-base",
+   "exit": 0,
+   "seconds": 68
+  },
+  {
+   "step": "bench-tuned",
+   "exit": 0,
+   "seconds": 69
+  },
+  {
+   "step": "qorvyx-base",
+   "exit": 0,
+   "seconds": 2
+  },
+  {
+   "step": "qorvyx-tuned",
+   "exit": 0,
+   "seconds": 1
+  },
+  {
+   "step": "nemo-base",
+   "exit": 0,
+   "seconds": 223
+  },
+  {
+   "step": "nemo-tuned",
+   "exit": 0,
+   "seconds": 216
+  },
+  {
+   "step": "delta",
+   "exit": 0,
+   "seconds": 17
+  },
+  {
+   "step": "verdict",
+   "exit": 0,
+   "seconds": 1
+  }
+ ]
+}
