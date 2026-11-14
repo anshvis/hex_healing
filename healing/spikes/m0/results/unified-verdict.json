@@ -2,13 +2,40 @@
  "base": "unified",
  "pass": true,
  "checks": {
-  "import": true,
+  "import_base": true,
+  "import_tuned": true,
+  "converter_pinned": true,
   "base_parity": true,
   "tuned_parity": true,
   "target_base_miss": true,
   "target_tuned_hit": true,
   "tensor_names_equal": true,
   "speed_within_10pct": true
+ },
+ "provenance": {
+  "converter_rev": "7045d1c0fe7cee37747b2792977421d435e75fca",
+  "quantizer_built_from": "7045d1c0fe7cee37747b2792977421d435e75fca",
+  "base_checkpoint": "/Users/anshviswanathan/hex_healing_work/models/parakeet-unified-en-0.6b/fe53cd885760c96b6a5f51a0bfd362cb4584a98b/parakeet-unified-en-0.6b.nemo",
+  "base_checkpoint_sha256": "ec23ed9150c8fde49072c3e2d61678ab903dbcef389d658db833420cbc1da35b",
+  "base_revision": "fe53cd885760c96b6a5f51a0bfd362cb4584a98b",
+  "imports": {
+   "base": {
+    "source": "/Users/anshviswanathan/hex_healing_work/rt-unified-2/base/parakeet-unified-en-0.6b/base-Q8_0.gguf",
+    "source_sha256": "ad9eb95cf6b26ac47da5a052344958085305737ce85b3b573f4f945b32512497",
+    "imported_copy": "/Users/anshviswanathan/hex_healing_work/rt-unified-2/hex/models/custom/ad9eb95cf6b26ac4.gguf",
+    "receipt_sha256": "ad9eb95cf6b26ac47da5a052344958085305737ce85b3b573f4f945b32512497",
+    "copy_sha256": "ad9eb95cf6b26ac47da5a052344958085305737ce85b3b573f4f945b32512497",
+    "ok": true
+   },
+   "tuned": {
+    "source": "/Users/anshviswanathan/hex_healing_work/rt-unified-2/tuned/parakeet-unified-en-0.6b/tuned-Q8_0.gguf",
+    "source_sha256": "4383fa60a2ac2bfe7bc355d92f151dad414b45905c7ab527e3a4e93629509998",
+    "imported_copy": "/Users/anshviswanathan/hex_healing_work/rt-unified-2/hex/models/custom/4383fa60a2ac2bfe.gguf",
+    "receipt_sha256": "4383fa60a2ac2bfe7bc355d92f151dad414b45905c7ab527e3a4e93629509998",
+    "copy_sha256": "4383fa60a2ac2bfe7bc355d92f151dad414b45905c7ab527e3a4e93629509998",
+    "ok": true
+   }
+  }
  },
  "base_parity": {
   "clips": 300,
@@ -24,11 +51,11 @@
  "tuned_parity": {
   "clips": 300,
   "reference_words": 5376,
-  "wer_a": 0.038318452380952384,
-  "wer_b": 0.03850446428571429,
-  "delta": 0.0001860119047619041,
-  "ci_low": -0.000382923525727652,
-  "ci_high": 0.0008243048691923006,
+  "wer_a": 0.03850446428571429,
+  "wer_b": 0.038318452380952384,
+  "delta": -0.0001860119047619041,
+  "ci_low": -0.0012943846829608344,
+  "ci_high": 0.0009094257438479786,
   "resamples": 10000,
   "seed": 13
  },
@@ -36,10 +63,10 @@
   "clips": 300,
   "reference_words": 5376,
   "wer_a": 0.035900297619047616,
-  "wer_b": 0.03850446428571429,
-  "delta": 0.0026041666666666713,
-  "ci_low": -0.0014300925191085684,
-  "ci_high": 0.006491193232995142,
+  "wer_b": 0.038318452380952384,
+  "delta": 0.002418154761904767,
+  "ci_low": -0.0017215903616260115,
+  "ci_high": 0.006365004995134677,
   "resamples": 10000,
   "seed": 13
  },
@@ -48,33 +75,39 @@
   "tuned_q8": 1.0
  },
  "speed": {
-  "base_median_rtf": 0.01702558853639466,
-  "tuned_median_rtf": 0.017403966166556584,
-  "base_load_ms": 350.022292,
-  "tuned_load_ms": 68.994083,
-  "ratio": 1.022224055829441
+  "base_median_rtf": 0.017061762950778867,
+  "tuned_median_rtf": 0.017118780893869034,
+  "base_load_ms": 388.902458,
+  "tuned_load_ms": 564.416708,
+  "ratio": 1.0033418553085434
  },
  "delta": {
   "names_equal": true,
   "tensors": 961,
   "changed_tensors": 219,
   "changed_q8_tensors": 219,
-  "survival_median": 1.8326233789717887,
-  "survival_min": 1.017029797836953,
-  "cosine_median": 0.5444455742835999,
-  "cosine_min": 0.3374621570110321,
-  "delta_rms_over_step_median": 0.21990775286623424
+  "survival_median": 1.8696928173155676,
+  "survival_min": 1.0167948014975785,
+  "cosine_median": 0.5348327159881592,
+  "cosine_min": 0.33671194314956665,
+  "random_cosine_median": 0.5157142281532288,
+  "delta_rms_over_step_median": 0.21333469706290664
  },
  "steps": [
   {
    "step": "converter",
    "exit": 0,
-   "seconds": 0
+   "seconds": 1
   },
   {
    "step": "fetch",
    "exit": 0,
-   "seconds": 1
+   "seconds": 0
+  },
+  {
+   "step": "subset",
+   "exit": 0,
+   "seconds": 0
   },
   {
    "step": "clips",
@@ -82,39 +115,49 @@
    "seconds": 10
   },
   {
-   "step": "train",
-   "exit": 0,
-   "seconds": 572
-  },
-  {
    "step": "convert-base",
    "exit": 0,
-   "seconds": 21
+   "seconds": 17
   },
   {
-   "step": "convert-tuned",
+   "step": "import-base",
    "exit": 0,
-   "seconds": 18
-  },
-  {
-   "step": "import",
-   "exit": 0,
-   "seconds": 5
+   "seconds": 3
   },
   {
    "step": "bench-base",
-   "exit": 0,
-   "seconds": 68
-  },
-  {
-   "step": "bench-tuned",
    "exit": 0,
    "seconds": 69
   },
   {
    "step": "qorvyx-base",
    "exit": 0,
+   "seconds": 1
+  },
+  {
+   "step": "nemo-base",
+   "exit": 0,
+   "seconds": 220
+  },
+  {
+   "step": "train",
+   "exit": 0,
+   "seconds": 572
+  },
+  {
+   "step": "convert-tuned",
+   "exit": 0,
+   "seconds": 33
+  },
+  {
+   "step": "import-tuned",
+   "exit": 0,
    "seconds": 2
+  },
+  {
+   "step": "bench-tuned",
+   "exit": 0,
+   "seconds": 70
   },
   {
    "step": "qorvyx-tuned",
@@ -122,24 +165,14 @@
    "seconds": 1
   },
   {
-   "step": "nemo-base",
-   "exit": 0,
-   "seconds": 223
-  },
-  {
    "step": "nemo-tuned",
    "exit": 0,
-   "seconds": 216
+   "seconds": 215
   },
   {
    "step": "delta",
    "exit": 0,
-   "seconds": 17
-  },
-  {
-   "step": "verdict",
-   "exit": 0,
-   "seconds": 1
+   "seconds": 30
   }
  ]
 }

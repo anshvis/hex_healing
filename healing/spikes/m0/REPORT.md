@@ -2,8 +2,9 @@
 
 Measured on an Apple M4 (16 GB, macOS 15.6) on 2026-11-14, with the installed Hex 3.4.0 as the
 runtime (`/Applications/Hex.app/Contents/MacOS/hex`, Metal). Raw runs stay under
-`~/hex_healing_work/rt-unified/`; the verdict is committed as
-[`results/unified-verdict.json`](results/unified-verdict.json).
+`~/hex_healing_work/rt-unified-2/`. The verdict and the per-tensor table are committed as
+[`results/unified-verdict.json`](results/unified-verdict.json) and
+[`results/unified-delta.json`](results/unified-delta.json).
 
 ## Result
 
@@ -15,21 +16,26 @@ runtime (`/Applications/Hex.app/Contents/MacOS/hex`, Metal). Raw runs stay under
 |---|---|---|
 | Converter | transcribe.cpp `7045d1c` | the converter and `transcribe-quantize` accept both checkpoints, with no patch |
 | Base control (T0.1) | paired 95% CI of WER(GGUF Q8_0) − WER(NeMo) ⊂ ±1.0 pt, 300 clips | NeMo 3.53%, GGUF 3.59%: **Δ +0.06 pt, CI [−0.12, +0.30]** |
-| Tuned parity (T0.4) | same bar, merged NeMo vs tuned Q8_0 | NeMo 3.83%, GGUF 3.85%: **Δ +0.02 pt, CI [−0.04, +0.08]** |
+| Tuned parity (T0.4) | same bar, merged NeMo vs tuned Q8_0 | NeMo 3.85%, GGUF 3.83%: **Δ −0.02 pt, CI [−0.13, +0.09]** |
 | Target word, base Q8_0 | misses (recall ≤ 20%) | **0 / 10** ("Corvix" every time) |
 | Target word, tuned Q8_0 | hits (recall ≥ 80%) | **10 / 10** |
-| `hex model import` | `import: ok` into an isolated `HEX_APPLICATION_SUPPORT_DIR` | **ok**: `custom-…` id, receipt and manifest written there only |
+| `hex model import`, base and tuned | each imports into the isolated `HEX_APPLICATION_SUPPORT_DIR`, and the imported copy is what was benchmarked | **ok**: each receipt's SHA-256 equals the converter output's and the scored copy's |
+| Converter revision | conversion at `7045d1c`, quantizer built from it | **checked**: HEAD and the quantizer's build stamp both `7045d1c` |
 | Tensor names | base and merged conversions identical | **equal**: 961 tensors, 219 changed |
-| Speed | tuned within 10% of base | median RTF 0.0174 vs 0.0170 (**+2.2%**) |
+| Speed | tuned within 10% of base | median RTF 0.0171 vs 0.0171 (**+0.3%**) |
 
-`roundtrip.sh unified` ran all 15 steps in 20 minutes and exited 0. Step times:
+`roundtrip.sh unified` ran all 16 steps in 22 minutes and exited 0. The base half (conversion,
+import, scoring) runs before training, so the T0.1 control doesn't wait on it. Step times:
 - training: 572 s;
-- NeMo scoring: 223 s and 216 s;
-- benchmarks: 68 s and 69 s;
-- conversions: 21 s and 18 s.
+- NeMo scoring: 220 s and 215 s;
+- benchmarks: 69 s and 70 s;
+- conversions: 17 s and 33 s.
 
-On a truncated `.nemo` it exits 1 and names the step that failed (`train`, the first step to read
-the checkpoint), with that step's log tail.
+An earlier run before the review fixes gave the same results within noise. Multithreaded CPU
+training isn't bit-reproducible, so the tuned file's hash differs between runs.
+
+On a truncated `.nemo` it exits 1 with `FAILED at step 'convert-base'` and the converter's own
+error (`tarfile.ReadError: unexpected end of data`).
 
 ## T0.1: base conversion control
 
@@ -50,33 +56,42 @@ the checkpoint), with that step's log tail.
 
 - **Training:** rank 16, α 32, on 219 linears: every encoder attention and feed-forward
   linear, plus the joint's 3. The predictor is an LSTM, which has no linear layers to wrap, so it
-  stayed frozen (D-14 asked for it). 11.9 M trainable parameters. 200 steps of batch 4 on CPU,
-  AdamW 5e-4, deterministic: no dropout or SpecAugment, seed 13. Loss 1.25 → 0.0001.
+  stayed frozen. D-14 asked for it; D-31 records the change. 11.9 M trainable parameters. 200 steps of batch 4 on CPU,
+  AdamW 5e-4, no dropout or SpecAugment, seed 13. Not bit-reproducible across runs, because CPU threads sum in a varying order. Loss 1.25 → 0.0001.
 - **Data:** 20 training and 10 held-out sentences in 4 `say` voices, with no personal audio (G-3).
   The target word is **Qorvyx** (D-27). "Zorblax" was too easy: the base already wrote it correctly
   in 8 of 10 clips.
 - **Merge:** W ← W + (α/r)·B·A, then the wrapper is removed, so `merged.nemo` has exactly the
   base's parameter names. The converter took it unchanged.
-- **Cost to general accuracy** (tuned vs base GGUF, LibriSpeech 300): +0.26 pt, CI [−0.14, +0.65].
+- **Cost to general accuracy** (tuned vs base GGUF, LibriSpeech 300): +0.24 pt, CI [−0.17, +0.64].
   That's not significant, for a run that memorized 20 clips. Real rounds mix in replay data (D-25).
 
 ### Does a small change survive Q8_0?
 
-For each changed tensor: the change's size against the Q8_0 rounding step (block max / 127), and
-the cosine between the quantized change and the true change. A change much smaller than one step
-can only survive as a shift in rounding decisions, so the cosine, not the norm ratio, measures
-whether its direction survived.
+For each changed tensor:
+- **the change's size** against the Q8_0 rounding step (block max / 127);
+- **the norm ratio** ‖Q(merged) − Q(base)‖ / ‖ΔW‖, the measure the packet named;
+- **the cosine** between the quantized change and the true change;
+- **a random change's cosine**: a random change of the same size, quantized the same way.
 
-| Tensors | n | Median RMS(ΔW) / step | Cosine, median | Cosine, min |
-|---|---|---|---|---|
-| encoder attention | 120 | 0.25 | 0.58 | 0.34 |
-| encoder feed-forward | 96 | 0.18 | 0.49 | 0.35 |
-| joint | 3 | 0.96 | 0.92 | 0.91 |
+A change much smaller than one step can only survive as a shift in rounding decisions. That makes
+the norm ratio exceed 1 (median 1.87), because rounding noise dominates the norm. The cosine is
+read against the random change's.
 
-Each weight moved only about a fifth of a rounding step, yet the quantized change still points
-the way of the real change (cosine about 0.5), and the effect survives completely: 0/10 → 10/10.
-This round's change is larger than a careful real round's will be. So **every real round's gate
-(T7.1) scores the Q8_0 file**, never the F32 or NeMo model.
+| Tensors | n | Median RMS(ΔW) / step | Cosine, median | Cosine, min | Random change's cosine, median |
+|---|---|---|---|---|---|
+| encoder attention | 120 | 0.24 | 0.56 | 0.34 | 0.54 |
+| encoder feed-forward | 96 | 0.18 | 0.49 | 0.35 | 0.47 |
+| joint | 3 | 0.96 | 0.92 | 0.92 | 0.91 |
+
+Each weight moved only about a fifth of a rounding step. The quantized change points the way of
+the real change (median cosine 0.53), but **a random change of the same size scores almost the
+same (0.52)**. So the cosine shows only that rounding doesn't systematically erase a small change.
+It is not evidence that this learned change in particular survived.
+
+**The evidence is behavioural:** the Q8_0 file goes from 0/10 to 10/10 on the target word. A
+careful real round will change the weights less than this spike did. That's why **every real
+round's gate (T7.1) scores the Q8_0 file**, never the F32 or NeMo model.
 
 ## T0.2: the kept recording is the model's input
 
@@ -125,6 +140,24 @@ This round's change is larger than a careful real round's will be. So **every re
   duration but skips Unified's 400 ms of trailing silence. Parity is unaffected, because NeMo and
   the GGUF both see unpadded clips. T3.4 switches the benchmark to `pad_gguf_samples`, so later
   gates score audio the way dictation prepares it.
+
+## Guardrail incident (G-8), fixed
+
+The first version ran `hex benchmark-transcription` without an isolated data folder. `hex` opens
+its process log before it dispatches any command, so each benchmark appended one "loaded
+transcription model" line to your real `~/Library/Application Support/hex/logs/process.log`: about
+a dozen lines on 2026-11-14 between 08:04 and 08:47 UTC. They held no audio and no transcript, and
+nothing else in that folder was written.
+
+Both reviewers caught it, Claude and Codex independently. The packet's G-8 check had only listed
+`models/custom`, so it missed this.
+
+**Fix:**
+- Every `hex` call now runs with its own `HEX_APPLICATION_SUPPORT_DIR`: `$HEALING_HOME/hex-support`
+  for `healing`, and `$SPIKE_DIR/hex` for the spike.
+- `tests/test_bench_isolation.py` checks this.
+- The G-8 checks now compare the real folder's listing and `process.log`'s mtime before and after
+  a run. Both were unchanged across the final `pytest`, baseline and round trip.
 
 ## Environment notes
 
