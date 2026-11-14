@@ -151,7 +151,7 @@ def _clean_after() -> int:
 
     try:
         with process_lock():
-            store = Store()
+            store = Store(sweep=False)
             try:
                 print(clean(store, DEFAULT_MIN_FREE).summary())
             finally:

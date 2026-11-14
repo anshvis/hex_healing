@@ -111,11 +111,15 @@ def _pcm_sha256(path: Path) -> str | None:
 def _orphans(store: Store) -> list[Path]:
     known = {row["path"] for row in store.db.execute("SELECT path FROM audio")}
     found = []
-    for candidate in sorted((store.root / "audio").glob("*/*.flac")):
-        if str(candidate.relative_to(store.root)) in known:
+    audio = store.root / "audio"
+    for shard in sorted(audio.iterdir()) if audio.is_dir() else []:
+        if not stat.S_ISDIR(shard.lstat().st_mode):  # a linked shard is never entered
             continue
-        if _is_regular(_lstat(candidate)):
-            found.append(candidate)
+        for candidate in sorted(shard.glob("*.flac")):
+            if str(candidate.relative_to(store.root)) in known:
+                continue
+            if _is_regular(_lstat(candidate)):
+                found.append(candidate)
     return found
 
 
@@ -131,10 +135,24 @@ def index_problems(store: Store) -> dict[str, int]:
     return problems
 
 
-def _quarantine(home: Path, at_ms: int, path: Path) -> None:
-    target_dir = home / "quarantine" / str(at_ms)
-    target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(home / "quarantine", 0o700)
+def _real_dir(path: Path) -> bool:
+    info = _lstat(path)
+    return info is not None and stat.S_ISDIR(info.st_mode)
+
+
+def _quarantine(home: Path, at_ms: int, path: Path) -> bool:
+    """Move `path` into quarantine; False (nothing moved) when quarantine or its day is a link."""
+    root = home / "quarantine"
+    target_dir = root / str(at_ms)
+    if _lstat(root) is not None and not _real_dir(root):
+        return False
+    if _lstat(root) is None:
+        root.mkdir(mode=0o700)
+    if _lstat(target_dir) is not None and not _real_dir(target_dir):
+        return False
+    if _lstat(target_dir) is None:
+        target_dir.mkdir(mode=0o700)
+    os.chmod(root, 0o700)
     os.chmod(target_dir, 0o700)
     target = target_dir / path.name
     suffix = 0
@@ -142,6 +160,7 @@ def _quarantine(home: Path, at_ms: int, path: Path) -> None:
         suffix += 1
         target = target_dir / f"{path.name}.{suffix}"
     os.rename(path, target)
+    return True
 
 
 def _sweep_temp(home: Path, now: int, report: Report, dry_run: bool) -> None:
@@ -227,10 +246,10 @@ def _sweep_scratch(home: Path, now: int, report: Report, dry_run: bool) -> None:
 def _check_index(store: Store, now: int, deep: bool, report: Report, dry_run: bool) -> None:
     home = store.root.parent
     for path in _orphans(store):
+        if not dry_run and not _quarantine(home, now, path):
+            continue
         report.orphans_moved += 1
         report.actions.append(f"quarantine orphan {path.relative_to(store.root)}")
-        if not dry_run:
-            _quarantine(home, now, path)
     for row in store.db.execute(
         "SELECT sha256, path, bytes FROM audio WHERE evicted_at_ms IS NULL ORDER BY sha256"
     ).fetchall():
@@ -254,7 +273,7 @@ def _check_index(store: Store, now: int, deep: bool, report: Report, dry_run: bo
             store.db.execute(
                 "UPDATE audio SET evicted_at_ms = ?, corrupt = 1 WHERE sha256 = ?", (now, row["sha256"])
             )
-            _quarantine(home, now, path)
+            _quarantine(home, now, path)  # a refused move leaves the file; the row is marked
     if not dry_run:
         store.db.commit()
 
@@ -334,7 +353,7 @@ def main_clean(min_free: int, deep: bool, dry_run: bool) -> int:
 
     try:
         with process_lock():
-            store = Store()
+            store = Store(sweep=False)
             try:
                 report = clean(store, min_free, deep, dry_run)
             except CleanError as error:

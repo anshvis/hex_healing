@@ -323,3 +323,65 @@ def test_status_warns_below_floor_and_mismatch(store, tmp_path):
     clean(store, 0, now=NOW)
     healed = status.compute(store, tmp_path / "no-hex", DEFAULT_BUDGET, min_free=1, free_fn=lambda: 5)
     assert "index_mismatch" not in healed.warnings and healed.last_clean["missing_marked"] == 1
+
+
+def _flac(path, seed):
+    import soundfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    soundfile.write(path, tone(seed).data, 16_000, format="FLAC", subtype="PCM_16")
+
+
+def test_linked_shard_orphan_untouched(store, home, tmp_path):
+    outside = tmp_path / "out"
+    _flac(outside / "x.flac", 50)
+    os.symlink(outside, store.root / "audio" / "zz")
+    report = clean(store, 0, now=NOW)
+    assert report.orphans_moved == 0
+    assert (outside / "x.flac").is_file()
+
+
+def test_linked_quarantine_not_used_or_chmodded(store, home, tmp_path):
+    outside = tmp_path / "out"
+    outside.mkdir()
+    os.chmod(outside, 0o755)
+    os.symlink(outside, home / "quarantine")
+    orphan = tone(51)
+    path = store.audio_path(orphan.sha256)
+    _flac(path, 51)
+    clean(store, 0, now=NOW)
+    assert path.is_file()
+    assert list(outside.iterdir()) == []
+    assert (outside.stat().st_mode & 0o777) == 0o755
+
+
+def test_floor_prune_never_deletes_through_linked_shard(store, home, tmp_path):
+    pcm = add(store, 1)
+    path = store.audio_path(pcm.sha256)
+    outside = tmp_path / "out"
+    outside.mkdir()
+    shard = path.parent
+    os.rename(shard, outside / "moved")
+    os.symlink(outside / "moved", shard)
+    with pytest.raises(CleanError):
+        clean(store, 10, now=NOW, free_fn=lambda: 0)
+    assert (outside / "moved" / path.name).is_file()
+
+
+def test_floor_shortfall_larger_than_weak_audio_evicts_all_weak(store, home):
+    strong = [add(store, i, label="strong") for i in range(2)]
+    weak = [add(store, 10 + i) for i in range(3)]
+    size = store.audio_path(weak[0].sha256).stat().st_size
+    floor = 10 * size
+    base = disk(home, 0)()
+    with pytest.raises(CleanError) as raised:
+        clean(store, floor, now=NOW, free_fn=disk(home, -base + floor - 4 * size))
+    assert raised.value.code == 4
+    assert all(row(store, w)["evicted_at_ms"] is not None for w in weak)
+    assert all(row(store, s)["evicted_at_ms"] is None for s in strong)
+
+
+def test_cli_dry_run_keeps_fresh_temp(store, home):
+    tmp = store.root / "audio" / "x.flac.tmp"
+    tmp.write_bytes(b"x")
+    assert main(["clean", "--dry-run", "--min-free", "0"]) == 0
+    assert tmp.exists()

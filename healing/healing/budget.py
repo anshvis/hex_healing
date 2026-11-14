@@ -207,6 +207,18 @@ def _refresh_clusters(store: Store) -> None:
         )
 
 
+def _unlink_inside(root, path) -> None:
+    """Delete only a regular file whose real parent is inside `root` (G-6: never through a link)."""
+    import stat as _stat
+
+    try:
+        info = path.lstat()
+        if _stat.S_ISREG(info.st_mode) and path.parent.resolve().is_relative_to(root.resolve()):
+            path.unlink()
+    except OSError:
+        pass
+
+
 def prune(
     store: Store, budget: int = DEFAULT_BUDGET, k: int = DEFAULT_K, dry_run: bool = False,
     now: int | None = None, lowering: bool = False,
@@ -217,6 +229,8 @@ def prune(
     units = _load_units(store)
     result = Result(budget=budget, total_bytes=sum(u.bytes for u in units))
     protected_bytes = sum(u.bytes for u in units if u.protected)
+    if lowering:  # never below what is protected: evict every eligible file, then report
+        budget = max(budget, protected_bytes)
     if protected_bytes > budget:
         raise PruneError(
             f"protected audio is {protected_bytes} bytes, over the budget {budget} by "
@@ -291,7 +305,7 @@ def prune(
         return result
     store.db.commit()
     for row in store.db.execute("SELECT path FROM audio WHERE evicted_at_ms IS NOT NULL").fetchall():
-        (store.root / row["path"]).unlink(missing_ok=True)
+        _unlink_inside(store.root, store.root / row["path"])
     if result.over_by:
         raise PruneError(
             f"still over the budget by {result.over_by} bytes: what is left is protected or "
