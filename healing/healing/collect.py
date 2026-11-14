@@ -95,31 +95,41 @@ class Epochs:
         row = self.db.execute("SELECT MAX(hex_epoch_ms) FROM clips").fetchone()
         self.current: int | None = row[0]
 
-    def _extent(self, epoch: int) -> tuple[int, int]:
-        row = self.db.execute(
-            "SELECT MAX(hex_id), MAX(timestamp_ms) FROM clips WHERE hex_epoch_ms = ?", (epoch,)
-        ).fetchone()
-        return row[0] or 0, row[1] or 0
-
     def assign(self, hex_id: int, timestamp_ms: int) -> int:
+        """Reuse of an id is the only evidence of a reset; a clock step back is not."""
+        row = self.db.execute(
+            "SELECT MAX(hex_epoch_ms) FROM clips WHERE hex_id = ? AND timestamp_ms = ?",
+            (hex_id, timestamp_ms),
+        ).fetchone()
+        if row[0] is not None:
+            return row[0]
         if self.current is None:
             self.current = timestamp_ms
             return self.current
-        known = self.db.execute(
-            "SELECT timestamp_ms FROM clips WHERE hex_epoch_ms = ? AND hex_id = ?",
-            (self.current, hex_id),
+        taken = self.db.execute(
+            "SELECT 1 FROM clips WHERE hex_epoch_ms = ? AND hex_id = ?", (self.current, hex_id)
         ).fetchone()
-        if known is not None:
-            if known[0] == timestamp_ms:
-                return self.current
-        else:
-            max_id, max_ts = self._extent(self.current)
-            if hex_id > max_id or timestamp_ms <= max_ts:
-                return self.current
-        # The id is taken by a different entry, or an older id is newer than all we hold:
-        # Hex's store was reset, so a new epoch starts here.
-        self.current = timestamp_ms
+        if taken is not None:
+            # The id holds a different entry in this store: Hex's store was reset.
+            self.current = timestamp_ms
         return self.current
+
+
+def since_to_ms(since: str | None, now: int) -> int | None:
+    """The lower bound a `--since` value means, in ms, or None when unbounded."""
+    if since is None:
+        return None
+    match = re.fullmatch(r"(\d+)([smhdw])", since)
+    if match:
+        unit = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[match.group(2)]
+        return max(now - int(match.group(1)) * unit * 1000, 0)
+    try:
+        moment = datetime.fromisoformat(since.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return int(moment.timestamp() * 1000)
 
 
 def collect(store: Store, binary: Path, since: str | None = None) -> Summary:
@@ -129,7 +139,7 @@ def collect(store: Store, binary: Path, since: str | None = None) -> Summary:
         newest = store.db.execute("SELECT MAX(timestamp_ms) FROM clips").fetchone()[0]
         since = rfc3339(max(newest - RESCAN_MS, 0)) if newest is not None else None
     run = store.db.execute(
-        "INSERT INTO runs (started_at_ms, since_ms) VALUES (?, ?)", (started, None)
+        "INSERT INTO runs (started_at_ms, since_ms) VALUES (?, ?)", (started, since_to_ms(since, started))
     ).lastrowid
     store.db.commit()
     try:
@@ -232,7 +242,7 @@ def main_collect(since: str | None, hex_path: Path | None) -> int:
         if since is not None:
             check_since(since)
         try:
-            binary = hex_path or hex_binary()
+            binary = Path(hex_path or hex_binary()).resolve()
         except BenchError as error:
             raise CollectError(str(error), 2) from error
         if not Path(binary).is_file():

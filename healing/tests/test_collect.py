@@ -211,19 +211,58 @@ def test_epoch_ms_since_is_rejected(world):
     assert world.run("--since", "1760000000000") == 2
 
 
+def tree(root):
+    return sorted((str(p.relative_to(root)), p.stat().st_size) for p in root.rglob("*"))
+
+
 def test_read_only_hex_data_root(world, tmp_path, monkeypatch):
     support = tmp_path / "hex-support"
-    (support / "history").mkdir(parents=True)
-    (support / "history" / "history.json").write_text("{}")
+    (support / "history-audio").mkdir(parents=True)
+    wav = support / "history-audio" / "a.wav"
+    wav.write_bytes(WAV.read_bytes())
+    for entry in world.doc["entries"]:
+        if entry.get("recording"):
+            entry["recording"] = str(wav)
+    (support / "history.json").write_text(json.dumps(world.doc))
+    monkeypatch.setenv("FAKE_HISTORY", str(support / "history.json"))
     monkeypatch.setenv("HEX_APPLICATION_SUPPORT_DIR", str(support))
+    before = tree(support)
     for path in [support, *support.rglob("*")]:
         path.chmod(0o555 if path.is_dir() else 0o444)
     try:
         assert world.run() == 0
         assert world.run() == 0
+        assert tree(support) == before
     finally:
         for path in [support, *support.rglob("*")]:
             path.chmod(0o755 if path.is_dir() else 0o644)
+    assert len(clips(world)) == 3 and len(flacs(world)) == 1
+
+
+def test_clock_rollback_is_idempotent(world, capsys):
+    stamp = 1760000000000
+    world.doc["entries"] = [
+        {"id": i, "timestamp_ms": ts, "kind": "dictation", "final_text": f"t{i}", "raw_text": f"t{i}"}
+        for i, ts in [(1, stamp + 1000), (2, stamp + 2000), (3, stamp)]
+    ]
+    world.save()
+    world.run()
+    capsys.readouterr()
+    world.run()
+    assert capsys.readouterr().out.startswith("seen 3, new 0")
+    rows = clips(world)
+    assert len(rows) == 3 and len({r["hex_epoch_ms"] for r in rows}) == 1
+
+
+def test_runs_record_since_ms(world):
+    world.run()
+    world.run()
+    world.run("--since", "3d")
+    values = [r[0] for r in world.db().execute("SELECT since_ms FROM runs ORDER BY run_id")]
+    assert values[0] is None and values[1] is not None and values[2] is not None
+
+
+def test_relative_hex_path_runs_that_file(world, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert main(["collect", "--hex", "./hex"]) == 0
     assert len(clips(world)) == 3
-    assert not any(support.rglob("*.tmp")) and sorted(p.name for p in (support / "history").iterdir()) == ["history.json"]
-    assert os.path.commonpath([str(world.home), str(world.home / "dataset")]) == str(world.home)
