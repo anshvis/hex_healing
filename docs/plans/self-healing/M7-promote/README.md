@@ -15,7 +15,7 @@ A candidate replaces the current model only if it wins with statistical confiden
 | [T7.3](T7.3-auto-rollback.md) | Auto-rollback only when the promoted model is significantly worse | standard | T7.2 |
 
 ## How you validate this milestone
-1. Run `healing gate v<n>` on T0.4's spike candidate. It is **rejected**: the rolling holdout has no Zorblax, and the reason is logged.
+1. Run `healing gate v<n>` on T0.4's spike candidate. It is **rejected**: the rolling holdout has no Qorvyx, and the reason is logged.
 2. Force a fixture where the candidate wins. `healing promote v<n>` imports it, switches Hex to it, and `hex status` shows it as the model.
 3. Run `healing rollback`. Hex is back on the previous version, and the registry shows `rolled_back`.
 
