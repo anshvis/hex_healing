@@ -120,6 +120,7 @@ pub(crate) fn uses_page(settings: &DictationProcessingSettings) -> bool {
 }
 
 /// The history entry for one pasted dictation.
+#[allow(clippy::too_many_arguments)]
 pub fn history_draft(
     raw_text: String,
     processed: &Processed,
@@ -128,7 +129,9 @@ pub fn history_draft(
     inference_ms: u64,
     total_ms: u64,
     recording: Option<crate::history::Recording>,
+    selection: &crate::transcription::models::TranscriptionSelection,
 ) -> crate::history::HistoryDraft {
+    let (model, model_id) = crate::history::model_fields(selection);
     crate::history::HistoryDraft {
         kind: crate::history::HistoryKind::Dictation,
         raw_text,
@@ -139,13 +142,15 @@ pub fn history_draft(
                 profile: processing.profile.clone(),
                 latency_ms: processing.latency_ms,
                 fallback: processing.fallback.clone(),
+                rewrote: processing.rewrote,
             }
         }),
         audio_ms,
         inference_ms,
         total_ms,
         recording,
-        model: crate::history::dictation_model(),
+        model,
+        model_id,
     }
 }
 
@@ -389,6 +394,24 @@ mod tests {
             ..crate::dictation::context::ContextSnapshot::default()
         };
         assert!(runtime.profiles.processes(&context));
+    }
+
+    #[test]
+    fn model_id_is_jobs_selection_not_current() {
+        use crate::transcription::models::{TranscriptionModelId, TranscriptionSelection};
+        let job = TranscriptionSelection {
+            model: TranscriptionModelId::ParakeetV3,
+            language: "en".into(),
+        };
+        // The saved selection moved on after the job was submitted.
+        let current = TranscriptionSelection {
+            model: TranscriptionModelId::ParakeetV2,
+            language: "en".into(),
+        };
+        assert_ne!(job, current);
+        let processed = Processed::unchanged("hello");
+        let draft = history_draft("hello".into(), &processed, None, 1, 1, 1, None, &job);
+        assert_eq!(draft.model_id.as_deref(), Some("parakeet_v3"));
     }
 
     #[test]

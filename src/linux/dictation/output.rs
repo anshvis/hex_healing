@@ -54,6 +54,7 @@ impl DictationOutput {
         raw_text: String,
         flavour: crate::dictation::DictationFlavour,
         language: &str,
+        selection: &crate::transcription::models::TranscriptionSelection,
         paste: Option<Paste<'_>>,
         last_dictation: &mut Option<String>,
         audio_ms: u64,
@@ -138,6 +139,7 @@ impl DictationOutput {
                 inference_ms,
                 started.elapsed().as_millis() as u64,
                 recording,
+                selection,
             );
             if printed {
                 draft.kind = crate::history::HistoryKind::Printed;

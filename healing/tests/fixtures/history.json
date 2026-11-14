@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "retention": "days7",
+  "truncated": false,
+  "entries": [
+    {"id": 1, "timestamp_ms": 1760000000000, "application": "Notes", "mode": "Default", "kind": "dictation",
+     "final_text": "Hello there.", "raw_text": "hello there", "recording": "{wav}",
+     "model_id": "parakeet-unified", "audio_ms": 1000},
+    {"id": 2, "timestamp_ms": 1760000060000, "application": "Mail", "mode": "Email", "kind": "dictation",
+     "final_text": "Thanks, Ansh.", "raw_text": "thanks ansh", "recording": "{wav}",
+     "model_id": "parakeet-unified", "audio_ms": 1000, "rewritten": true},
+    {"id": 3, "timestamp_ms": 1760000120000, "application": null, "mode": null, "kind": "raw",
+     "final_text": "no audio kept", "raw_text": "no audio kept", "model_id": "parakeet-unified"}
+  ]
+}

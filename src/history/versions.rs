@@ -21,6 +21,8 @@ pub struct HistoryVersion {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// When this transcript was made.
     pub timestamp_ms: u64,
@@ -37,6 +39,8 @@ impl HistoryVersion {
 pub struct Transcript {
     pub text: String,
     pub model: Option<String>,
+    /// The model's stable id, so `model` and `model_id` never disagree.
+    pub model_id: Option<String>,
     /// The language chosen for that run; `None` when the model chose.
     pub language: Option<String>,
 }
@@ -49,6 +53,7 @@ impl HistoryEntry {
             final_text: self.final_text.clone(),
             processing: self.processing.clone(),
             model: self.model.clone(),
+            model_id: self.model_id.clone(),
             language: self.language.clone(),
             timestamp_ms: self.text_ms.unwrap_or(self.timestamp_ms),
         }
@@ -59,6 +64,7 @@ impl HistoryEntry {
         self.final_text = version.final_text;
         self.processing = version.processing;
         self.model = version.model;
+        self.model_id = version.model_id;
         self.language = version.language;
         self.text_ms = (version.timestamp_ms != self.timestamp_ms).then_some(version.timestamp_ms);
     }
@@ -80,6 +86,7 @@ impl HistoryEntry {
             final_text: text,
             processing: None,
             model: label(transcript.model),
+            model_id: label(transcript.model_id),
             language: label(transcript.language),
             timestamp_ms: now_ms,
         });
@@ -129,6 +136,7 @@ mod tests {
             total_ms: 1_100,
             recording: None,
             model: Some("Parakeet v3".into()),
+            model_id: None,
         }
     }
 
@@ -136,6 +144,7 @@ mod tests {
         Transcript {
             text: text.into(),
             model: Some(model.into()),
+            model_id: Some(format!("id-{model}")),
             language: language.map(str::to_owned),
         }
     }
@@ -197,6 +206,14 @@ mod tests {
         assert_eq!(entry.final_text, "first");
         assert_eq!(entry.raw_text, "raw first");
         assert_eq!(entry.model.as_deref(), Some("Parakeet v3"));
+        assert_eq!(entry.model_id, None);
+        let again_entry = {
+            let mut entry = entry.clone();
+            assert!(entry.restore(0));
+            entry
+        };
+        assert_eq!(again_entry.model.as_deref(), Some("Whisper"));
+        assert_eq!(again_entry.model_id.as_deref(), Some("id-Whisper"));
         assert_eq!(entry.text_ms, None);
         assert_eq!(entry.versions.len(), 1);
         assert_eq!(entry.versions[0].final_text, "second");

@@ -26,7 +26,12 @@ Each result has a timestamp, application, recorded processing mode if present,
 and final text. `--raw` adds the stored pre-processing transcript. Older entries
 may have no app or mode; Hex does not infer missing metadata. With Labs › Keep
 recordings on, an entry whose WAV is still beside the store adds its absolute
-path as `recording` in JSON; every other entry omits it.
+path as `recording` in JSON; every other entry omits it. Provenance fields, all
+additive (`version` stays 1) and omitted when absent: `model_id`, the stable id
+of the model that ran the job (a catalog id, or `custom-<16hex>` for an import;
+entries from before it was recorded omit it), `audio_ms`, the clip's length
+(omitted when 0), and `rewritten`, true only when an OpenCode rewrite produced
+`final_text`.
 
 - `--since` is inclusive and `--until` is exclusive. A date alone means local
   midnight; `--until 2026-10-20` includes all of October 20.
@@ -160,6 +165,7 @@ integer milliseconds. Absolute timestamps use Unix time. Nullable fields are
 present as `null`, except `raw_text`, which is omitted without `--raw`,
 `score` and `snippet`, which are omitted without `--search`, `recording`, which
 is omitted unless Labs › Keep recordings still holds the entry's audio file,
+`model_id`, `audio_ms` and `rewritten`, which are omitted when absent, 0 and false,
 `range`, which
 is omitted without `--from` or `--to`, `chapters`, which is omitted when a
 meeting has none, and `chapter`, which is omitted without `--chapter`.
@@ -183,6 +189,9 @@ type History = {
     score?: number // present only with --search; higher is more relevant
     snippet?: string // present only with --search; matches wrapped in **
     recording?: string // absolute path to the kept WAV; only while Labs › Keep recordings has it
+    model_id?: string // stable id of the model that ran the job; omitted on older entries
+    audio_ms?: number // clip length; omitted when 0
+    rewritten?: true // an OpenCode rewrite produced final_text; omitted otherwise
   }[]
 }
 

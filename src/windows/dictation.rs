@@ -59,6 +59,9 @@ struct Job {
     audio_ms: u64,
     /// The language the model was asked for at submission.
     language: String,
+    /// The model selection the job ran, read once at submission (History's
+    /// `model_id`), never at record time.
+    selection: crate::transcription::models::TranscriptionSelection,
     /// The clip, kept for History while Labs › Keep recordings is on.
     recording: Option<crate::history::Recording>,
     /// The shortcut that started this capture (dictation, raw, terminal
@@ -1171,6 +1174,7 @@ fn process_dictation_job(
                 inference_ms,
                 started.elapsed().as_millis() as u64,
                 job.recording.take(),
+                &job.selection,
             );
             if printed {
                 draft.kind = crate::history::HistoryKind::Printed;
@@ -1370,16 +1374,17 @@ fn submit_capture(
                 (by_shortcut && !flavour.raw() && print.is_none()).then(|| clip.held_ms());
             let stream = clip.take_stream();
             let samples = clip.into_transcription_samples();
-            let language = engine
+            let selection = engine
                 .held_selection()
-                .unwrap_or_else(|| crate::app_settings::transcription_selection().1)
-                .language;
+                .unwrap_or_else(|| crate::app_settings::transcription_selection().1);
+            let language = selection.language.clone();
             let recording = crate::history::Recording::keep(&samples);
             let job = OutputJob::Dictation(Box::new(Job {
                 context,
                 transcript: engine.finish(stream, samples)?,
                 audio_ms,
                 language,
+                selection,
                 recording,
                 print,
                 flavour,

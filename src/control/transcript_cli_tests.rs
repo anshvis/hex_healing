@@ -129,6 +129,7 @@ fn history_stats_parse_sum_retained_entries_and_need_the_labs_toggle() {
         total_ms: 0,
         recording_bytes: 0,
         model: None,
+        model_id: None,
         language: None,
         text_ms: None,
         versions: Vec::new(),
@@ -770,4 +771,58 @@ fn parses_release_commands_and_rejects_invalid_limits_and_times() {
         crate::meeting::query::parse_time("2026-10-20T12:00:00.123456Z", NOW, false).unwrap(),
         second + 123
     );
+}
+
+#[test]
+fn history_row_includes_model_id_audio_ms_rewritten() {
+    let mut entries = entries();
+    entries[3].model_id = Some("parakeet-unified-en".into());
+    entries[3].audio_ms = 2_500;
+    entries[3].processing = Some(crate::history::HistoryProcessing {
+        profile: "Chat".into(),
+        latency_ms: 10,
+        fallback: None,
+        rewrote: true,
+    });
+    let output = history_output(
+        &entries,
+        &args(&["--limit", "1"]),
+        HistoryRetention::Week,
+        NOW,
+        &[],
+        None,
+    )
+    .unwrap();
+    let row = serde_json::to_value(&output).unwrap()["entries"][0].clone();
+    assert_eq!(row["id"], 4);
+    assert_eq!(row["model_id"], "parakeet-unified-en");
+    assert_eq!(row["audio_ms"], 2_500);
+    assert_eq!(row["rewritten"], true);
+}
+
+#[test]
+fn history_row_omits_absent_fields() {
+    let mut entries = entries();
+    entries[3].model_id = None;
+    entries[3].audio_ms = 0;
+    // Transformations alone make an observation, but no rewrite.
+    entries[3].processing = Some(crate::history::HistoryProcessing {
+        profile: "Custom transformations".into(),
+        latency_ms: 10,
+        fallback: None,
+        rewrote: false,
+    });
+    let output = history_output(
+        &entries,
+        &args(&["--limit", "1"]),
+        HistoryRetention::Week,
+        NOW,
+        &[],
+        None,
+    )
+    .unwrap();
+    let row = serde_json::to_value(&output).unwrap()["entries"][0].clone();
+    for key in ["model_id", "audio_ms", "rewritten"] {
+        assert!(row.get(key).is_none(), "{key} should be omitted");
+    }
 }

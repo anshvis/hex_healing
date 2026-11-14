@@ -2,7 +2,8 @@
 
 ```ts
 Agent or terminal                                // transcripts.cli; macOS release
-├── hex history -> Timestamp, app, recorded mode, final text
+├── hex history -> Timestamp, app, recorded mode, final text, plus model_id, audio_ms and
+│                  rewritten when known (provenance; the row's `version` stays 1)
 │   ├── --since / --until / --app / --grep -> Filter, then limit
 │   ├── --search <query> -> Rank filtered entries with meetings' fuzzy BM25
 │   │   (raw + final text count as one document)

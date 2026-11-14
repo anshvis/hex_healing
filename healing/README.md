@@ -20,10 +20,40 @@ uv run pytest
 Python 3.12 and [uv](https://docs.astral.sh/uv/). The benchmark needs a `hex` binary: `$HEX_BIN`,
 else this checkout's `target/release/hex`, else the installed `/Applications/Hex.app`.
 
+## Running your own Hex build
+
+Self-healing needs Hex changes that aren't released, so the Hex you dictate with is a local build of
+this branch, installed as the only `/Applications/Hex.app`. Without a Developer ID certificate, build
+it ad-hoc signed with updates off:
+
+```sh
+cd ..                      # repo root
+HEX_RELEASE_UNSIGNED=1 HEX_LOCAL_BUILD=1 scripts/install-app.sh
+rm -rf target/app/Hex.app  # so macOS never launches the build copy instead
+```
+
+- `HEX_RELEASE_UNSIGNED=1` keeps the normal app name and bundle id (`anomaly.hex`), so it uses the
+  usual `~/Library/Application Support/hex` data folder: models, settings and History carry over.
+- `HEX_LOCAL_BUILD=1` turns updates off, so it never replaces itself with an official release.
+- `install-app.sh` stops the running Hex, replaces `/Applications/Hex.app` and opens it.
+- Don't use `HEX_TEST_BUILD=1` for this: it builds `Hex Test.app` with its own `hex-test` data folder,
+  which `healing` doesn't read unless `HEX_BIN` points at it.
+- A plain `scripts/install-app.sh` needs `HEX_TEAM_ID` and a Developer ID identity, and fails without them.
+
+The signature is ad-hoc, so macOS may ask for Microphone and Accessibility again after a rebuild.
+If the shortcut stops working while Hex looks allowed, remove Hex under System Settings › Privacy &
+Security › Accessibility and add `/Applications/Hex.app` back. Turn on Settings › Labs › Keep
+recordings, or `healing collect` has no audio to copy.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
+| `healing collect` | Copies Hex's History (`hex history --json --raw`) and kept recordings into `dataset.sqlite` and `audio/<sha256>.flac`. Idempotent. Entries Hex later deletes stay. |
+| `healing status [--json]` | Clip count, bytes against the budget, clusters, and warnings such as History expiring uncollected entries. `--list` lists every warning code. |
+| `healing prune [--budget B] [--k K] [--dry-run]` | Clusters near-duplicate text, keeps k audio files per cluster, and evicts the most redundant, oldest weak audio to hold the budget. |
+| `healing clean [--deep] [--dry-run]` | Makes the index match the disk: quarantines orphans, marks missing or corrupt audio (`--deep` re-hashes), sweeps temp files, holds a free-space floor. |
+| `healing schedule install\|remove\|show\|run` | The launchd job that runs collect and prune every 6 hours. |
 | `healing sets build-general` | Builds the fixed general regression set: 300 LibriSpeech test-other and 200 AMI IHM utterances, seeded and SHA-pinned. A second run prints `unchanged`; a different set is refused. |
 | `healing eval baseline [--model <gguf>]` | Scores a model on the general set with `hex benchmark-transcription` and writes `healing/eval/baseline.json`. |
 | `healing stats paired <a.jsonl> <b.jsonl>` | Δ WER (b − a) with a paired-bootstrap 95% CI, clips as the resampling unit. Takes benchmark JSONL or `nemo_wer.py` output. |

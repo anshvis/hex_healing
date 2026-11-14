@@ -38,12 +38,146 @@ def main(argv: list[str] | None = None) -> int:
     paired.add_argument("--resamples", type=int, default=10_000)
     paired.add_argument("--seed", type=int, default=13)
 
+    collect = commands.add_parser("collect", help="copy Hex's History into the dataset")
+    collect.add_argument("--since", help="3d, a date or RFC 3339 (default: last run minus 2 days)")
+    collect.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
+    collect.add_argument("--min-free", default="10GiB", help="copy no audio below this much free space")
+
+    prune = commands.add_parser("prune", help="cluster clips, keep k audio each, hold the budget")
+    prune.add_argument("--budget", default="5GiB")
+    prune.add_argument("--k", type=int, default=3)
+    prune.add_argument("--dry-run", action="store_true")
+
+    clean = commands.add_parser("clean", help="keep the audio index true and the disk from filling")
+    clean.add_argument("--dry-run", action="store_true")
+    clean.add_argument("--min-free", default="10GiB")
+    clean.add_argument("--deep", action="store_true", help="re-hash every audio file")
+
+    schedule = commands.add_parser("schedule", help="the launchd job that collects every 6 hours")
+    schedule.add_argument("command", choices=["install", "remove", "show", "run"])
+    schedule.add_argument("--hex", type=Path, default=None, help="path to the hex binary (install)")
+
+    status = commands.add_parser("status", help="what the dataset holds and what is at risk")
+    status.add_argument("--json", action="store_true")
+    status.add_argument("--list", action="store_true", help="list every warning code")
+    status.add_argument("--budget", default="5GiB")
+    status.add_argument("--min-free", default="10GiB")
+    status.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
+
     args = parser.parse_args(argv)
+    if args.group == "schedule":
+        return _schedule(args)
+    if args.group == "status":
+        return _status(args)
+    if args.group == "prune":
+        return _prune(args)
+    if args.group == "clean":
+        return _clean(args)
+    if args.group == "collect":
+        from healing.budget import parse_size
+        from healing.collect import main_collect
+
+        try:
+            floor = parse_size(args.min_free)
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        return main_collect(args.since, args.hex, floor)
     if args.group == "sets":
         return _subset(args) if args.command == "subset" else _build_general(args)
     if args.group == "eval":
         return _baseline(args)
     return _paired(args)
+
+
+def _schedule(args) -> int:
+    from healing import schedule
+
+    if args.command == "run":
+        return schedule.run_once()
+    try:
+        if args.command == "install":
+            print(f"installed {schedule.install(args.hex)}")
+        elif args.command == "remove":
+            schedule.remove()
+            print("removed")
+        else:
+            print(schedule.show())
+    except schedule.ScheduleError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _status(args) -> int:
+    from healing import status as status_module
+    from healing.budget import parse_size
+    from healing.eval.bench import BenchError, hex_binary
+    from healing.store import Store, StoreError
+
+    if args.list:
+        for code, about in status_module.WARNINGS.items():
+            print(f"{code}\t{about}")
+        return 0
+    try:
+        budget = parse_size(args.budget)
+        min_free = parse_size(args.min_free)
+        binary = Path(args.hex or hex_binary())
+    except (ValueError, BenchError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    try:
+        store = Store(sweep=False)  # status is a read: never delete a running collect's temp files
+        try:
+            result = status_module.compute(store, binary, budget, min_free=min_free)
+        finally:
+            store.close()
+    except StoreError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(result.as_dict(), indent=2) if args.json else result.text())
+    return 1 if result.warnings else 0
+
+
+def _clean(args) -> int:
+    from healing.budget import parse_size
+    from healing.clean import main_clean
+
+    try:
+        floor = parse_size(args.min_free)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    return main_clean(floor, args.deep, args.dry_run)
+
+
+def _prune(args) -> int:
+    from healing.budget import PruneError, parse_size, prune
+    from healing.store import Store, StoreError, process_lock
+
+    try:
+        budget = parse_size(args.budget)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    try:
+        with process_lock():
+            store = Store()
+            try:
+                result = prune(store, budget, args.k, args.dry_run)
+            finally:
+                store.close()
+    except PruneError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return error.code
+    except StoreError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if args.dry_run:
+        for eviction in result.evictions:
+            print(eviction)
+    print(result.summary())
+    return 0
 
 
 def _build_general(args) -> int:

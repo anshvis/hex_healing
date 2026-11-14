@@ -125,6 +125,7 @@ fn observation(latency_ms: u64, fallback: Option<String>) -> ProcessingObservati
         profile: PROFILE.into(),
         latency_ms,
         fallback,
+        rewrote: false,
     }
 }
 
