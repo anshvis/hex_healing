@@ -125,6 +125,55 @@ def test_budget_of_25_files_ends_under_budget(store):
     assert result.total_bytes <= budget
     assert set(repeats[:2]) <= live(store)
     assert sum(f.stat().st_size for f in files(store)) <= budget
+    order = [e.clip_id for e in result.evictions]
+    weak = [i for i, c in enumerate(order) if c in set(repeats[2:])]
+    first_unique = min((i for i, c in enumerate(order) if c in set(uniques)), default=len(order))
+    assert len(weak) >= 3 and max(weak) < first_unique  # redundant audio goes before any unique
+    gone = [c for c in order if c in set(uniques)]
+    assert gone == sorted(gone, key=uniques.index)  # uniques go oldest first
+
+
+def test_replace_reclusters_so_unique_text_is_not_evicted(store):
+    ids = [add(store, i, PHRASE, 200 + 400 * i) for i in range(4)]
+    prune(store, k=1, now=NOW)
+    # Transcribe again: the first transcript was wrong, the new text is unique
+    target = [i for i in ids if i in live(store)][0]
+    store.db.execute("UPDATE clips SET raw_text = ? WHERE clip_id = ?",
+                     ("a completely unique sentence about gardening tomatoes", target))
+    # more repeats arrive, so k-enforcement runs over the old cluster again
+    more = [add(store, 20 + i, PHRASE, 250 + 300 * i) for i in range(3)]
+    prune(store, k=1, now=NOW)
+    assert target in live(store)
+    cluster = store.db.execute("SELECT cluster_id FROM clips WHERE clip_id = ?", (target,)).fetchone()[0]
+    assert cluster != store.db.execute("SELECT cluster_id FROM clips WHERE clip_id = ?", (more[0],)).fetchone()[0]
+
+
+def test_shared_audio_across_clusters_is_not_k_evicted(store):
+    first = add(store, 1, PHRASE, 300)
+    pcm = tone(1, 300)
+    unique = "a completely unique sentence about gardening tomatoes"
+    store.db.execute(
+        "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text,"
+        " audio_sha256, label, golden, audio_ms, collected_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (clip_id(1, 50), 50, 1, NOW - 20 * DAY, "dictation", unique, unique, pcm.sha256, "weak", 0, 1000, NOW),
+    )
+    store.db.commit()
+    for i in range(3):
+        add(store, 10 + i, PHRASE, 900 + 300 * i)
+    prune(store, budget=5 * 1024**3, k=1, now=NOW)
+    assert clip_id(1, 50) in live(store) and first in live(store)
+
+
+def test_young_clips_do_not_break_idempotency(store):
+    for i in range(6):
+        add(store, i, PHRASE, 150 + 170 * i, age_days=30)
+    for i in range(6, 8):
+        add(store, i, PHRASE, 150 + 170 * i, age_days=1)
+    prune(store, k=3, now=NOW)
+    kept = live(store)
+    assert len(kept) == 5  # 2 young + 3 spread
+    assert prune(store, k=3, now=NOW).evictions == []
+    assert live(store) == kept
 
 
 def test_new_unique_clips_admitted(store):

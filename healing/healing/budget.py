@@ -42,6 +42,7 @@ class Unit:
     cluster_id: str | None
     protected: bool
     redundancy: float = 0.0
+    cluster_ids: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -103,16 +104,45 @@ def _load_units(store: Store) -> list[Unit]:
             units[row["audio_sha256"]] = Unit(
                 row["audio_sha256"], row["path"], row["bytes"], [row["clip_id"]],
                 row["clip_id"], row["timestamp_ms"], row["cluster_id"], protected,
+                cluster_ids={row["cluster_id"]} if row["cluster_id"] else set(),
             )
             continue
         unit.clip_ids.append(row["clip_id"])
         unit.protected = unit.protected or protected
         unit.newest_id, unit.timestamp_ms = row["clip_id"], row["timestamp_ms"]  # rows ascend
         unit.cluster_id = row["cluster_id"] or unit.cluster_id
+        if row["cluster_id"]:
+            unit.cluster_ids.add(row["cluster_id"])
     return list(units.values())
 
 
+def _release_stale(store: Store) -> None:
+    """Re-open clips whose text no longer fits their cluster (Replace / Transcribe again).
+
+    A representative whose text changed refreshes its cluster's text; members that no longer
+    match that text lose their cluster and are clustered again with the new clips.
+    """
+    for row in store.db.execute(
+        "SELECT k.cluster_id, c.raw_text FROM clusters k JOIN clips c ON c.clip_id = k.cluster_id"
+    ).fetchall():
+        fresh = dedupe.normalize(row["raw_text"])
+        if fresh:
+            store.db.execute(
+                "UPDATE clusters SET norm_text = ? WHERE cluster_id = ? AND norm_text != ?",
+                (fresh, row["cluster_id"], fresh),
+            )
+    texts = {r["cluster_id"]: r["norm_text"] for r in store.db.execute("SELECT * FROM clusters")}
+    for row in store.db.execute(
+        "SELECT clip_id, cluster_id, raw_text FROM clips WHERE cluster_id IS NOT NULL"
+    ).fetchall():
+        if row["clip_id"] == row["cluster_id"]:
+            continue
+        if not dedupe.compatible(dedupe.normalize(row["raw_text"]), texts.get(row["cluster_id"], "")):
+            store.db.execute("UPDATE clips SET cluster_id = NULL WHERE clip_id = ?", (row["clip_id"],))
+
+
 def _cluster_new_clips(store: Store) -> None:
+    _release_stale(store)
     pending = [
         dedupe.Clip(r["clip_id"], r["timestamp_ms"], r["raw_text"], r["audio_ms"])
         for r in store.db.execute(
@@ -202,8 +232,8 @@ def prune(
 
         by_cluster: dict[str, list[Unit]] = {}
         for unit in units:
-            if unit.cluster_id:
-                by_cluster.setdefault(unit.cluster_id, []).append(unit)
+            for cluster_id in unit.cluster_ids:
+                by_cluster.setdefault(cluster_id, []).append(unit)
         for cluster_id, members in sorted(by_cluster.items()):
             _spread(store, members, k, young, chosen)
 
@@ -272,14 +302,19 @@ def _spread(store: Store, members: list[Unit], k: int, young: set[str], chosen: 
         return
     members.sort(key=lambda u: (u.timestamp_ms, u.newest_id))
     dist = dedupe.distances(np.array([_features(store, u) for u in members]))
+    # Fixed units always survive and take no k slot: protected, young (can still become strong),
+    # and audio another cluster also needs. Survivors are fixed + at most k, so a rerun agrees.
+    fixed = [
+        i for i, u in enumerate(members)
+        if u.protected or u.sha256 in young or len(u.cluster_ids) > 1
+    ]
     newest_first = sorted(
-        (i for i, u in enumerate(members) if not u.protected),
+        (i for i in range(len(members)) if i not in fixed),
         key=lambda i: (-members[i].timestamp_ms, members[i].newest_id),
     )
-    fixed = [i for i, u in enumerate(members) if u.protected]
     keep = fixed + dedupe.spread_pick(dist, newest_first, k, fixed)
     for i in newest_first:
-        if i not in keep and members[i].sha256 not in young:
+        if i not in keep:
             chosen[members[i].sha256] = "k"
     for i, unit in enumerate(members):
         others = [j for j in keep if j != i]

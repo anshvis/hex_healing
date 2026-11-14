@@ -72,6 +72,16 @@ def durations_compatible(a: int | None, b: int | None) -> bool:
     return abs(a - b) <= DURATION_BAND * max(a, b)
 
 
+def compatible(a: str, b: str) -> bool:
+    """Whether two normalized texts would cluster together (text only, no duration)."""
+    if not a or not b:
+        return False
+    ga, gb = shingles(a), shingles(b)
+    if ga is None or gb is None:
+        return a == b
+    return jaccard(ga, gb) >= JACCARD
+
+
 @dataclass
 class _Rep:
     cluster_id: str
