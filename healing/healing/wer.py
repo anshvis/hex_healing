@@ -11,36 +11,7 @@ check a non-English set against the benchmark before trusting this port.
 
 from __future__ import annotations
 
-
-def normalized_words(text: str) -> list[str]:
-    words, current = [], []
-    for character in text:
-        if character.isalnum():
-            current.append(character)
-        elif current:
-            words.append("".join(current).lower())
-            current = []
-    if current:
-        words.append("".join(current).lower())
-    return words
-
-
-def word_errors(expected: str, actual: str) -> tuple[int, int]:
-    """(edit distance in words, reference words)."""
-    reference, hypothesis = normalized_words(expected), normalized_words(actual)
-    previous = list(range(len(hypothesis) + 1))
-    for expected_index, expected_word in enumerate(reference, 1):
-        current = [expected_index]
-        for actual_index, actual_word in enumerate(hypothesis, 1):
-            if expected_word == actual_word:
-                current.append(previous[actual_index - 1])
-            else:
-                current.append(
-                    1
-                    + min(previous[actual_index - 1], previous[actual_index], current[actual_index - 1])
-                )
-        previous = current
-    return previous[len(hypothesis)], len(reference)
+from collections.abc import Sequence
 
 
 def word_spans(text: str) -> list[tuple[str, int, int]]:
@@ -58,25 +29,16 @@ def word_spans(text: str) -> list[tuple[str, int, int]]:
     return spans
 
 
-def surface_errors(expected: str, actual: str) -> tuple[int, int]:
-    """Word errors over whitespace tokens that keep their case and punctuation.
+def normalized_words(text: str) -> list[str]:
+    return [word for word, _, _ in word_spans(text)]
 
-    The benchmark's own count strips both (`normalized_words`), so only this one sees a model that
-    forgot a comma or a capital.
+
+def align(reference: Sequence, hypothesis: Sequence) -> tuple[int, list[bool]]:
+    """(edit distance, per reference item whether a minimum-edit alignment pairs it with an equal one).
+
+    The one edit-distance table: word errors, surface errors, matched positions and the phonetic
+    scores' character distance all read it.
     """
-    reference, hypothesis = expected.split(), actual.split()
-    previous = list(range(len(hypothesis) + 1))
-    for expected_index, expected_word in enumerate(reference, 1):
-        current = [expected_index]
-        for actual_index, actual_word in enumerate(hypothesis, 1):
-            cost = 0 if expected_word == actual_word else 1
-            current.append(min(previous[actual_index - 1] + cost, previous[actual_index] + 1, current[actual_index - 1] + 1))
-        previous = current
-    return previous[len(hypothesis)], len(reference)
-
-
-def matched_positions(reference: list[str], hypothesis: list[str]) -> list[bool]:
-    """For each reference word, whether a minimum-edit alignment pairs it with the same word."""
     rows, cols = len(reference), len(hypothesis)
     table = [[0] * (cols + 1) for _ in range(rows + 1)]
     for i in range(rows + 1):
@@ -100,4 +62,36 @@ def matched_positions(reference: list[str], hypothesis: list[str]) -> list[bool]
             i -= 1
         else:
             j -= 1
-    return matched
+    return table[rows][cols], matched
+
+
+def word_errors(expected: str, actual: str) -> tuple[int, int]:
+    """(edit distance in words, reference words)."""
+    reference = normalized_words(expected)
+    return align(reference, normalized_words(actual))[0], len(reference)
+
+
+def surface_errors(expected: str, actual: str) -> tuple[int, int]:
+    """Word errors over whitespace tokens that keep their case and punctuation.
+
+    The benchmark's own count strips both (`normalized_words`), so only this one sees a model that
+    forgot a comma or a capital.
+    """
+    reference = expected.split()
+    return align(reference, actual.split())[0], len(reference)
+
+
+def matched_positions(reference: list[str], hypothesis: list[str]) -> list[bool]:
+    """For each reference word, whether a minimum-edit alignment pairs it with the same word."""
+    return align(reference, hypothesis)[1]
+
+
+def positions_of(text: str, spans: list[tuple[int, int]]) -> list[list[int]]:
+    """Word ranges [start, end), in `normalized_words(text)`, touched by the character `spans`."""
+    words = word_spans(text)
+    positions = []
+    for start, end in spans:
+        covered = [i for i, (_, a, b) in enumerate(words) if a < end and b > start]
+        if covered:
+            positions.append([covered[0], covered[-1] + 1])
+    return positions

@@ -36,3 +36,13 @@ def test_agrees_with_the_benchmark_on_every_recorded_clip():
             clip["word_errors"],
             clip["reference_words"],
         ), clip["id"]
+
+
+def test_one_alignment_serves_every_count():
+    from healing.wer import align, matched_positions, positions_of, surface_errors, word_spans
+
+    assert align("kitten", "sitting")[0] == 3
+    assert surface_errors("Send it, Kit.", "send it Kit") == (3, 3)
+    assert matched_positions(["a", "b", "c"], ["a", "x", "c"]) == [True, False, True]
+    assert [w for w, _, _ in word_spans("Hello, World")] == normalized_words("Hello, World")
+    assert positions_of("send it to kit", [(11, 14)]) == [[3, 4]]
