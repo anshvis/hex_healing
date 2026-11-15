@@ -48,18 +48,23 @@ def test_one_alignment_serves_every_count():
     assert positions_of("send it to kit", [(11, 14)]) == [[3, 4]]
 
 
-def test_a_repeated_word_is_matched_when_any_optimal_alignment_matches_it():
+def test_one_alignment_judges_every_position_so_repeats_are_not_double_credited():
     from healing.wer import matched_positions
 
-    # "a b a" against "a": two equally good alignments, keeping the first or the last "a"
-    assert matched_positions(["a", "b", "a"], ["a"]) == [True, False, True]
-    assert matched_positions(["a", "a"], ["a"]) == [True, True]
+    # "kit kit" against "kit": one word is matched, the other is not, never both
+    assert sum(matched_positions(["kit", "kit"], ["kit"])) == 1
+    assert sum(matched_positions(["a", "b", "a"], ["a"])) == 1
+    # with the edited positions named, the alignment that matches them wins
+    assert matched_positions(["a", "b", "a"], ["a"], wanted={2}) == [False, False, True]
+    assert matched_positions(["a", "b", "a"], ["a"], wanted={0}) == [True, False, False]
+    assert matched_positions(["kit", "kit"], ["kit"], wanted={0, 1}).count(True) == 1
     assert matched_positions(["x", "a", "y"], ["x", "y"]) == [True, False, True]
-    assert matched_positions(["a", "b"], ["b", "a"]) == [True, True]  # a swap costs 2 whichever word is kept
-
-
-def test_a_later_tied_match_counts_when_the_first_cannot_be_optimal():
-    from healing.wer import matched_positions
-
-    # the second "a" matches the last hypothesis "a"; pairing it with the first one would cost more
     assert matched_positions(["b", "a"], ["a", "a"]) == [False, True]
+
+
+def test_distance_agrees_with_the_aligned_distance():
+    from healing.wer import align, distance
+
+    for a, b in (("kitten", "sitting"), ("", "abc"), ("abc", ""), ("flaw", "lawn"), ("same", "same")):
+        assert distance(a, b) == align(a, b)[0]
+    assert distance(["a", "b"], ["b", "a"]) == 2

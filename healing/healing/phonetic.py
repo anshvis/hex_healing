@@ -27,7 +27,7 @@ class Scores:
 
 
 def levenshtein(a: str, b: str) -> int:
-    return wer.align(a, b)[0]
+    return wer.distance(a, b)
 
 
 def _normalized(a: str, b: str) -> float:

@@ -198,7 +198,8 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict], dict
         }
         positions = sidecar.get(record["id"], {}).get("edited_positions")
         if policy.edited_words and positions:
-            matched = matched_positions(normalized_words(definition["expected"]), normalized_words(transcript))
+            wanted = {i for start, end in positions for i in range(start, end)}
+            matched = matched_positions(normalized_words(definition["expected"]), normalized_words(transcript), wanted)
             wrong = sum(1 for start, end in positions for i in range(start, end) if not matched[i])
             total = sum(end - start for start, end in positions)
             row["edited_errors"], row["edited_positions"] = wrong, total

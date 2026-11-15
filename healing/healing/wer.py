@@ -11,7 +11,7 @@ check a non-English set against the benchmark before trusting this port.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 
 def word_spans(text: str) -> list[tuple[str, int, int]]:
@@ -33,48 +33,69 @@ def normalized_words(text: str) -> list[str]:
     return [word for word, _, _ in word_spans(text)]
 
 
-def _table(reference: Sequence, hypothesis: Sequence) -> list[list[int]]:
-    """Edit distances of every prefix of `reference` against every prefix of `hypothesis`."""
-    rows, cols = len(reference), len(hypothesis)
-    table = [[0] * (cols + 1) for _ in range(rows + 1)]
-    for i in range(rows + 1):
-        table[i][0] = i
-    for j in range(cols + 1):
-        table[0][j] = j
-    for i in range(1, rows + 1):
-        for j in range(1, cols + 1):
-            cost = 0 if reference[i - 1] == hypothesis[j - 1] else 1
-            table[i][j] = min(table[i - 1][j - 1] + cost, table[i - 1][j] + 1, table[i][j - 1] + 1)
-    return table
+def distance(reference: Sequence, hypothesis: Sequence) -> int:
+    """Edit distance (substitution, insertion, deletion each cost 1) between two sequences."""
+    previous = list(range(len(hypothesis) + 1))
+    for i, expected in enumerate(reference, 1):
+        current = [i]
+        for j, actual in enumerate(hypothesis, 1):
+            current.append(min(previous[j - 1] + (expected != actual), previous[j] + 1, current[j - 1] + 1))
+        previous = current
+    return previous[-1]
 
 
-def align(reference: Sequence, hypothesis: Sequence) -> tuple[int, list[bool]]:
-    """(edit distance, per reference item whether SOME minimum-edit alignment pairs it with an equal item).
+def align(reference: Sequence, hypothesis: Sequence, wanted: Iterable[int] | None = None) -> tuple[int, list[bool]]:
+    """(edit distance, matched) for ONE chosen minimum-edit alignment.
 
-    Several alignments can be equally good when a word repeats ("a b a" against "a"). A reference
-    position counts as matched when any of them matches it, so which of two tied words an
-    alignment happens to keep never decides the score: a position is wrong only if no optimal
-    alignment can match it. The one edit-distance table: word errors, surface errors, matched
-    positions and the phonetic scores' character distance all read it.
+    `matched[i]` says whether that alignment pairs reference item `i` with an equal one. Several
+    alignments can be equally cheap when a word repeats ("kit kit" against "kit"); the chosen one is
+    the cheapest that also matches the most of the `wanted` positions (all of them when None), ties
+    broken toward the earliest. A position is therefore judged by a single consistent alignment, never
+    credited because some other optimal alignment would match it: "kit kit" against "kit" matches one
+    of its two words, not both.
     """
     rows, cols = len(reference), len(hypothesis)
-    forward = _table(reference, hypothesis)
-    total = forward[rows][cols]
-    backward = _table(reference[::-1], hypothesis[::-1])  # backward[a][b]: the last a against the last b
-    matched = [
-        any(
-            reference[i] == hypothesis[j] and forward[i][j] + backward[rows - i - 1][cols - j - 1] == total
-            for j in range(cols)
-        )
-        for i in range(rows)
-    ]
-    return total, matched
+    weight = [1] * rows if wanted is None else [0] * rows
+    if wanted is not None:
+        for index in wanted:
+            if 0 <= index < rows:
+                weight[index] = 1
+    cost = [[0] * (cols + 1) for _ in range(rows + 1)]
+    gain = [[0] * (cols + 1) for _ in range(rows + 1)]
+    move = [[""] * (cols + 1) for _ in range(rows + 1)]
+    for i in range(1, rows + 1):
+        cost[i][0], move[i][0] = i, "delete"
+    for j in range(1, cols + 1):
+        cost[0][j], move[0][j] = j, "insert"
+    for i in range(1, rows + 1):
+        for j in range(1, cols + 1):
+            same = reference[i - 1] == hypothesis[j - 1]
+            options = [
+                (cost[i - 1][j - 1] + (0 if same else 1), -(gain[i - 1][j - 1] + (weight[i - 1] if same else 0)), 0,
+                 "match" if same else "substitute"),
+                (cost[i - 1][j] + 1, -gain[i - 1][j], 1, "delete"),
+                (cost[i][j - 1] + 1, -gain[i][j - 1], 2, "insert"),
+            ]
+            best = min(options)
+            cost[i][j], gain[i][j], move[i][j] = best[0], -best[1], best[3]
+    matched = [False] * rows
+    i, j = rows, cols
+    while i > 0 or j > 0:
+        step = move[i][j]
+        if step in ("match", "substitute"):
+            matched[i - 1] = step == "match"
+            i, j = i - 1, j - 1
+        elif step == "delete":
+            i -= 1
+        else:
+            j -= 1
+    return cost[rows][cols], matched
 
 
 def word_errors(expected: str, actual: str) -> tuple[int, int]:
     """(edit distance in words, reference words)."""
     reference = normalized_words(expected)
-    return align(reference, normalized_words(actual))[0], len(reference)
+    return distance(reference, normalized_words(actual)), len(reference)
 
 
 def surface_errors(expected: str, actual: str) -> tuple[int, int]:
@@ -84,12 +105,13 @@ def surface_errors(expected: str, actual: str) -> tuple[int, int]:
     forgot a comma or a capital.
     """
     reference = expected.split()
-    return align(reference, actual.split())[0], len(reference)
+    return distance(reference, actual.split()), len(reference)
 
 
-def matched_positions(reference: list[str], hypothesis: list[str]) -> list[bool]:
-    """For each reference word, whether a minimum-edit alignment pairs it with the same word."""
-    return align(reference, hypothesis)[1]
+def matched_positions(reference: list[str], hypothesis: list[str], wanted: Iterable[int] | None = None) -> list[bool]:
+    """For each reference word, whether the chosen minimum-edit alignment pairs it with the same word
+    (see `align`: one alignment, the one that matches the most `wanted` positions)."""
+    return align(reference, hypothesis, wanted)[1]
 
 
 def positions_of(text: str, spans: list[tuple[int, int]]) -> list[list[int]]:
