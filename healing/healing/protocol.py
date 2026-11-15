@@ -82,6 +82,8 @@ A person has to do this at a Mac; it cannot run unattended. About {minutes} minu
 3. Grant the terminal you run `healing` from Accessibility (System Settings > Privacy & Security),
    so System Events may type. Dictate once by hand and check it pastes and appears in `hex history --raw`.
 4. Do not touch the keyboard or mouse while a batch runs: the driver types into the frontmost app.
+   After each dictation's settle it presses Cmd+A, Delete in the field, so every run pastes into an
+   empty field; leave the field focused.
 
 ## Per app
 For each app below, open the target field and click into it, then run
@@ -150,6 +152,11 @@ class Driver:
     def press_return(self) -> None:
         _osascript('tell application "System Events" to key code 36')
 
+    def clear_field(self) -> None:
+        """Select everything in the focused field and delete it (Cmd+A, Delete)."""
+        _osascript('tell application "System Events" to keystroke "a" using command down')
+        _osascript('tell application "System Events" to key code 51')
+
 
 def run_plan(plan: dict, results_path: Path, driver: Driver, only: set[str] | None = None) -> int:
     results = json.loads(results_path.read_text()) if results_path.exists() else []
@@ -172,6 +179,9 @@ def run_plan(plan: dict, results_path: Path, driver: Driver, only: set[str] | No
                 driver.sleep(SEND_WITHIN_S - 1.0)
                 driver.press_return()
         driver.sleep(driver.settle)
+        # The next run pastes into an empty field: an earlier, untouched copy of the phrase would
+        # otherwise make the next run's seeded edit read as unchanged.
+        driver.clear_field()
         results.append({"app": run["app"], "index": run["index"], "start_ms": started})
         results_path.write_text(json.dumps(results, indent=2))  # resumable
         count += 1

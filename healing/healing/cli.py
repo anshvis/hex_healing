@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from healing.paths import healing_home
+from healing.protocol import SETTLE_S
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -79,8 +80,6 @@ def main(argv: list[str] | None = None) -> int:
     seeded.add_argument("--dir", type=Path, default=None, help="protocol folder (default: $HEALING_HOME/protocol)")
     seeded.add_argument("--hex", type=Path, default=None, help="path to the hex binary (run, score)")
     seeded.add_argument("--seed", type=int, default=13)
-    from healing.protocol import SETTLE_S
-
     seeded.add_argument("--settle", type=float, default=SETTLE_S, help="seconds to wait for Hex's 30 s watch (run)")
     seeded.add_argument("--apps", help="comma list to run a subset (run)")
 

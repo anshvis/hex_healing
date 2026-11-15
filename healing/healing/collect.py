@@ -244,13 +244,7 @@ def _store_entry(
         )
         return
     changed = {k: v for k, v in fields.items() if existing[k] != v}
-    if correction is None:
-        for name in observed:
-            changed.pop(name, None)
-        if "raw_text" in changed or "final_text" in changed:
-            # The text moved on (a Replace in Hex): the stored correction was seen against the
-            # old text, so it goes rather than label the new text.
-            changed.update({name: None for name in observed if existing[name] is not None})
+    _correction_changes(existing, correction, observed, changed)
     if audio_sha != existing["audio_sha256"]:
         changed["audio_sha256"] = audio_sha
     if not changed:
@@ -269,6 +263,21 @@ def _store_entry(
         f"UPDATE clips SET {assignments} WHERE hex_epoch_ms = ? AND hex_id = ?",
         (*changed.values(), epoch, hex_id),
     )
+
+
+def _correction_changes(existing, correction: dict | None, observed: dict, changed: dict) -> None:
+    """Edit `changed` so that only a correction Hex actually reports touches the stored one.
+
+    An entry without `correction` says nothing (an older Hex drops the field when it saves), so
+    the stored correction stays, unless the entry's text changed too (a Replace in Hex): that
+    correction was seen against the old text, so it goes rather than label the new one.
+    """
+    if correction is not None:
+        return
+    for name in observed:
+        changed.pop(name, None)
+    if "raw_text" in changed or "final_text" in changed:
+        changed.update({name: None for name in observed if existing[name] is not None})
 
 
 def _store_audio(store: Store, recording: str, summary: Summary) -> str | None:

@@ -51,6 +51,9 @@ class FakeDriver(protocol.Driver):
     def press_return(self):
         self.calls.append(("return",))
 
+    def clear_field(self):
+        self.calls.append(("clear",))
+
 
 def test_run_drives_and_resumes(tmp_path):
     plan = protocol.build_plan(1, {"TextEdit": "x"})
@@ -132,3 +135,17 @@ def test_every_app_and_control_run_done_can_pass(tmp_path):
     plan, results = _run_all(tmp_path)
     result = protocol.score(plan, results, _history(plan, results))
     assert result["complete"] and result["pass"] and result["untested_apps"] == []
+
+
+def test_the_field_is_cleared_after_every_run_before_the_next_dictation(tmp_path):
+    plan = protocol.build_plan(1, {"TextEdit": "x"})
+    driver = FakeDriver()
+    protocol.run_plan(plan, tmp_path / "r.json", driver)
+    calls = driver.calls
+    starts = [i for i, c in enumerate(calls) if c == ("hex", "start")]
+    assert len(starts) == 10 and sum(c == ("clear",) for c in calls) == 10
+    # Between one dictation and the next there is exactly one clear.
+    for before, after in zip(starts, starts[1:]):
+        assert calls[before:after].count(("clear",)) == 1
+    # The last thing a run does is clear, so the next paste lands in an empty field.
+    assert calls[-1] == ("clear",)
