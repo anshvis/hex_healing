@@ -67,7 +67,7 @@ Build a representative dictation corpus of at least 12 clips covering:
 The production runtime pads clips shorter than 1.5 seconds. The harness prepares
 each clip as dictation does (`pad_gguf_samples`: that minimum, then the model's
 trailing silence, 400 ms for Parakeet Unified English; the model is recognised
-from the `--model` file name) but uses the original spoken duration when
+from the `--model` file's name and size) but uses the original spoken duration when
 calculating RTF. Before this, the harness skipped the trailing silence, so a
 Unified English WER measured earlier is not comparable to one measured now.
 
@@ -119,8 +119,9 @@ file exits 2 and names the item (`at [1]: ...`).
 
 Only Parakeet models take it, as in dictation, where Whisper and Qwen3-ASR read
 the vocabulary as a prompt that this flag does not set. A catalog model of
-another family, ONNX, or a file whose loaded architecture does not take the
-bias is refused with exit 2 (the file check happens after loading).
+another family, or ONNX, is refused with exit 2 before anything loads. A file
+the catalog does not name is checked once it loads, and one whose architecture
+does not take the bias fails the run (exit 1).
 
 The benchmark is whole-clip: no streaming, and none of the mode or screen
 terms dictation adds, only the list in the file.
