@@ -78,7 +78,7 @@ def test_the_wanted_tie_break_changes_which_positions_match():
     assert sum(matched(ref, hyp)) == 3
     assert hits({1, 3, 5}) == 3  # one alignment can match all three of these
     assert hits({1, 4, 5}) == 2  # only one "a" is in the transcript: two of the three is the best any alignment does
-    assert matched(ref, hyp, {1, 3, 5}) != matched(ref, hyp, {0, 2, 4}) and hits({0, 2, 4}) == 2
+    assert matched(ref, hyp, {1, 3, 5}) != matched(ref, hyp, {0, 2, 4}) and hits({0, 2, 4}) == 1
 
 
 def test_the_chosen_alignment_is_optimal_against_an_exhaustive_search():
