@@ -262,6 +262,7 @@ def test_current_vocabulary_is_passed_as_a_file(world):
     {"vocabulary": [], "labs": {"vocabulary_biasing": True}},
     {"vocabulary": ["Qorvyx"], "labs": {"vocabulary_biasing": False}},
     {"labs": {"vocabulary_biasing": True}},
+    {"vocabulary": ["Qorvyx"], "labs": {"vocabulary_biasing": True}, "vocabulary_boost": "off"},
     None,
 ])
 def test_nothing_is_passed_without_a_usable_vocabulary(world, settings):

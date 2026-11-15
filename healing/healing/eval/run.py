@@ -81,7 +81,10 @@ def current_vocabulary(settings_path: Path | None = None) -> tuple[list[dict], s
             entries.append({"term": term, "sounds_like": list(sounds)})
     if entries and not settings.get("labs", {}).get("vocabulary_biasing", False):
         return [], None, "Labs > Vocabulary biasing is off, so dictation doesn't bias with your vocabulary"
-    return entries, settings.get("vocabulary_boost"), None if entries else "your vocabulary is empty"
+    boost = settings.get("vocabulary_boost")
+    if entries and boost == "off":
+        return [], None, "the vocabulary boost is Off, so dictation leaves transcripts as heard"
+    return entries, boost, None if entries else "your vocabulary is empty"
 
 
 def resolve_set(name: str, store: Store | None) -> SetRef | str:
