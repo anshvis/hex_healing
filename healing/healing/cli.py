@@ -218,13 +218,17 @@ def _split(args) -> int:
         if args.command == "verify":
             store = Store(sweep=False)
             try:
-                problems = splits.verify(store)
+                report = splits.verify_report(store)
             finally:
                 store.close()
-            for problem in problems:
+            for problem in report.leaks:
                 print(f"violation: {problem}")
-            print("split verify: " + (f"{len(problems)} violation(s)" if problems else "ok"))
-            return 1 if problems else 0
+            for problem in report.snapshot_overlaps:
+                print(f"snapshot overlap: {problem}")
+            total = len(report.problems)
+            print("split verify: " + (
+                f"{len(report.leaks)} violation(s), {len(report.snapshot_overlaps)} snapshot overlap(s)" if total else "ok"))
+            return 1 if total else 0
         cutoff = None
         if args.cutoff:
             cutoff = since_to_ms(args.cutoff, now_ms())
@@ -364,12 +368,13 @@ def _prune(args) -> int:
 
 
 def _build_general(args) -> int:
+    from healing.sets import general
     from healing.sets.general import AmiIhmTest, BuildError, LibriSpeechTestOther, build
 
     cache = healing_home() / "cache"
     try:
         result = build(
-            healing_home() / "sets" / "general",
+            general.folder(),
             [(LibriSpeechTestOther(cache), args.librispeech), (AmiIhmTest(cache), args.ami)],
             seed=args.seed,
         )
@@ -382,10 +387,11 @@ def _build_general(args) -> int:
 
 
 def _subset(args) -> int:
+    from healing.sets import general
     from healing.sets.general import BuildError, subset
 
     try:
-        print(subset(healing_home() / "sets" / "general", args.prefix, args.name, args.expected))
+        print(subset(general.folder(), args.prefix, args.name, args.expected))
     except BuildError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

@@ -117,7 +117,7 @@ def trainable(
     which is model-independent. `model_id=None` skips the model condition.
 
     Not leak-free: it still holds the clips of the test sets and of the 14-day window. Train with
-    `splits.train_ids`.
+    `splits.snapshot_train`, which also records what it hands out.
     """
     labels = ["strong", "verified"] + (["weak"] if include_weak else [])
     rows = store.db.execute(

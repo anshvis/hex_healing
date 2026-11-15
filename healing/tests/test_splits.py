@@ -1,5 +1,6 @@
 import json
 import shutil
+import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -178,25 +179,32 @@ def test_no_split_cluster_is_shared_and_the_kip_kit_pair_never_straddles(store):
     clusters = splits.clip_clusters(store.db)
     assert clusters[kip] == clusters[kit]
     rolling = {r[0] for r in store.db.execute("SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'rolling'")}
-    train = {r[0] for r in store.db.execute("SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'train'")}
-    assert kit in rolling and kip not in train
+    taken = set(splits.snapshot_train(store, cutoff_ms=CUTOFF))
+    assert kit in rolling and kip not in taken
     tests = {clusters[c] for c in rolling} | {
         clusters[r[0]] for r in store.db.execute(
             "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'edited'")}
-    assert old in train and not {clusters[c] for c in train} & tests  # an old, unrepeated clip trains
+    assert old in taken and not {clusters[c] for c in taken} & tests  # an old, unrepeated clip trains
     assert result.excluded_train > 0
     assert splits.verify(store) == []
 
 
-def test_verify_catches_a_leak(store):
-    build_world(store)
+def test_verify_reports_a_snapshot_overlap_apart_from_the_leaks(store):
+    ids, _ = build_world(store)
+    old = add_clip(store, 910, raw="water the roses near the porch kip", final="Water the roses near the porch kip.",
+                   edited="Water the roses near the porch kit.", ts=CUTOFF - 6 * DAY, outcome="edited")
+    labels.label_all(store)
     build_at(store)
-    rolling_clip = store.db.execute(
-        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'rolling' LIMIT 1").fetchone()[0]
-    train_id = store.db.execute("SELECT split_id FROM splits WHERE kind = 'train'").fetchone()[0]
-    store.db.execute("INSERT INTO split_members VALUES (?, ?)", (train_id, rolling_clip))
+    assert old in splits.snapshot_train(store, cutoff_ms=CUTOFF)
+    twin = add_clip(store, 911, raw="water the roses near the porch kip", ts=CUTOFF + 5 * DAY)
+    verify_random(store, [twin])
+    rolling = store.db.execute("SELECT split_id FROM splits WHERE kind = 'rolling' AND manifest_path IS NOT NULL").fetchone()[0]
+    store.db.execute("INSERT INTO split_members VALUES (?, ?)", (rolling, twin))  # forced: a build would refuse it
     store.db.commit()
-    assert any("shares a split-cluster" in p for p in splits.verify(store))
+    report = splits.verify_report(store)
+    assert report.leaks == []
+    assert len(report.snapshot_overlaps) == 1 and "trained on clip " + old in report.snapshot_overlaps[0]
+    assert splits.verify(store) == report.problems
 
 
 def test_verify_catches_a_pre_cutoff_rolling_clip(store):
@@ -219,15 +227,13 @@ def test_edited_span_set_is_the_strong_clips_of_later_sessions(store):
     assert {s["application"] for s in sidecar} and all(s["session"].startswith("s") for s in sidecar)
 
 
-def test_rebuild_replaces_the_previous_sets(store):
+def test_rebuild_replaces_the_previous_sets_and_creates_no_train_rows(store):
     build_world(store)
     build_at(store)
     before = store.db.execute("SELECT COUNT(*) FROM splits").fetchone()[0]
     build_at(store, 5000)
-    # rolling and edited are replaced; train is history, the earlier one frozen (D-41)
-    assert store.db.execute("SELECT COUNT(*) FROM splits").fetchone()[0] == before + 1
-    trains = store.db.execute("SELECT frozen FROM splits WHERE kind = 'train' ORDER BY created_at_ms").fetchall()
-    assert [r[0] for r in trains] == [1, 0]
+    assert store.db.execute("SELECT COUNT(*) FROM splits").fetchone()[0] == before
+    assert store.db.execute("SELECT COUNT(*) FROM splits WHERE kind = 'train'").fetchone()[0] == 0  # builds are not training
     kept = {p.name for p in (Path(store.root).parent / "sets").iterdir()}
     assert len([k for k in kept if k.startswith("rolling-")]) == 1
 
@@ -242,22 +248,25 @@ def test_a_strong_clip_that_ages_past_the_window_becomes_trainable(store):
     ids, _ = build_world(store)
     strong = sorted(set(ids["strong"]) & set(ids["after"]))[0]
     build_at(store)
-    assert strong in {r[0] for r in store.db.execute("SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'edited'")}
-    assert strong not in splits.train_ids(store)
+    edited = "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'edited'"
+    assert strong in {r[0] for r in store.db.execute(edited)}
+    assert strong not in splits.preview_train(store, cutoff_ms=CUTOFF)
     later = store.db.execute("SELECT timestamp_ms FROM clips WHERE clip_id = ?", (strong,)).fetchone()[0] + 20 * DAY
     splits.build(store, now=later + 14 * DAY)  # the clip's session is now older than the window
-    assert strong in splits.train_ids(store)
-    assert strong not in {r[0] for r in store.db.execute("SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'edited'")}
+    assert strong in splits.preview_train(store, now=later + 14 * DAY)
+    assert strong not in {r[0] for r in store.db.execute(edited)}
 
 
-def test_train_ids_is_leak_free_where_trainable_is_not(store):
+def test_snapshot_train_is_leak_free_where_trainable_is_not(store):
     ids, _ = build_world(store)
     build_at(store)
     test_members = {r[0] for r in store.db.execute(
         "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind IN ('rolling', 'edited')")}
     assert test_members & {r["clip_id"] for r in labels.trainable(store)}  # raw trainable holds test clips
-    assert not test_members & set(splits.train_ids(store))
+    assert not test_members & set(splits.snapshot_train(store, cutoff_ms=CUTOFF))
     assert splits.verify(store) == []
+
+
 def test_small_rolling_flagged_by_words(store):
     build_world(store)
     result = build_at(store)
@@ -387,11 +396,12 @@ def test_golden_rejects_are_not_added(store, small_golden):
 def test_golden_clusters_are_excluded_from_rolling_and_train(store, small_golden):
     freeze_golden(store)
     result = build_at(store)
-    clusters = splits.clip_clusters(store.db)
-    gold_clusters = {clusters[r[0]] for r in store.db.execute("SELECT clip_id FROM split_members WHERE split_id = 'golden-v1'")}
-    other = store.db.execute(
-        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind IN ('rolling', 'train')").fetchall()
-    assert not {clusters[r[0]] for r in other} & gold_clusters
+    zones = splits.Zones.load(store.db)
+    gold_clusters = {zones.clusters[c] for c in splits.golden_members(store.db)}
+    rolling = [r[0] for r in store.db.execute(
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'rolling'")]
+    assert not {zones.clusters[c] for c in rolling} & gold_clusters
+    assert not {zones.clusters[c] for c in splits.snapshot_train(store, cutoff_ms=CUTOFF)} & gold_clusters
     assert splits.verify(store) == [] and result.golden.n_clips == 5
 
 
@@ -442,7 +452,7 @@ def test_commands(store, home, capsys, small_golden):
     store.close()
     assert main(["split", "build", "--cutoff", "14d"]) in (0,)
     out = capsys.readouterr().out
-    assert "rolling:" in out and "excluded_train_clips" in out
+    assert "rolling:" in out and "train:" in out and "snapshot_train" in out
     assert main(["split", "verify"]) == 0
     assert "split verify: ok" in capsys.readouterr().out
 
@@ -484,21 +494,17 @@ def test_general_references_are_in_the_leak_checks(store, home):
     out = home / "sets" / "general"
     manifest.write_set(out, [{"id": "g1", "expected": text.upper(), "terms": []}], lambda clip: np.zeros(8000, dtype="int16"))
     build_at(store)
-    assert twin not in splits.train_ids(store)
-    train = store.db.execute("SELECT split_id FROM splits WHERE kind = 'train'").fetchone()[0]
+    assert twin not in splits.snapshot_train(store, cutoff_ms=CUTOFF)
     assert splits.verify(store) == []
-    store.db.execute("INSERT OR IGNORE INTO split_members VALUES (?, ?)", (train, twin))
+    # a snapshot that trained on the general reference's text is reported
+    store.db.execute(
+        "INSERT INTO splits (split_id, kind, parent_version, created_at_ms, frozen, detail) VALUES"
+        " ('train-x', 'train', 'current', 1, 0, ?)", (json.dumps({"members": {twin: [text]}}),))
     store.db.commit()
-    assert any("general-v1" in p for p in splits.verify(store))
+    assert any("general-v1" in p for p in splits.verify_report(store).snapshot_overlaps)
 
 
-def test_train_overlap_is_checked_within_the_trains_own_parent(store):
-    ids, _ = build_world(store)
-    build_at(store)
-    # another parent's rolling set must not condemn this parent's train set
-    splits.build(store, parent="v2", cutoff_ms=CUTOFF - 40 * DAY, now=CUTOFF + 30 * DAY)
-    current = store.db.execute("SELECT split_id FROM splits WHERE kind = 'train' AND parent_version = 'current'").fetchone()[0]
-    assert not any(p.startswith(current) for p in splits.verify(store))
+
 
 
 def test_a_failed_freeze_is_retried(store, small_golden, monkeypatch):
@@ -548,48 +554,135 @@ def test_set_folders_and_files_are_owner_only(store, home):
         assert mode == (0o700 if path.is_dir() else 0o600), (path, oct(mode))
 
 
-def test_train_ids_is_right_between_builds_and_the_window_is_a_test_zone(store):
+def old_trainable(store, n, raw, days=8, *, weak=False):
+    """A clip older than the window that a run may train on: verified by an uncertain review (or, with
+    `weak`, merely observed unchanged, which trains only on request)."""
+    cid = add_clip(store, n, raw=raw, ts=CUTOFF - days * DAY, outcome="unchanged" if weak else None)
+    if not weak:
+        review(store, cid, strategy="uncertain")
+    labels.label_all(store)
+    return cid
+
+
+def snapshots(store):
+    return [r[0] for r in store.db.execute("SELECT split_id FROM splits WHERE kind = 'train' ORDER BY created_at_ms, split_id")]
+
+
+def test_a_train_clip_shares_no_cluster_with_an_in_window_clip(store):
     build_world(store)
-    build_at(store)
-    # a review after the last build: no rebuild has registered it
-    late = add_clip(store, 950, raw="mix the paint with the thinner slowly now", ts=CUTOFF + 10 * DAY)
+    text = "mix the paint with the thinner slowly now"
+    late = add_clip(store, 950, raw=text, ts=CUTOFF + 10 * DAY)  # in the window
     review(store, late)
     labels.refresh(store, [late])
-    assert late in {r["clip_id"] for r in labels.trainable(store)}  # raw trainable has it
-    assert late not in splits.train_ids(store, cutoff_ms=CUTOFF)
-    # a clip older than the window that near-duplicates an in-window one is out too
-    old_twin = add_clip(store, 951, raw="mix the paint with the thinner slowly now", ts=CUTOFF - 10 * DAY, outcome="edited",
-                        final="Mix the paint with the thinner slowly now kip.", edited="Mix the paint with the thinner slowly now kit.")
+    twin = old_trainable(store, 951, text, days=12)  # older than the window, same cluster, truly trainable
+    lone = old_trainable(store, 952, "paint the fence green before the weekend starts", days=12)
+    trainable = {r["clip_id"] for r in labels.trainable(store)}
+    assert {late, twin, lone} <= trainable  # raw trainable hands out all three
+    handed = set(splits.snapshot_train(store, cutoff_ms=CUTOFF))
+    assert late not in handed  # its session is in the window
+    assert twin not in handed  # its cluster touches an in-window clip
+    assert lone in handed  # the rule is not a blanket ban on old clips
+
+
+def test_every_recorded_snapshot_is_verified(store):
+    build_world(store)
+    x = old_trainable(store, 920, "stir the varnish well before you brush it on the table", days=9)
+    y = old_trainable(store, 921, "carry the ladder around to the back of the old barn", days=9)
+    build_at(store)
+    first = splits.snapshot_train(store, cutoff_ms=CUTOFF)
+    assert x in first and y in first
+    twin = add_clip(store, 922, raw="stir the varnish well before you brush it on the table", ts=CUTOFF + 5 * DAY)
+    verify_random(store, [twin])
+    rolling = store.db.execute("SELECT split_id FROM splits WHERE kind = 'rolling' AND manifest_path IS NOT NULL").fetchone()[0]
+    store.db.execute("INSERT INTO split_members VALUES (?, ?)", (rolling, twin))  # contamination, forced
+    store.db.commit()
+    second = splits.snapshot_train(store, cutoff_ms=CUTOFF)
+    assert y in second and x not in second  # the newer snapshot is clean
+    older, newer = snapshots(store)
+    overlaps = splits.verify_report(store).snapshot_overlaps
+    assert any(older in o and x in o for o in overlaps)  # the OLDER one is the contaminated one, and is found
+    assert not any(newer in o for o in overlaps)
+
+
+def test_golden_review_skips_the_clusters_of_rolling_and_edited_members(store, small_golden, monkeypatch):
+    build_world(store)
+    build_at(store)
+    zones = splits.Zones.load(store.db)
+    member = store.db.execute(
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'rolling' LIMIT 1").fetchone()[0]
+    twins = [r["clip_id"] for r in review_module.candidates(store, "random", zones=zones)
+             if zones.clusters[r["clip_id"]] == zones.clusters[member]]
+    assert twins  # a never-reviewed near-duplicate of a rolling member exists
+    frame = {r["clip_id"] for r in review_module.candidates(store, "random", zones=zones, apart_from_registered=True)}
+    assert not set(twins) & frame
+    seen = []
+    real = review_module.candidates
+    monkeypatch.setattr(review_module, "candidates", lambda *a, **k: (seen.append(k), real(*a, **k))[1])
+    golden.run(store, 20, player=Accept().play, ask=Accept().ask, out=lambda *_: None, seed=3)
+    assert seen and seen[0].get("apart_from_registered") is True
+    held = {zones.clusters[c] for c in (r[0] for r in store.db.execute(
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind IN ('rolling', 'edited')"))}
+    assert not {zones.clusters[c] for c in splits.golden_members(store.db)} & held
+
+
+def test_a_weak_clip_handed_out_with_include_weak_never_becomes_a_test_clip(store, small_golden):
+    build_world(store)
+    weak = old_trainable(store, 930, "sand the edge of the shelf until it is smooth", days=9, weak=True)
+    build_at(store)
+    assert weak not in splits.preview_train(store, cutoff_ms=CUTOFF)  # weak trains only on request
+    handed = splits.snapshot_train(store, include_weak=True, cutoff_ms=CUTOFF)
+    assert weak in handed
+    twin = add_clip(store, 931, raw="sand the edge of the shelf until it is smooth", ts=CUTOFF + 4 * DAY)
     labels.label_all(store)
-    assert old_twin not in splits.train_ids(store, cutoff_ms=CUTOFF)
-    # and everything it returns is outside the window
-    sess = splits.sessions(store.db)
-    assert all(sess[c][1] <= CUTOFF for c in splits.train_ids(store, cutoff_ms=CUTOFF))
+    random_frame = {r["clip_id"] for r in review_module.candidates(store, "random")}
+    assert weak not in random_frame and twin not in random_frame
+    window_frame = {r["clip_id"] for r in review_module.candidates(store, "random", CUTOFF)}
+    assert twin not in window_frame
+    golden.run(store, 20, player=Accept().play, ask=Accept().ask, out=lambda *_: None, seed=3)
+    assert weak not in splits.golden_members(store.db) and twin not in splits.golden_members(store.db)
+    zones = splits.Zones.load(store.db)
+    assert not zones.may_test(weak, windowed=False) and not zones.may_test(twin)
+
+
+def test_a_clip_that_became_trainable_after_the_last_build_is_recorded_when_handed_out(store):
+    build_world(store)
+    old_trainable(store, 939, "hang the new door on its hinges and test the latch", days=11)
+    build_at(store)
+    before = snapshots(store)
+    assert splits.preview_train(store, cutoff_ms=CUTOFF) and snapshots(store) == before  # a preview records nothing
+    fresh = old_trainable(store, 940, "tighten the bolts on the bracket then check the level", days=10)  # no rebuild since
+    handed = splits.snapshot_train(store, cutoff_ms=CUTOFF, model="m1", note="first run")
+    assert fresh in handed and len(snapshots(store)) == len(before) + 1
+    row_ = store.db.execute("SELECT * FROM splits WHERE split_id = ?", (snapshots(store)[-1],)).fetchone()
+    members = {r[0] for r in store.db.execute("SELECT clip_id FROM split_members WHERE split_id = ?", (row_["split_id"],))}
+    assert members == set(handed) and row_["frozen"] == 1 and row_["n_clips"] == len(handed)
+    detail = json.loads(row_["detail"])
+    assert (detail["model"], detail["note"], detail["include_weak"]) == ("m1", "first run", False)
+    assert set(detail["members"]) == set(handed)
+    with pytest.raises(sqlite3.DatabaseError):
+        store.db.execute("INSERT INTO split_members VALUES (?, ?)", (row_["split_id"], fresh + "x"))
+    assert splits.verify(store) == []
+
+
+def test_nothing_is_recorded_when_there_is_nothing_to_hand_out(store):
+    assert splits.snapshot_train(store, cutoff_ms=CUTOFF) == [] and snapshots(store) == []
 
 
 def test_a_trained_on_clip_never_becomes_a_test_clip(store, small_golden):
-    ids, _ = build_world(store)
-    old = add_clip(store, 960, raw="water the roses near the porch kip", final="Water the roses near the porch kip.",
-                   edited="Water the roses near the porch kit.", ts=CUTOFF - 6 * DAY, outcome="edited")
-    labels.label_all(store)
+    build_world(store)
+    old = old_trainable(store, 960, "water the roses near the porch before the sun is up", days=6)
     build_at(store)
-    assert old in {r[0] for r in store.db.execute(
-        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'train'")}
-    twin = add_clip(store, 961, raw="water the roses near the porch kip", ts=CUTOFF + 3 * DAY)
+    assert old in splits.snapshot_train(store, cutoff_ms=CUTOFF)
+    twin = add_clip(store, 961, raw="water the roses near the porch before the sun is up", ts=CUTOFF + 3 * DAY)
     labels.label_all(store)
     assert twin not in {r["clip_id"] for r in review_module.candidates(store, "random")}
     assert old not in {r["clip_id"] for r in review_module.candidates(store, "random")}
-    clusters = splits.clip_clusters(store.db)
-    assert twin not in splits.eligible_ids(store.db, clusters, splits.sessions(store.db), CUTOFF)
-    script = Accept()
-    golden.run(store, 20, player=script.play, ask=script.ask, out=lambda *_: None, seed=3)
+    zones = splits.Zones.load(store.db)
+    assert not zones.may_test(twin)
+    golden.run(store, 20, player=Accept().play, ask=Accept().ask, out=lambda *_: None, seed=3)
     assert twin not in splits.golden_members(store.db) and old not in splits.golden_members(store.db)
-    trained = splits.trained_clusters(store.db, clusters)
-    assert not {clusters[c] for c in splits.golden_members(store.db)} & trained
-    # a later build keeps the earlier train split as a frozen row
-    build_at(store, 10_000)
-    assert [r[0] for r in store.db.execute("SELECT frozen FROM splits WHERE kind = 'train' ORDER BY created_at_ms")] == [1, 0]
-    assert splits.verify(store) == []
+    splits.build(store, cutoff_ms=CUTOFF, now=CUTOFF + 30 * DAY + 10_000)  # a later build keeps the snapshot
+    assert len(snapshots(store)) == 1 and splits.verify(store) == []
 
 
 def test_review_since_cutoff_takes_the_cutoff_flag(store):

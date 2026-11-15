@@ -100,8 +100,7 @@ def freeze(store: Store) -> None:
     db = store.db
     ids = splits.golden_members(store.db)
     rows = [db.execute("SELECT * FROM clips WHERE clip_id = ?", (i,)).fetchone() for i in ids]
-    clusters, sessions = splits.clip_clusters(db), splits.sessions(db)
-    items = splits.entries(store, rows, clusters, sessions)
+    items = splits.entries(store, rows, splits.Zones.load(db, None))
     if len(items) != len(ids):
         raise GoldenError("a golden clip has no usable reference; refusing to freeze")
     info = splits.write_and_pin(store, splits.GOLDEN_ID, items)
@@ -117,14 +116,14 @@ def run(store: Store, n: int = 20, *, player=review.afplay, ask=input, out=print
     freeze_if_full(store)  # a freeze that failed last time
     check_open(store)
     db = store.db
-    clusters = splits.clip_clusters(db)
+    zones = splits.Zones.load(db)
+    clusters = zones.clusters
     members = splits.golden_members(store.db)
     taken_clusters = {clusters[m] for m in members}
     taken = Counter(_stratum(db.execute("SELECT * FROM clips WHERE clip_id = ?", (m,)).fetchone()) for m in members)
-    # Not a near-duplicate of anything a rolling or edited set holds: a golden clip and a rolling clip
-    # are both test clips, and the registry must keep their clusters apart (`split verify` checks).
-    held = splits.registered_test_clusters(db, clusters)
-    pool = [r for r in review.candidates(store, "random") if clusters[r["clip_id"]] not in held]
+    # `Zones.may_test`, and clear of what a rolling or edited set holds: a golden clip and a rolling clip
+    # are both test clips, and the registry keeps their clusters apart (`split verify` checks).
+    pool = review.candidates(store, "random", zones=zones, apart_from_registered=True)
     rows = stratified_pick(pool, taken, taken_clusters, clusters, min(n, splits.GOLDEN_SIZE - len(members)),
                            random.Random(seed))
     if not rows:

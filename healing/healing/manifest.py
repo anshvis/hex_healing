@@ -105,17 +105,18 @@ def build_manifest(entries: list[dict]) -> tuple[dict, bytes, str]:
     return manifest, data, hashlib.sha256(data).hexdigest()
 
 
-def write_set(out: Path, entries: list[dict], pcm_for) -> tuple[str, int]:
+def write_set(out: Path, entries: list[dict], pcm_for, root: Path | None = None) -> tuple[str, int]:
     """The one set writer: `out/{manifest.json, manifest.sha256, clips.jsonl, audio/<id>.wav}`.
 
     Returns (manifest sha256, reference words). `pcm_for(id)` returns the clip's mono 16 kHz samples.
     `manifest.sha256` pins both the manifest and the sidecar (which holds each WAV's hash and the
     fields scoring reads, such as `edited_positions`), and goes last so a folder without it is an
-    unfinished build. `verify` is its reader.
+    unfinished build. `verify` is its reader. Folders from `out/audio` up to `root` (default: the
+    folder holding `out`) are owner-only, `root` included.
     """
     manifest, data, digest = build_manifest(entries)
     audio_dir = out / "audio"
-    _private_dir(audio_dir)
+    _private_dir(audio_dir, root or out.parent)
     sidecar = []
     for entry in entries:
         path = audio_dir / f"{entry['id']}.wav"
@@ -131,10 +132,15 @@ def write_set(out: Path, entries: list[dict], pcm_for) -> tuple[str, int]:
     return digest, sum(len(normalized_words(c["expected"])) for c in manifest["clips"])
 
 
-def _private_dir(path: Path) -> None:
+def _private_dir(path: Path, root: Path) -> None:
+    """Create `path` and make it, and every folder up to `root`, owner-only."""
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for folder in (path, path.parent, path.parent.parent):  # the audio folder, the set, and `sets/`
+    folder = path
+    while True:
         folder.chmod(0o700)
+        if folder == root or folder.parent == folder:
+            break
+        folder = folder.parent
 
 
 def _private_file(path: Path, data: bytes) -> None:

@@ -12,6 +12,11 @@ def healing_home() -> Path:
     return Path.home() / "Library" / "Application Support" / "hex-healing"
 
 
+def sets_dir() -> Path:
+    """`$HEALING_HOME/sets`: every test set's folder (the general set is `sets/general`)."""
+    return healing_home() / "sets"
+
+
 def repo_root() -> Path:
     """The Hex checkout this package lives in (`healing/` is one level down)."""
     return Path(__file__).resolve().parents[2]

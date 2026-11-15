@@ -73,3 +73,16 @@ def test_near_duplicate_pairs_finds_the_clusterers_matches():
     near = base.replace("kip", "kit")
     keys = [base, near, "something else entirely here and there again", "hi", "hi"]
     assert list(near_duplicate_pairs(keys)) == [(base, near)] or list(near_duplicate_pairs(keys)) == [(near, base)]
+
+
+def test_cross_pairs_are_direct_not_transitive():
+    from healing.dedupe import near_duplicate_cross
+
+    a = " ".join(f"w{i}" for i in range(30))
+    b = " ".join(f"w{i}" for i in range(2, 32))   # close to a
+    c = " ".join(f"w{i}" for i in range(4, 34))   # close to b, further from a
+    far = " ".join(f"z{i}" for i in range(30))
+    assert list(near_duplicate_cross([a], [a, far])) == [(a, a)]
+    pairs = set(near_duplicate_cross([a], [b, c]))
+    assert (a, b) in pairs and (a, c) not in pairs  # a union-find would join all three
+    assert list(near_duplicate_cross(["hi"], ["hi", "ho"])) == [("hi", "hi")]

@@ -20,7 +20,7 @@ from typing import Callable, Iterable, Protocol
 import numpy as np
 import soundfile
 
-from healing.paths import healing_home
+from healing.paths import sets_dir
 
 from healing.manifest import ManifestError, build_manifest, verify, write_set
 
@@ -30,7 +30,7 @@ GENERAL_ID = "general-v1"
 
 def folder() -> Path:
     """Where the general set lives."""
-    return healing_home() / "sets" / "general"
+    return sets_dir() / "general"
 
 HF_URL = "https://huggingface.co/datasets/{repo}/resolve/{revision}/{path}"
 # LibriSpeech test-other through Hugging Face's parquet copy of openslr's

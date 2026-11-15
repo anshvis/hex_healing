@@ -117,6 +117,30 @@ def near_duplicate_pairs(keys: Iterable[str]) -> Iterator[tuple[str, str]]:
         index.add(position, found)
 
 
+def near_duplicate_cross(left: Iterable[str], right: Iterable[str]) -> Iterator[tuple[str, str]]:
+    """(left, right) pairs of normalized texts that are equal or whose 3-gram Jaccard is at least
+    `JACCARD`. A direct test between two sets, with no clustering and so nothing transitive: an
+    overlap exists only when two texts really are near-duplicates. Texts under 3 tokens match by
+    equality only."""
+    unique_right = sorted(set(right))
+    index, grams = LshIndex(), {}
+    for position, key in enumerate(unique_right):
+        found = shingles(key)
+        if found is not None:
+            grams[position] = found
+            index.add(position, found)
+    positions = {key: i for i, key in enumerate(unique_right)}
+    for key in sorted(set(left)):
+        if key in positions:
+            yield key, key
+        found = shingles(key)
+        if found is None:
+            continue
+        for other in sorted(index.query(found)):
+            if unique_right[other] != key and jaccard(grams[other], found) >= JACCARD:
+                yield key, unique_right[other]
+
+
 @dataclass
 class _Rep:
     cluster_id: str
