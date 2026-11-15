@@ -164,9 +164,22 @@ def test_edited_span_scores_only_edited_positions(world):
     assert spans["a.gguf"] == {"errors": 3, "positions": 3}   # the corrected word is wrong in all three clips
     assert spans["b.gguf"] == {"errors": 0, "positions": 3}
     assert spans["c.gguf"] == {"errors": 0, "positions": 3}   # extra words elsewhere don't count here
-    assert document["scores"][str(world.models["c.gguf"])]["edited"]["wer"] > 0
     rows = document["per_clip"][str(world.models["a.gguf"])]["edited"]
     assert all(r["edited_errors"] == 1 and r["edited_positions"] == 1 for r in rows)
+
+
+def test_the_edited_set_is_not_scored_on_its_whole_reference(world):
+    """AC-7: a strong clip's untouched words are the model's own, so WER and format n/a there."""
+    dataset(world.store)
+    world.recipes({"a.gguf": {"append": " and more"}})
+    document = evaluate(world, ["a.gguf"], ["edited", "rolling"], vocabulary="none")
+    scores = document["scores"][str(world.models["a.gguf"])]
+    assert all(scores["edited"][k] is None for k in ("wer", "word_errors", "ref_words", "format_error_rate"))
+    assert scores["rolling"]["wer"] is not None
+    for row in document["per_clip"][str(world.models["a.gguf"])]["edited"]:
+        assert all(row[k] is None for k in ("word_errors", "reference_words", "format_errors", "format_words"))
+    line = next(l for l in eval_run.table(document).splitlines() if l.startswith("edited"))
+    assert line.split()[2:5] == ["3", "n/a", "n/a"] or line.split()[-5:-2] == ["3", "n/a", "n/a"]
 
 
 def test_per_clip_records_kept_for_paired_stats(world):
@@ -306,3 +319,69 @@ def test_the_baseline_command_is_still_there(capsys):
     with pytest.raises(SystemExit) as stop:
         main(["eval", "baseline", "--help"])
     assert stop.value.code == 0 and "--model" in capsys.readouterr().out
+
+
+# --- negative paths ----------------------------------------------------------------------------
+
+
+def _folder(world, kind):
+    return Path(world.store.db.execute(
+        "SELECT manifest_path FROM splits WHERE kind = ? ORDER BY created_at_ms DESC", (kind,)).fetchone()[0]).parent
+
+
+def test_a_changed_manifest_is_refused(world):
+    dataset(world.store)
+    path = _folder(world, "rolling") / "manifest.json"
+    path.write_text(path.read_text().replace("Please", "Pleas"))
+    with pytest.raises(eval_run.EvalError, match="no longer matches its pin"):
+        evaluate(world, ["a.gguf"], ["rolling"], vocabulary="none")
+
+
+def test_an_incomplete_folder_is_refused(world):
+    dataset(world.store)
+    (_folder(world, "rolling") / "manifest.sha256").unlink()
+    with pytest.raises(eval_run.EvalError, match="incomplete set"):
+        evaluate(world, ["a.gguf"], ["rolling"], vocabulary="none")
+
+
+def test_a_swapped_wav_with_a_rewritten_sidecar_and_pin_is_refused(world):
+    import hashlib
+
+    import numpy as np
+    import soundfile
+
+    dataset(world.store)
+    folder = _folder(world, "rolling")
+    rows = [json.loads(l) for l in (folder / "clips.jsonl").read_text().splitlines()]
+    wav = folder / "audio" / f"{rows[0]['id']}.wav"
+    soundfile.write(wav, np.ones(8000, dtype="int16"), 16_000, subtype="PCM_16")
+    rows[0]["audio_sha256"] = hashlib.sha256(wav.read_bytes()).hexdigest()
+    sidecar = "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
+    (folder / "clips.jsonl").write_text(sidecar)
+    pin = (folder / "manifest.sha256").read_text().splitlines()
+    (folder / "manifest.sha256").write_text(f"{pin[0]}\n{hashlib.sha256(sidecar.encode()).hexdigest()}  clips.jsonl\n")
+    assert manifest.verify(folder)  # the folder is self-consistent...
+    with pytest.raises(eval_run.EvalError, match="clips.jsonl changed"):  # ...but not the registry's pin
+        evaluate(world, ["a.gguf"], ["rolling"], vocabulary="none")
+    assert any("clips.jsonl hash" in p for p in splits.verify(world.store))
+
+
+def test_an_empty_latest_split_is_na_not_an_older_one(world):
+    dataset(world.store)
+    splits.build(world.store, parent="v2", cutoff_ms=CUTOFF + 100 * DAY, now=CUTOFF + 31 * DAY)
+    document = evaluate(world, ["a.gguf"], ["rolling"], vocabulary="none")
+    assert document["sets"] == [] and "has no clips" in document["unavailable_sets"]["rolling"]
+
+
+def test_a_frozen_golden_set_is_scored(world, monkeypatch):
+    from healing import golden
+
+    monkeypatch.setattr(golden, "GOLDEN_SIZE", 3)
+    dataset(world.store)
+    ids = [r["clip_id"] for r in world.store.db.execute("SELECT clip_id FROM clips WHERE label = 'verified' LIMIT 3")]
+    for clip in ids:
+        assert golden.add(world.store, clip)
+    assert golden.frozen_row(world.store) is not None
+    document = evaluate(world, ["a.gguf"], ["golden"], vocabulary="none")
+    assert [s["split_id"] for s in document["sets"]] == ["golden-v1"] and document["sets"][0]["n"] == 3
+    assert document["scores"][str(world.models["a.gguf"])]["golden"]["wer"] == 0

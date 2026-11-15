@@ -15,3 +15,9 @@ def healing_home() -> Path:
 def repo_root() -> Path:
     """The Hex checkout this package lives in (`healing/` is one level down)."""
     return Path(__file__).resolve().parents[2]
+
+
+def hex_support_dir() -> Path:
+    """Hex's own data folder (`$HEX_APPLICATION_SUPPORT_DIR`, else Application Support). Read-only here."""
+    named = os.environ.get("HEX_APPLICATION_SUPPORT_DIR")
+    return Path(named) if named else Path.home() / "Library" / "Application Support" / "hex"

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -157,3 +158,28 @@ def run_benchmark(
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(completed.stdout)
     return parse_jsonl(completed.stdout), command
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        while chunk := file.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def hex_version(binary: str) -> str:
+    completed = subprocess.run([binary, "--version"], capture_output=True, text=True, env=isolated_env())
+    return completed.stdout.strip()
+
+
+def git_sha() -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repo_root()), "rev-parse", "HEAD"], capture_output=True, text=True
+    )
+    return completed.stdout.strip()
+
+
+def built_here(binary: str) -> bool:
+    """Whether `binary` is this checkout's own release build (so `git_sha` names its source)."""
+    return Path(binary).resolve() == (repo_root() / "target" / "release" / "hex").resolve()

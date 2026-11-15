@@ -6,7 +6,8 @@ stored number. The eval JSON keeps per-clip records for the paired bootstrap and
 (T0.1's `healing stats`, M7's gate).
 
 Scores per set:
-- `wer`: the benchmark's own (case and punctuation stripped);
+- `wer`: the benchmark's own (case and punctuation stripped); n/a on the edited set, whose references
+  are mostly the model's own untouched words (AC-7: strong clips are scored only at edited positions);
 - `format_error_rate`: errors over whitespace tokens that keep case and punctuation (so it sees a
   model that forgot a comma); n/a on the general set, whose references are unformatted;
 - `term_error_rate`: 1 - the benchmark's `term_recall`;
@@ -26,10 +27,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from healing import golden
 from healing import manifest as manifest_module
 from healing.eval import baseline
-from healing.eval.bench import BenchError, BenchRun, hex_binary, run_benchmark
-from healing.paths import healing_home
+from healing.eval.bench import (
+    BenchError, BenchRun, built_here, git_sha, hex_binary, hex_version, run_benchmark, sha256,
+)
+from healing.paths import healing_home, hex_support_dir
 from healing.sets import general
 from healing.store import Store, StoreError
 from healing.wer import matched_positions, normalized_words, surface_errors
@@ -56,9 +60,11 @@ class SetRef:
         return self.folder / "manifest.json"
 
 
-def hex_support_dir() -> Path:
-    named = os.environ.get("HEX_APPLICATION_SUPPORT_DIR")
-    return Path(named) if named else Path.home() / "Library" / "Application Support" / "hex"
+@dataclass(frozen=True)
+class Unavailable:
+    """A set that can't be scored, and why (reported as n/a)."""
+
+    reason: str
 
 
 def current_vocabulary(settings_path: Path | None = None) -> tuple[list[dict], str | None, str | None]:
@@ -87,41 +93,47 @@ def current_vocabulary(settings_path: Path | None = None) -> tuple[list[dict], s
     return entries, boost, None if entries else "your vocabulary is empty"
 
 
-def resolve_set(name: str, store: Store | None) -> SetRef | str:
-    """The set's folder and pin, or the reason it isn't available (reported as n/a)."""
+def resolve_set(name: str, store: Store | None) -> SetRef | Unavailable:
+    """The set's folder and pin, or why it isn't available."""
     if name == "general":
         folder = healing_home() / "sets" / "general"
         if not (folder / "manifest.json").is_file():
-            return "no general set: run `healing sets build-general`"
+            return Unavailable("no general set: run `healing sets build-general`")
         digest = _verified(folder)
-        return SetRef(name, "general-v1", folder, digest, len(json.loads((folder / "manifest.json").read_text())["clips"]))
+        return SetRef(name, general.GENERAL_ID, folder, digest, len(json.loads((folder / "manifest.json").read_text())["clips"]))
     if store is None:
-        return "no dataset yet: run `healing collect`"
+        return Unavailable("no dataset yet: run `healing collect`")
     if name == "golden":
-        row = store.db.execute("SELECT * FROM splits WHERE split_id = 'golden-v1'").fetchone()
+        row = golden.row(store)
         if row is None or not row["frozen"]:
             have = row["n_clips"] if row else 0
-            return f"golden is pending ({have} confirmed): run `healing golden review`"
+            return Unavailable(f"golden is pending ({have} of {golden.GOLDEN_SIZE} confirmed): run `healing golden review`")
     else:
+        # The newest set of the kind, even when it's empty: an older one is a different cut-off and
+        # different clips, and quietly scoring it would be a different test.
         row = store.db.execute(
-            "SELECT * FROM splits WHERE kind = ? AND manifest_path IS NOT NULL ORDER BY created_at_ms DESC LIMIT 1",
-            (name,),
+            "SELECT * FROM splits WHERE kind = ? ORDER BY created_at_ms DESC, split_id DESC LIMIT 1", (name,)
         ).fetchone()
         if row is None:
-            return f"no {name} set: run `healing split build`" + (
-                " (needs random-verified clips after the cut-off)" if name == "rolling" else ""
-            )
+            return Unavailable(f"no {name} set: run `healing split build`")
+        if row["manifest_path"] is None:
+            return Unavailable(f"the latest {name} set ({row['split_id']}) has no clips" + (
+                " (needs random-verified clips after the cut-off)" if name == "rolling" else
+                " (needs strong clips with edited words after the cut-off)"
+            ))
     folder = Path(row["manifest_path"]).parent
     digest = _verified(folder)
     if digest != row["manifest_sha256"]:
         raise EvalError(f"{row['split_id']}: manifest changed since it was built; run `healing split verify`")
+    if row["sidecar_sha256"] and manifest_module.sidecar_digest(folder) != row["sidecar_sha256"]:
+        raise EvalError(f"{row['split_id']}: clips.jsonl changed since it was built; run `healing split verify`")
     return SetRef(name, row["split_id"], folder, digest, row["n_clips"])
 
 
 def _verified(folder: Path) -> str:
     try:
-        return general.verify(folder)
-    except general.BuildError as error:
+        return manifest_module.verify(folder)
+    except manifest_module.ManifestError as error:
         raise EvalError(str(error)) from error
 
 
@@ -135,7 +147,8 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict], dict
     manifest = json.loads(ref.manifest.read_text())
     definitions = {c["id"]: c for c in manifest["clips"]}
     sidecar = _sidecar(ref.folder)
-    formatted = ref.name not in UNFORMATTED
+    edited_set = ref.name == "edited"
+    formatted = ref.name not in UNFORMATTED and not edited_set
     per_clip, term_hits = [], []
     format_errors = format_words = span_errors = span_positions = 0
     for record in first.clips:
@@ -147,12 +160,16 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict], dict
         errors, words = surface_errors(definition["expected"], transcript) if formatted else (0, 0)
         format_errors, format_words = format_errors + errors, format_words + words
         row = {
-            "id": record["id"], "word_errors": record["word_errors"], "reference_words": record["reference_words"],
-            "format_errors": errors, "format_words": words, "terms_hit": hit, "terms_expected": terms,
-            "transcript": transcript,
+            "id": record["id"], "terms_hit": hit, "terms_expected": terms, "transcript": transcript,
+            # A strong clip's reference is the model's own words outside the edited ones, so the
+            # whole-reference counts would reward agreeing with oneself: not recorded for edited.
+            "word_errors": None if edited_set else record["word_errors"],
+            "reference_words": None if edited_set else record["reference_words"],
+            "format_errors": None if edited_set else errors,
+            "format_words": None if edited_set else words,
         }
         positions = sidecar.get(record["id"], {}).get("edited_positions")
-        if ref.name == "edited" and positions:
+        if edited_set and positions:
             matched = matched_positions(normalized_words(definition["expected"]), normalized_words(transcript))
             wrong = sum(1 for start, end in positions for i in range(start, end) if not matched[i])
             total = sum(end - start for start, end in positions)
@@ -161,16 +178,20 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict], dict
         per_clip.append(row)
     recall = first.summary["quality"].get("term_recall")
     scores = {
-        "wer": first.summary["wer"],
-        "word_errors": first.summary["word_errors"],
-        "ref_words": first.summary["reference_words"],
+        "wer": None if edited_set else first.summary["wer"],
+        "word_errors": None if edited_set else first.summary["word_errors"],
+        "ref_words": None if edited_set else first.summary["reference_words"],
         "format_error_rate": format_errors / format_words if format_words else None,
         "term_error_rate": None if recall is None else 1 - recall,
         "term_hits": term_hits,
         "median_rtf": statistics.median(r.summary["median_rtf"] for r in runs),
         "p95_clip_ms": statistics.median(r.summary["p95_clip_ms"] for r in runs),
+        "load_ms": first.summary.get("load_ms"),
     }
-    span = {"errors": span_errors, "positions": span_positions} if ref.name == "edited" else None
+    sources = {r["id"]: r["source"] for r in sidecar.values() if "source" in r}
+    if sources and not edited_set:
+        scores["wer_by_source"] = baseline.wer_by_source(first, sources)
+    span = {"errors": span_errors, "positions": span_positions} if edited_set else None
     return scores, per_clip, span
 
 
@@ -199,9 +220,9 @@ def evaluate(
     missing: dict[str, str] = {}
     for name in set_names:
         found = resolve_set(name, store)
-        if isinstance(found, str):
-            missing[name] = found
-            progress(f"{name}: n/a ({found})")
+        if isinstance(found, Unavailable):
+            missing[name] = found.reason
+            progress(f"{name}: n/a ({found.reason})")
         else:
             refs.append(found)
 
@@ -211,11 +232,12 @@ def evaluate(
         if not entries and why_none:
             progress(f"vocabulary: none passed ({why_none})")
     document = {
-        "eval_id": "eval-" + datetime.fromtimestamp(started, timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
-        "hex_sha": baseline._git_sha() if baseline._built_here(str(hex_path)) else None,
-        "hex_version": baseline._hex_version(str(hex_path)),
-        "hex_binary_sha256": baseline._sha256(hex_path),
-        "models": [{"gguf_path": str(m), "gguf_sha256": baseline._sha256(m)} for m in models],
+        "eval_id": "eval-" + datetime.fromtimestamp(started, timezone.utc).strftime("%Y%m%dT%H%M%S")
+        + f"{int(started * 1000) % 1000:03d}Z",
+        "hex_sha": git_sha() if built_here(str(hex_path)) else None,
+        "hex_version": hex_version(str(hex_path)),
+        "hex_binary_sha256": sha256(hex_path),
+        "models": [{"gguf_path": str(m), "gguf_sha256": sha256(m)} for m in models],
         "sets": [{"split_id": r.split_id, "manifest_sha256": r.manifest_sha256, "n": r.n} for r in refs],
         "unavailable_sets": missing,
         "vocabulary": {"mode": vocabulary, "terms": len(entries), "boost": boost if entries else None},
@@ -253,11 +275,21 @@ def evaluate(
 
 
 def write(document: dict) -> Path:
+    """Owner-only, and never over an earlier eval of the same id."""
     folder = healing_home() / "evals"
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{document['eval_id']}.json"
-    path.write_text(json.dumps(document, indent=1) + "\n")
-    return path
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(folder, 0o700)
+    for attempt in range(100):
+        suffix = "" if attempt == 0 else f"-{attempt}"
+        path = folder / f"{document['eval_id']}{suffix}.json"
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(descriptor, "w") as file:
+            file.write(json.dumps(document, indent=1) + "\n")
+        return path
+    raise EvalError(f"could not find a free eval file name for {document['eval_id']}")
 
 
 def _percent(value: float | None) -> str:
