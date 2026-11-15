@@ -48,6 +48,7 @@ EXCLUDED_WARN = 0.30
 GOLDEN_ID = "golden-v1"
 GOLDEN_SIZE = 200  # the golden set freezes once it holds this many confirmed clips
 GENERAL_PREFIX = "general:"
+TRAIN_PREFIX = "train:"
 
 
 class SplitError(RuntimeError):
@@ -94,17 +95,29 @@ def general_references() -> dict[str, str]:
     return {GENERAL_PREFIX + c["id"]: c["expected"] for c in json.loads(path.read_text())["clips"]}
 
 
-def clip_clusters(db: sqlite3.Connection) -> dict[str, str]:
-    """clip_id -> split-cluster, over the dataset's clips and the general set's references.
+def snapshot_texts(db: sqlite3.Connection) -> dict[str, list[str]]:
+    """`train:<split>:<clip>` -> the texts a recorded snapshot stored for each member when it handed it out."""
+    found: dict[str, list[str]] = {}
+    for row in db.execute("SELECT split_id, detail FROM splits WHERE kind = 'train' AND detail IS NOT NULL"):
+        for clip, texts in json.loads(row["detail"]).get("members", {}).items():
+            found[f"{TRAIN_PREFIX}{row['split_id']}:{clip}"] = list(texts)
+    return found
 
-    The general references join as `general:<id>` entries so a training clip that near-duplicates
-    one lands in a test cluster; callers read clips by id and `general_clusters` reads the rest.
+
+def clip_clusters(db: sqlite3.Connection) -> dict[str, str]:
+    """clip_id -> split-cluster, over the dataset's clips, the general set's references and the texts
+    recorded snapshots stored.
+
+    The general references join as `general:<id>` entries and snapshot members as `train:<split>:<clip>`
+    entries, so a clip that near-duplicates what a test set holds, or what a model saw (as it read then),
+    lands in that cluster; callers read clips by id and `general_clusters` reads the rest.
     """
     texts = {
-        row["clip_id"]: [t for t in (row["reference_text"] or row["raw_text"], row["raw_text"]) if t]
+        row["clip_id"]: _texts(row)
         for row in db.execute("SELECT clip_id, reference_text, raw_text FROM clips")
     }
     texts.update({key: [text] for key, text in general_references().items()})
+    texts.update(snapshot_texts(db))
     return split_clusters(texts)
 
 
@@ -156,80 +169,137 @@ def golden_members(db: sqlite3.Connection) -> list[str]:
 class Zones:
     """Who may test and who may train, loaded once per command: the one leak policy (D-41).
 
-    - `may_test(clip)`: a clip a rolling or edited set (or a golden review) may draw. Inside the
-      window by session start, and in no cluster golden, the general set or a recorded train
-      snapshot holds, so a clip a model trained on can never become a test clip.
-    - `may_train(clip)`: a clip a training run may take. Outside the window, in no cluster of an
-      in-window clip, a registered test set (golden, rolling, edited) or the general set.
+    The cut-off is taken at load. Everything asks the same object through named frames:
 
-    `build`, `review`, `golden`, `snapshot_train` and `verify` all ask these two questions of the
-    same object; `verify` asks them again of the registered members.
+    - `rolling(clip)`: may enter a rolling or edited set (or a `--since-cutoff` review): its session
+      starts after the cut-off, no golden, general or recorded-snapshot cluster holds it, and it is not
+      already in another registered set;
+    - `golden(clip)`: may join golden, in any age: as above without the window, and no registered set
+      holds its cluster either;
+    - `random_review(clip)`: may be shown to a random review: not in a golden, general or snapshot
+      cluster, and not already a registered member (a reviewed edited clip would stop being strong);
+    - `may_train(clip)`: a training run may take it: outside the window, in no cluster of an in-window
+      clip, a registered test set or the general set.
+
+    A recorded snapshot reserves its clusters from the texts it stored when it handed its clips out
+    (`train:<split>:<clip>` entries in the clustering, like `general:<id>`), so a clip whose text has
+    changed since cannot hide what the model saw. `why_not_rolling`, `why_not_edited` and
+    `why_not_golden` add each set's own conditions and return the reason (None: it belongs). `build`
+    selects with them and `verify` re-asks them of the registered members, so there is one rule.
     """
 
-    clusters: dict[str, str]  # clip id (and `general:<id>`) -> split-cluster root
+    clusters: dict[str, str]  # clip id, `general:<id>` and `train:<split>:<clip>` -> split-cluster root
     sessions: dict[str, Session]
     cutoff_ms: int
-    owners: dict[str, dict[str, str]]  # cluster -> {split_id: kind} for golden, general, rolling, edited
-    trained: set[str]  # clusters of every member of every recorded train snapshot
+    owners: dict[str, dict[str, str]]  # cluster -> {split_id: kind} for golden, general, rolling, edited (every parent)
+    members: dict[str, dict[str, str]]  # clip id -> {split_id: kind} registered in rolling, edited, golden
+    trained: set[str]  # clusters of the stored texts (and the current clips) of every recorded snapshot
     window: set[str]  # clusters of every clip in a session inside the window
 
     @classmethod
     def load(
-        cls, db: sqlite3.Connection, parent: str | None = "current", cutoff_ms: int | None = None,
-        now: int | None = None, ignore: Iterable[str] = (),
+        cls, db: sqlite3.Connection, cutoff_ms: int | None = None, now: int | None = None,
+        ignore: Iterable[str] = (),
     ) -> Zones:
-        """`parent` scopes rolling and edited sets to one parent (None: all, for `verify`); `ignore`
-        names registered sets about to be replaced, which must not block their own successors."""
+        """`ignore` names registered sets about to be replaced (a build's old rolling and edited sets
+        for its parent), which must not block their own successors. Every other parent's sets count:
+        a clip in any registered test set is out of every training run."""
         clusters, sess = clip_clusters(db), sessions(db)
         cutoff = cutoff_for(cutoff_ms, now)
         skipped = set(ignore)
         owners: dict[str, dict[str, str]] = {}
-        rows = db.execute(
-            "SELECT s.split_id, s.kind, s.parent_version, m.clip_id FROM splits s"
-            " JOIN split_members m ON m.split_id = s.split_id WHERE s.kind IN ('rolling', 'edited', 'golden', 'train')"
-        ).fetchall()
-        trained: set[str] = set()
-        for row in rows:
+        members: dict[str, dict[str, str]] = {}
+        trained = {root for key, root in clusters.items() if key.startswith(TRAIN_PREFIX)}
+        for row in db.execute(
+            "SELECT s.split_id, s.kind, m.clip_id FROM splits s JOIN split_members m ON m.split_id = s.split_id"
+            " WHERE s.kind IN ('rolling', 'edited', 'golden', 'train')"
+        ):
             root = clusters.get(row["clip_id"], row["clip_id"])
             if row["kind"] == "train":
                 trained.add(root)
-            elif row["split_id"] not in skipped and (parent is None or row["parent_version"] in (None, parent)):
+            elif row["split_id"] not in skipped:
                 owners.setdefault(root, {})[row["split_id"]] = row["kind"]
+                members.setdefault(row["clip_id"], {})[row["split_id"]] = row["kind"]
         for root in general_clusters(clusters):
             owners.setdefault(root, {})[general.GENERAL_ID] = "general"
         window = {clusters[clip] for clip, session in sess.items() if session.start > cutoff}
-        return cls(clusters, sess, cutoff, owners, trained, window)
-
-    def add(self, split_id: str, kind: str, clip_ids: Iterable[str]) -> None:
-        """Record a set just registered, so later questions see it without loading again."""
-        for clip in clip_ids:
-            self.owners.setdefault(self.clusters[clip], {})[split_id] = kind
-
-    def held_by(self, clip: str, apart_from: str | None = None) -> dict[str, str]:
-        """{split_id: kind} of the registered sets whose clusters the clip shares."""
-        return {s: k for s, k in self.owners.get(self.clusters[clip], {}).items() if s != apart_from}
+        return cls(clusters, sess, cutoff, owners, members, trained, window)
 
     def in_window(self, clip: str, cutoff_ms: int | None = None) -> bool:
         return self.sessions[clip].start > (self.cutoff_ms if cutoff_ms is None else cutoff_ms)
 
-    def may_test(self, clip: str, *, windowed: bool = True, cutoff_ms: int | None = None,
-                 apart_from_registered: bool = False) -> bool:
-        """`windowed` False is golden's frame (any age); `apart_from_registered` also avoids clusters
-        a rolling or edited set holds."""
+    def _others(self, clip: str, own: str | None) -> dict[str, str]:
+        """{split_id: kind} of the registered sets whose clusters the clip shares, apart from `own`."""
+        return {s: k for s, k in self.owners.get(self.clusters[clip], {}).items() if s != own}
+
+    def _reason(self, clip: str, *, own: str | None, windowed: bool, cutoff_ms: int | None,
+                trained: bool, registered: bool, members: bool) -> str | None:
+        """Why `clip` may not be drawn into a frame, or None. `own` is the registered set the clip is
+        already judged as a member of (verify), whose own rows are not held against it."""
         if windowed and not self.in_window(clip, cutoff_ms):
-            return False
-        root = self.clusters[clip]
-        if root in self.trained:
-            return False
-        held = self.held_by(clip)
-        if any(kind in ("golden", "general") for kind in held.values()):
-            return False
-        return not (apart_from_registered and held)
+            return "predates the cut-off"
+        if trained and self.clusters[clip] in self.trained:
+            return "shares a split-cluster with a recorded train snapshot"
+        others = self._others(clip, own)
+        for split_id, kind in others.items():
+            if kind in ("golden", "general"):
+                return f"shares a split-cluster with {'the golden set' if kind == 'golden' else split_id}"
+        if registered and others:
+            return f"shares a split-cluster with {next(iter(others))}"
+        if members:
+            held = {s: k for s, k in self.members.get(clip, {}).items() if s != own}
+            if held:
+                return f"is already in {next(iter(held))}"
+        return None
+
+    def rolling(self, clip: str, *, own: str | None = None, cutoff_ms: int | None = None, trained: bool = True) -> bool:
+        return self.rolling_reason(clip, own=own, cutoff_ms=cutoff_ms, trained=trained) is None
+
+    def rolling_reason(self, clip: str, *, own: str | None = None, cutoff_ms: int | None = None, trained: bool = True) -> str | None:
+        return self._reason(clip, own=own, windowed=True, cutoff_ms=cutoff_ms, trained=trained, registered=False, members=True)
+
+    def golden(self, clip: str) -> bool:
+        return self.golden_reason(clip) is None
+
+    def golden_reason(self, clip: str, *, own: str | None = None, trained: bool = True) -> str | None:
+        return self._reason(clip, own=own, windowed=False, cutoff_ms=None, trained=trained, registered=True, members=False)
+
+    def random_review(self, clip: str) -> bool:
+        return self._reason(clip, own=None, windowed=False, cutoff_ms=None, trained=True, registered=False, members=True) is None
 
     def may_train(self, clip: str) -> bool:
         # `window` holds the cluster of every in-window clip, so it also keeps those clips themselves out.
         root = self.clusters[clip]
         return root not in self.window and root not in self.owners
+
+    # The sets' own conditions on top of the frames. `fields` is a clips row, or (for an edited set,
+    # judged by what it pinned) a sidecar row: it needs `label`, plus the keys each check reads.
+
+    def why_not_rolling(self, clip: str, fields, *, own: str | None = None, cutoff_ms: int | None = None, trained: bool = True) -> str | None:
+        reason = _gating_reason(fields)
+        return reason or self.rolling_reason(clip, own=own, cutoff_ms=cutoff_ms, trained=trained)
+
+    def why_not_edited(self, clip: str, fields, *, own: str | None = None, cutoff_ms: int | None = None, trained: bool = True) -> str | None:
+        if fields["label"] != "strong":
+            return "is not a strong clip"
+        if not fields["edited_positions"]:
+            return "has no edited positions"
+        return self.rolling_reason(clip, own=own, cutoff_ms=cutoff_ms, trained=trained)
+
+    def why_not_golden(self, clip: str, fields, *, own: str | None = None, trained: bool = True) -> str | None:
+        reason = _gating_reason(fields)
+        if reason is None and not fields["golden"]:
+            reason = "is not marked golden"
+        return reason or self.golden_reason(clip, own=own, trained=trained)
+
+
+def _gating_reason(fields) -> str | None:
+    """A gating set takes verified, randomly sampled references only (AC-7)."""
+    if fields["label"] in ("weak", "strong"):
+        return f"gating reference comes from a {fields['label']} label"
+    if fields["label"] != "verified" or fields["review_strategy"] != "random":
+        return "is not a randomly sampled, verified clip"
+    return None
 
 
 def _trainable(store: Store, zones: Zones, model: str | None, include_weak: bool) -> list[sqlite3.Row]:
@@ -237,12 +307,12 @@ def _trainable(store: Store, zones: Zones, model: str | None, include_weak: bool
 
 
 def preview_train(
-    store: Store, *, parent: str = "current", include_weak: bool = False, model: str | None = None,
+    store: Store, *, include_weak: bool = False, model: str | None = None,
     cutoff_ms: int | None = None, now: int | None = None,
 ) -> list[str]:
     """The clips `snapshot_train` would hand out now. Read-only: it records nothing, so what it
     returns is not what any model trained on."""
-    zones = Zones.load(store.db, parent, cutoff_ms, now)
+    zones = Zones.load(store.db, cutoff_ms, now)
     return [r["clip_id"] for r in _trainable(store, zones, model, include_weak)]
 
 
@@ -252,37 +322,41 @@ def snapshot_train(
 ) -> list[str]:
     """The one way training gets clips (D-41): returns the ids and records them.
 
-    The clips are `labels.trainable` outside the test zone (`Zones.may_train`), read from live data,
-    so it is right after a review no build has seen. A frozen `train` row is written whose members
-    are exactly the returned clips (weak ones too when asked), with `model`, `note` and each member's
-    texts in its detail for `verify`. Every cluster in a recorded snapshot is then closed to golden,
-    random review and test eligibility. Nothing is recorded when there is nothing to hand out.
+    Labels are refreshed first, then the clips are `labels.trainable` outside the test zone
+    (`Zones.may_train`), read from live data inside one write transaction, so it is right after a
+    review no build has seen and a concurrent golden review or snapshot cannot decide on stale facts.
+    A frozen `train` row is written for `parent` whose members are exactly the returned clips (weak
+    ones too when asked), with `model`, `note` and each member's texts in its detail: `Zones` and
+    `verify` read those texts, not the clips' current ones. Every cluster in a recorded snapshot is then
+    closed to golden, random review and test eligibility. Nothing is recorded when there is nothing
+    to hand out.
     """
     db = store.db
-    zones = Zones.load(db, parent, cutoff_ms, now)
-    rows = _trainable(store, zones, model, include_weak)
-    if not rows:
-        return []
-    when = now_ms()
-    stamp = datetime.fromtimestamp(when / 1000, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    split_id = _free_id(db, f"train-{parent}-{stamp}")
-    detail = {
-        "model": model, "note": note, "include_weak": include_weak,
-        "members": {r["clip_id"]: _texts(r) for r in rows},
-    }
-    words = sum(len(normalized_words(r["reference_text"] or r["raw_text"])) for r in rows)
-    db.execute(
-        "INSERT INTO splits (split_id, kind, parent_version, cutoff_ms, created_at_ms, frozen, n_clips, n_words, detail)"
-        " VALUES (?, 'train', ?, ?, ?, 0, ?, ?, ?)",
-        (split_id, parent, zones.cutoff_ms, when, len(rows), words, json.dumps(detail, sort_keys=True)),
-    )
-    db.executemany("INSERT INTO split_members (split_id, clip_id) VALUES (?, ?)", [(split_id, r["clip_id"]) for r in rows])
-    db.execute("UPDATE splits SET frozen = 1 WHERE split_id = ?", (split_id,))  # members first: a frozen row takes none
-    db.commit()
+    labels.refresh(store)
+    when = now_ms() if now is None else now
+    with store.immediate():
+        zones = Zones.load(db, cutoff_ms, now)
+        rows = _trainable(store, zones, model, include_weak)
+        if not rows:
+            return []
+        stamp = datetime.fromtimestamp(when / 1000, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        split_id = _free_id(db, f"train-{parent}-{stamp}")
+        detail = {
+            "model": model, "note": note, "include_weak": include_weak,
+            "members": {r["clip_id"]: _texts(r) for r in rows},
+        }
+        words = sum(len(normalized_words(r["reference_text"] or r["raw_text"])) for r in rows)
+        db.execute(
+            "INSERT INTO splits (split_id, kind, parent_version, cutoff_ms, created_at_ms, frozen, n_clips, n_words, detail)"
+            " VALUES (?, 'train', ?, ?, ?, 0, ?, ?, ?)",
+            (split_id, parent, zones.cutoff_ms, when, len(rows), words, json.dumps(detail, sort_keys=True)),
+        )
+        db.executemany("INSERT INTO split_members (split_id, clip_id) VALUES (?, ?)", [(split_id, r["clip_id"]) for r in rows])
+        db.execute("UPDATE splits SET frozen = 1 WHERE split_id = ?", (split_id,))  # members first: a frozen row takes none
     return [r["clip_id"] for r in rows]
 
 
-def _texts(row: sqlite3.Row) -> list[str]:
+def _texts(row) -> list[str]:
     """The texts a clip clusters by: its reference and what Hex heard."""
     return [t for t in (row["reference_text"] or row["raw_text"], row["raw_text"]) if t]
 
@@ -358,7 +432,7 @@ def _terms(db: sqlite3.Connection, clip_id: str, reference: str) -> list[str]:
     return found
 
 
-def entries(store: Store, rows: list[sqlite3.Row], zones: Zones, *, edited: bool = False) -> list[dict]:
+def entries(store: Store, rows: list[sqlite3.Row], clusters: dict[str, str], sess: dict[str, Session], *, edited: bool = False) -> list[dict]:
     """Manifest entries for `rows`, with the sidecar fields every set carries."""
     result = []
     for row in rows:
@@ -370,11 +444,11 @@ def entries(store: Store, rows: list[sqlite3.Row], zones: Zones, *, edited: bool
             "expected": reference,
             "terms": _terms(store.db, row["clip_id"], reference),
             "application": row["application"],
-            "session": zones.sessions[row["clip_id"]].id,
+            "session": sess[row["clip_id"]].id,
             "source": "history",
             "timestamp_ms": row["timestamp_ms"],
             "label": row["label"],
-            "split_cluster": zones.clusters[row["clip_id"]],
+            "split_cluster": clusters[row["clip_id"]],
         }
         if edited:
             entry["edited_positions"] = json.loads(row["edited_positions"])
@@ -451,36 +525,30 @@ def build(store: Store, parent: str = "current", cutoff_ms: int | None = None, n
     db = store.db
     labels.label_all(store)  # a fresh collect or migration has no labels yet: sets would come out empty
     when = now_ms() if now is None else now
-    old = db.execute(
-        "SELECT split_id FROM splits WHERE frozen = 0 AND parent_version = ? AND kind IN ('rolling', 'edited')",
-        (parent,),
-    ).fetchall()
-    zones = Zones.load(db, parent, cutoff_ms, when, ignore=[r["split_id"] for r in old])
     stamp = datetime.fromtimestamp(when / 1000, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-    rolling_rows, edited_rows = [], []
-    for row in db.execute(f"SELECT c.* FROM clips c WHERE {labels.USABLE} ORDER BY c.timestamp_ms, c.clip_id"):
-        if not zones.may_test(row["clip_id"]):
-            continue
-        if row["label"] == "verified" and row["review_strategy"] == "random":
-            rolling_rows.append(row)
-        elif row["label"] == "strong" and row["edited_positions"]:
-            edited_rows.append(row)
-    rolling_items = entries(store, rolling_rows, zones)
-    edited_items = entries(store, edited_rows, zones, edited=True)
-
-    # Write the folders first: a failure leaves the registry as it was.
-    rolling = _written(store, f"rolling-{parent}-{stamp}", rolling_items)
-    edited = _written(store, f"edited-{parent}-{stamp}", edited_items)
-    for row in old:
-        db.execute("DELETE FROM split_members WHERE split_id = ?", (row["split_id"],))
-        db.execute("DELETE FROM splits WHERE split_id = ?", (row["split_id"],))
-    _register(db, rolling, "rolling", parent, zones.cutoff_ms, when, [i["id"] for i in rolling_items])
-    _register(db, edited, "edited", parent, zones.cutoff_ms, when, [i["id"] for i in edited_items])
-    zones.add(rolling.split_id, "rolling", [i["id"] for i in rolling_items])
-    zones.add(edited.split_id, "edited", [i["id"] for i in edited_items])
-    general_info = _register_general(db, when)
-    db.commit()
+    with store.immediate():  # decide and register on one set of facts: a snapshot or golden add waits
+        old = db.execute(
+            "SELECT split_id FROM splits WHERE frozen = 0 AND parent_version = ? AND kind IN ('rolling', 'edited')",
+            (parent,),
+        ).fetchall()
+        zones = Zones.load(db, cutoff_ms, when, ignore=[r["split_id"] for r in old])
+        rolling_rows, edited_rows = [], []
+        for row in db.execute(f"SELECT c.* FROM clips c WHERE {labels.USABLE} ORDER BY c.timestamp_ms, c.clip_id"):
+            if zones.why_not_rolling(row["clip_id"], row) is None:
+                rolling_rows.append(row)
+            elif zones.why_not_edited(row["clip_id"], row) is None:
+                edited_rows.append(row)
+        rolling_items = entries(store, rolling_rows, zones.clusters, zones.sessions)
+        edited_items = entries(store, edited_rows, zones.clusters, zones.sessions, edited=True)
+        # Write the folders first: a failure leaves the registry as it was.
+        rolling = _written(store, f"rolling-{parent}-{stamp}", rolling_items)
+        edited = _written(store, f"edited-{parent}-{stamp}", edited_items)
+        for row in old:
+            db.execute("DELETE FROM split_members WHERE split_id = ?", (row["split_id"],))
+            db.execute("DELETE FROM splits WHERE split_id = ?", (row["split_id"],))
+        _register(db, rolling, "rolling", parent, zones.cutoff_ms, when, [i["id"] for i in rolling_items])
+        _register(db, edited, "edited", parent, zones.cutoff_ms, when, [i["id"] for i in edited_items])
+        general_info = _register_general(db, when)
     for row in old:
         if row["split_id"] not in (rolling.split_id, edited.split_id):
             shutil.rmtree(sets_dir() / row["split_id"], ignore_errors=True)
@@ -492,7 +560,7 @@ def build(store: Store, parent: str = "current", cutoff_ms: int | None = None, n
         parent, zones.cutoff_ms, rolling, edited,
         SetInfo(GOLDEN_ID, golden["n_clips"], golden["n_words"], golden["manifest_sha256"]) if frozen else None,
         len(golden_members(db)), general_info, len(trainable),
-        len(_trainable(store, zones, None, False)),
+        len(preview_train(store, cutoff_ms=zones.cutoff_ms)),  # after the sets are registered
     )
     if result.rolling_small:
         result.warnings.append(f"rolling_small: {rolling.n_words} reference words, under {ROLLING_MIN_WORDS}; the gate refuses")
@@ -540,18 +608,34 @@ def verify(store: Store) -> list[str]:
     return verify_report(store).problems
 
 
+def _pinned(row: sqlite3.Row) -> dict[str, dict]:
+    """An edited set's sidecar rows (clip id -> row): what the set pinned, or {} when unreadable (the
+    pin check reports that)."""
+    if not row["manifest_path"]:
+        return {}
+    try:
+        path = Path(row["manifest_path"]).parent / "clips.jsonl"
+        return {r["id"]: r for r in map(json.loads, path.read_text().splitlines())}
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
 def verify_report(store: Store) -> Report:
     """Current-set leaks and snapshot overlaps, kept apart.
 
-    Leaks re-ask `Zones` of the registered members (clusters are recomputed from the clips). A
-    recorded train snapshot is checked against the test clips' texts directly, from the texts the
-    snapshot stored, with the near-duplicate test and no clustering: a clip trained on that a test
-    set now holds is a true contamination report, and a union-find that links non-transitively could
-    never make one fail permanently.
+    Leaks re-ask `Zones` of every registered member, the same predicates `build` selected with
+    (clusters are recomputed from the clips). A rolling or golden member is judged by its live label,
+    so a review that rejects it shows at once; an edited member is judged by the label and positions
+    its set pinned (its sidecar, covered by the pin), so a clip whose correction changes after the
+    build does not flag a set that is still exactly what was built. A recorded train snapshot is
+    checked against the test clips' texts directly, from the texts the snapshot stored, with the
+    near-duplicate test and no clustering: a clip trained on that a test set now holds is a true
+    contamination report, and a union-find that links non-transitively could never make one fail
+    permanently (so a member's live cluster is not held against a snapshot here).
     """
     db = store.db
     report = Report()
-    zones = Zones.load(db, None)
+    zones = Zones.load(db)
 
     def members(split_id: str) -> list[str]:
         return [r["clip_id"] for r in db.execute("SELECT clip_id FROM split_members WHERE split_id = ?", (split_id,))]
@@ -562,62 +646,55 @@ def verify_report(store: Store) -> Report:
         report.leaks.append("more than one golden set is frozen")
     test_texts: dict[str, list[str]] = {}
     for row in tests:
-        gating = row["kind"] in ("rolling", "golden")
+        pinned = _pinned(row) if row["kind"] == "edited" else {}
         for clip in members(row["split_id"]):
             c = db.execute("SELECT * FROM clips WHERE clip_id = ?", (clip,)).fetchone()
             if c is None:
                 report.leaks.append(f"{row['split_id']}: clip {clip} is gone")
                 continue
             test_texts[f"{row['split_id']}:{clip}"] = _texts(c)
-            if gating and c["label"] in ("weak", "strong"):
-                report.leaks.append(f"{row['split_id']}: clip {clip}'s gating reference comes from a {c['label']} label")
-            elif gating and (c["label"] != "verified" or c["review_strategy"] != "random"):
-                report.leaks.append(f"{row['split_id']}: clip {clip} is not a randomly sampled, verified clip")
-            if row["kind"] == "rolling" and not zones.in_window(clip, row["cutoff_ms"]):
-                report.leaks.append(f"{row['split_id']}: clip {clip} predates the cut-off")
-            if row["kind"] == "edited" and c["label"] != "strong":
-                report.leaks.append(f"{row['split_id']}: clip {clip} is not a strong clip")
-            if row["kind"] == "golden" and not c["golden"]:
-                report.leaks.append(f"{row['split_id']}: clip {clip} is not marked golden")
-            report.leaks += _cluster_conflicts(zones, row, clip)
+            own = row["split_id"]
+            if row["kind"] == "rolling":
+                reason = zones.why_not_rolling(clip, c, own=own, cutoff_ms=row["cutoff_ms"], trained=False)
+            elif row["kind"] == "edited":
+                fields = pinned.get(clip)
+                reason = ("is not in its pinned sidecar" if fields is None else
+                          zones.why_not_edited(clip, fields, own=own, cutoff_ms=row["cutoff_ms"], trained=False))
+            else:
+                reason = zones.why_not_golden(clip, c, own=own, trained=False)
+            if reason:
+                report.leaks.append(f"{row['split_id']}: clip {clip} {reason}")
     for row in split_rows:
         if row["manifest_path"]:
             report.leaks += _check_set(row, db, members(row["split_id"]))
-    for clip_id_, text in general_references().items():
-        test_texts[f"{general.GENERAL_ID}:{clip_id_[len(GENERAL_PREFIX):]}"] = [text]
+    for key, text in general_references().items():
+        test_texts[f"{general.GENERAL_ID}:{key[len(GENERAL_PREFIX):]}"] = [text]
     report.snapshot_overlaps = _snapshot_overlaps(split_rows, test_texts)
     return report
 
 
-def _cluster_conflicts(zones: Zones, row: sqlite3.Row, clip: str) -> list[str]:
-    """A rolling or edited member may not share a cluster with golden or the general set. (A golden
-    member sharing one with a rolling or edited set is the same pair, found from that side.)"""
-    if row["kind"] == "golden":
-        return []
-    return [
-        f"{row['split_id']}: clip {clip} shares a split-cluster with {'the golden set' if kind == 'golden' else other}"
-        for other, kind in zones.held_by(clip, apart_from=row["split_id"]).items() if kind in ("golden", "general")
-    ]
-
-
-def _snapshot_overlaps(split_rows: list[sqlite3.Row], test_texts: dict[str, list[str]]) -> list[str]:
+def _snapshot_overlaps(split_rows: list, test_texts: dict[str, list[str]]) -> list[str]:
+    """A snapshot's stored member texts against every test text, through one index built once."""
     by_key: dict[str, list[str]] = {}
     for owner, texts in test_texts.items():
         for text in texts:
             if key := dedupe.normalize(text):
                 by_key.setdefault(key, []).append(owner)
+    index = dedupe.NearIndex(by_key)
     found = []
     for snapshot in (r for r in split_rows if r["kind"] == "train"):
         members = json.loads(snapshot["detail"] or "{}").get("members", {})
         seen: set[tuple[str, str]] = set()
         for clip, texts in sorted(members.items()):
-            for left, right in dedupe.near_duplicate_cross(filter(None, map(dedupe.normalize, texts)), by_key):
-                for owner in by_key[right]:
-                    if (clip, owner) not in seen:
-                        seen.add((clip, owner))
-                        found.append(
-                            f"{snapshot['split_id']}: a model trained on clip {clip}, which near-duplicates {owner.split(':')[1]} in {owner.split(':')[0]}"
-                        )
+            for key in filter(None, map(dedupe.normalize, texts)):
+                for other in index.near(key):
+                    for owner in by_key[other]:
+                        if (clip, owner) not in seen:
+                            seen.add((clip, owner))
+                            found.append(
+                                f"{snapshot['split_id']}: a model trained on clip {clip}, which near-duplicates "
+                                f"{owner.split(':')[1]} in {owner.split(':')[0]}"
+                            )
     return found
 
 

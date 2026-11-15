@@ -111,7 +111,7 @@ def general_set(home):
     manifest.write_set(out, entries, lambda clip: __import__("numpy").zeros(8000, dtype="int16"))
 
 
-def dataset(store, strong=True, verified=True):
+def dataset(store, strong=True, verified=True, build=True):
     """Post-cutoff clips: formatted verified references, and strong ones with an edited word."""
     phrases = sentences(10, seed=3)
     for i in range(6):
@@ -124,7 +124,8 @@ def dataset(store, strong=True, verified=True):
             add_clip(store, i, raw=f"{phrases[i - 5]} kip", final=f"{phrases[i - 5]} kip.", ts=CUTOFF + DAY * (i + 1),
                      outcome="edited", edited=f"{phrases[i - 5]} kit")
     labels.label_all(store)
-    splits.build(store, cutoff_ms=CUTOFF, now=CUTOFF + 30 * DAY)
+    if build:
+        splits.build(store, cutoff_ms=CUTOFF, now=CUTOFF + 30 * DAY)
 
 
 def evaluate(w, models, sets, **kwargs):
@@ -377,10 +378,11 @@ def test_a_frozen_golden_set_is_scored(world, monkeypatch):
     from healing import golden
 
     monkeypatch.setattr(splits, "GOLDEN_SIZE", 3)
-    dataset(world.store)
+    dataset(world.store, build=False)  # golden is confirmed first; a build then keeps clear of it
     ids = [r["clip_id"] for r in world.store.db.execute("SELECT clip_id FROM clips WHERE label = 'verified' LIMIT 3")]
     for clip in ids:
         assert golden.add(world.store, clip)
+    splits.build(world.store, cutoff_ms=CUTOFF, now=CUTOFF + 30 * DAY)
     assert splits.golden_row(world.store.db)["frozen"]
     document = evaluate(world, ["a.gguf"], ["golden"], vocabulary="none")
     assert [s["split_id"] for s in document["sets"]] == ["golden-v1"] and document["sets"][0]["n"] == 3

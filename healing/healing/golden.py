@@ -66,22 +66,28 @@ def stratified_pick(rows: list, taken: Counter, taken_clusters: set[str], cluste
 
 
 def add(store: Store, clip_id: str) -> bool:
-    """Put a confirmed clip in golden; freezes the set when it is full. False if it can't hold one."""
+    """Put a confirmed clip in golden; freezes the set when it is full. False if it can't hold one.
+
+    The check and the insert are one write transaction, and the clip must still be in the golden frame
+    when it lands: a snapshot recorded while you were reviewing it (the clip may now be one a model
+    trained on) or a build that registered its cluster is seen here, not after.
+    """
     db = store.db
-    clip = db.execute("SELECT * FROM clips WHERE clip_id = ?", (clip_id,)).fetchone()
-    if clip["label"] != "verified" or not normalized_words(clip["reference_text"] or ""):
-        return False
-    check_open(store)
-    if splits.golden_row(db) is None:
-        db.execute(
-            "INSERT INTO splits (split_id, kind, created_at_ms) VALUES (?, 'golden', ?)",
-            (splits.GOLDEN_ID, now_ms()),
-        )
-    db.execute("INSERT OR IGNORE INTO split_members (split_id, clip_id) VALUES (?, ?)", (splits.GOLDEN_ID, clip_id))
-    db.execute("UPDATE clips SET golden = 1 WHERE clip_id = ?", (clip_id,))
-    count = len(splits.golden_members(store.db))
-    db.execute("UPDATE splits SET n_clips = ? WHERE split_id = ?", (count, splits.GOLDEN_ID))
-    db.commit()
+    with store.immediate():
+        clip = db.execute("SELECT * FROM clips WHERE clip_id = ?", (clip_id,)).fetchone()
+        if clip["label"] != "verified" or not normalized_words(clip["reference_text"] or ""):
+            return False
+        check_open(store)
+        if not splits.Zones.load(db).golden(clip_id):
+            return False
+        if splits.golden_row(db) is None:
+            db.execute(
+                "INSERT INTO splits (split_id, kind, created_at_ms) VALUES (?, 'golden', ?)",
+                (splits.GOLDEN_ID, now_ms()),
+            )
+        db.execute("INSERT OR IGNORE INTO split_members (split_id, clip_id) VALUES (?, ?)", (splits.GOLDEN_ID, clip_id))
+        db.execute("UPDATE clips SET golden = 1 WHERE clip_id = ?", (clip_id,))
+        db.execute("UPDATE splits SET n_clips = ? WHERE split_id = ?", (len(splits.golden_members(db)), splits.GOLDEN_ID))
     freeze_if_full(store)
     return True
 
@@ -92,24 +98,29 @@ def freeze_if_full(store: Store) -> bool:
     current = splits.golden_row(store.db)
     if current is None or current["frozen"] or len(splits.golden_members(store.db)) < splits.GOLDEN_SIZE:
         return False
-    freeze(store)
-    return True
+    return freeze(store)
 
 
-def freeze(store: Store) -> None:
+def freeze(store: Store) -> bool:
+    """Write and pin the golden set. The members are read and `frozen` is set in one transaction, so a
+    clip added meanwhile is either in the pinned set or waits; False when another process froze it first."""
     db = store.db
-    ids = splits.golden_members(store.db)
-    rows = [db.execute("SELECT * FROM clips WHERE clip_id = ?", (i,)).fetchone() for i in ids]
-    items = splits.entries(store, rows, splits.Zones.load(db, None))
-    if len(items) != len(ids):
-        raise GoldenError("a golden clip has no usable reference; refusing to freeze")
-    info = splits.write_and_pin(store, splits.GOLDEN_ID, items)
-    db.execute(
-        "UPDATE splits SET manifest_path = ?, manifest_sha256 = ?, sidecar_sha256 = ?, n_clips = ?,"
-        " n_words = ?, frozen = 1 WHERE split_id = ?",
-        (str(info.path), info.manifest_sha256, info.sidecar_sha256, len(ids), info.n_words, splits.GOLDEN_ID),
-    )
-    db.commit()
+    with store.immediate():
+        current = splits.golden_row(db)
+        if current is None or current["frozen"]:
+            return False
+        ids = splits.golden_members(db)
+        rows = [db.execute("SELECT * FROM clips WHERE clip_id = ?", (i,)).fetchone() for i in ids]
+        items = splits.entries(store, rows, splits.clip_clusters(db), splits.sessions(db))
+        if len(items) != len(ids):
+            raise GoldenError("a golden clip has no usable reference; refusing to freeze")
+        info = splits.write_and_pin(store, splits.GOLDEN_ID, items)
+        db.execute(
+            "UPDATE splits SET manifest_path = ?, manifest_sha256 = ?, sidecar_sha256 = ?, n_clips = ?,"
+            " n_words = ?, frozen = 1 WHERE split_id = ?",
+            (str(info.path), info.manifest_sha256, info.sidecar_sha256, len(ids), info.n_words, splits.GOLDEN_ID),
+        )
+    return True
 
 
 def run(store: Store, n: int = 20, *, player=review.afplay, ask=input, out=print, seed: int | None = None) -> review.ReviewResult:
@@ -121,9 +132,9 @@ def run(store: Store, n: int = 20, *, player=review.afplay, ask=input, out=print
     members = splits.golden_members(store.db)
     taken_clusters = {clusters[m] for m in members}
     taken = Counter(_stratum(db.execute("SELECT * FROM clips WHERE clip_id = ?", (m,)).fetchone()) for m in members)
-    # `Zones.may_test`, and clear of what a rolling or edited set holds: a golden clip and a rolling clip
-    # are both test clips, and the registry keeps their clusters apart (`split verify` checks).
-    pool = review.candidates(store, "random", zones=zones, apart_from_registered=True)
+    # The golden frame: clear of golden, general and recorded snapshots, and of what a rolling or edited set
+    # holds (a golden clip and a rolling clip are both test clips; `split verify` keeps their clusters apart).
+    pool = review.candidates(store, "random", zones.golden)
     rows = stratified_pick(pool, taken, taken_clusters, clusters, min(n, splits.GOLDEN_SIZE - len(members)),
                            random.Random(seed))
     if not rows:

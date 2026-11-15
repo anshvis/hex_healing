@@ -132,7 +132,7 @@ def test_sessions_cut_at_ten_minute_gaps(store):
 def test_fixture_shape(store):
     ids, _ = world(store)
     assert store.db.execute("SELECT COUNT(*) FROM clips").fetchone()[0] == 294
-    assert len({s for s, _ in splits.sessions(store.db).values()}) == 40
+    assert len({s.id for s in splits.sessions(store.db).values()}) == 40
 
 
 def test_rolling_only_after_cutoff_and_random_verified(store):
@@ -610,16 +610,16 @@ def test_golden_review_skips_the_clusters_of_rolling_and_edited_members(store, s
     zones = splits.Zones.load(store.db)
     member = store.db.execute(
         "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'rolling' LIMIT 1").fetchone()[0]
-    twins = [r["clip_id"] for r in review_module.candidates(store, "random", zones=zones)
+    twins = [r["clip_id"] for r in review_module.candidates(store, "random", zones.random_review)
              if zones.clusters[r["clip_id"]] == zones.clusters[member]]
     assert twins  # a never-reviewed near-duplicate of a rolling member exists
-    frame = {r["clip_id"] for r in review_module.candidates(store, "random", zones=zones, apart_from_registered=True)}
+    frame = {r["clip_id"] for r in review_module.candidates(store, "random", zones.golden)}
     assert not set(twins) & frame
     seen = []
     real = review_module.candidates
-    monkeypatch.setattr(review_module, "candidates", lambda *a, **k: (seen.append(k), real(*a, **k))[1])
+    monkeypatch.setattr(review_module, "candidates", lambda *a, **k: (seen.append(a), real(*a, **k))[1])
     golden.run(store, 20, player=Accept().play, ask=Accept().ask, out=lambda *_: None, seed=3)
-    assert seen and seen[0].get("apart_from_registered") is True
+    assert seen and callable(seen[0][2]) and seen[0][2].__name__ == "golden"
     held = {zones.clusters[c] for c in (r[0] for r in store.db.execute(
         "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind IN ('rolling', 'edited')"))}
     assert not {zones.clusters[c] for c in splits.golden_members(store.db)} & held
@@ -636,12 +636,12 @@ def test_a_weak_clip_handed_out_with_include_weak_never_becomes_a_test_clip(stor
     labels.label_all(store)
     random_frame = {r["clip_id"] for r in review_module.candidates(store, "random")}
     assert weak not in random_frame and twin not in random_frame
-    window_frame = {r["clip_id"] for r in review_module.candidates(store, "random", CUTOFF)}
+    window_frame = {r["clip_id"] for r in review_module.candidates(store, "random", splits.Zones.load(store.db, CUTOFF).rolling)}
     assert twin not in window_frame
     golden.run(store, 20, player=Accept().play, ask=Accept().ask, out=lambda *_: None, seed=3)
     assert weak not in splits.golden_members(store.db) and twin not in splits.golden_members(store.db)
     zones = splits.Zones.load(store.db)
-    assert not zones.may_test(weak, windowed=False) and not zones.may_test(twin)
+    assert not zones.random_review(weak) and not zones.golden(weak) and not zones.rolling(twin)
 
 
 def test_a_clip_that_became_trainable_after_the_last_build_is_recorded_when_handed_out(store):
@@ -678,7 +678,7 @@ def test_a_trained_on_clip_never_becomes_a_test_clip(store, small_golden):
     assert twin not in {r["clip_id"] for r in review_module.candidates(store, "random")}
     assert old not in {r["clip_id"] for r in review_module.candidates(store, "random")}
     zones = splits.Zones.load(store.db)
-    assert not zones.may_test(twin)
+    assert not zones.rolling(twin) and not zones.random_review(twin)
     golden.run(store, 20, player=Accept().play, ask=Accept().ask, out=lambda *_: None, seed=3)
     assert twin not in splits.golden_members(store.db) and old not in splits.golden_members(store.db)
     splits.build(store, cutoff_ms=CUTOFF, now=CUTOFF + 30 * DAY + 10_000)  # a later build keeps the snapshot

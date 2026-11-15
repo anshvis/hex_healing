@@ -55,17 +55,13 @@ class ReviewResult:
                 f"fixed {self.fixed}, rejected {self.rejected}{tail}")
 
 
-def candidates(
-    store: Store, strategy: str, cutoff_ms: int | None = None, *, zones: splits.Zones | None = None,
-    apart_from_registered: bool = False,
-) -> list:
+def candidates(store: Store, strategy: str, frame: Callable[[str], bool] | None = None) -> list:
     """Unreviewed clips with audio that `strategy` may show.
 
-    A random review shows only clips `Zones.may_test` allows: never one in a cluster golden, the
-    general set or a recorded train snapshot holds, so a clip a model trained on cannot later become
-    a test clip (D-41). With `cutoff_ms` it also takes only the window after it (the rolling frame);
-    without, any age (golden's frame, which passes `apart_from_registered` to avoid rolling and
-    edited clusters too).
+    A random review shows only clips in a `Zones` frame: by default `random_review`, never a clip in a
+    cluster golden, the general set or a recorded train snapshot holds (a clip a model trained on must
+    not later become a test clip, D-41) and never one already in a registered set. `--since-cutoff`
+    passes `rolling` (the window) and golden passes `golden`.
     """
     # A random review draws from every clip not yet sampled at random (an uncertain review is not a
     # sample, so it doesn't shrink the frame) and never a clip you rejected.
@@ -77,12 +73,8 @@ def candidates(
     if strategy == "uncertain":
         # The benchmark exposes no model confidence, so: the newest weak clips.
         return store.db.execute(base + " AND c.label = 'weak' ORDER BY c.timestamp_ms DESC, c.clip_id").fetchall()
-    zones = zones or splits.Zones.load(store.db)
-    return [
-        r for r in store.db.execute(base + " ORDER BY c.clip_id").fetchall()
-        if zones.may_test(r["clip_id"], windowed=cutoff_ms is not None, cutoff_ms=cutoff_ms,
-                          apart_from_registered=apart_from_registered)
-    ]
+    frame = frame or splits.Zones.load(store.db).random_review
+    return [r for r in store.db.execute(base + " ORDER BY c.clip_id").fetchall() if frame(r["clip_id"])]
 
 
 def pick(rows: list, n: int, strategy: str, rng: random.Random) -> list:
@@ -158,14 +150,15 @@ def run(
 ) -> ReviewResult:
     if strategy not in STRATEGIES:
         raise ReviewError(f"strategy is one of {', '.join(STRATEGIES)}")
-    cutoff = None
+    frame = None
     if cutoff_ms is not None and not since_cutoff:
         raise ReviewError("--cutoff only means something with --since-cutoff")
     if since_cutoff:
         if strategy != "random":
             raise ReviewError("--since-cutoff fills the rolling set, which takes random reviews only")
-        cutoff = splits.cutoff_for(cutoff_ms)  # the window `split build` uses for rolling and edited
-    pool = candidates(store, strategy, cutoff)
+        # the window `split build` uses for rolling and edited, and the same frame
+        frame = splits.Zones.load(store.db, cutoff_ms).rolling
+    pool = candidates(store, strategy, frame)
     if not pool:
         out("nothing to review: no unreviewed clips with audio match")
         return ReviewResult()
