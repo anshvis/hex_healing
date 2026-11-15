@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -82,6 +83,40 @@ def compatible(a: str, b: str) -> bool:
     return jaccard(ga, gb) >= JACCARD
 
 
+class LshIndex:
+    """MinHash bands over token 3-grams: `query` finds earlier items that may be near-duplicates."""
+
+    def __init__(self) -> None:
+        self.buckets: dict[tuple[int, bytes], list[int]] = {}
+
+    def add(self, index: int, grams: frozenset[str]) -> None:
+        for band, value in enumerate(_bands(signature(grams))):
+            self.buckets.setdefault((band, value), []).append(index)
+
+    def query(self, grams: frozenset[str]) -> set[int]:
+        return {
+            i for band, value in enumerate(_bands(signature(grams))) for i in self.buckets.get((band, value), [])
+        }
+
+
+def near_duplicate_pairs(keys: Iterable[str]) -> Iterator[tuple[str, str]]:
+    """Pairs of distinct normalized texts whose 3-gram Jaccard is at least `JACCARD`.
+
+    Texts under 3 tokens have no 3-grams and pair with nothing here (callers match them by equality).
+    """
+    unique = sorted(set(keys))
+    index, grams = LshIndex(), {}
+    for position, key in enumerate(unique):
+        found = shingles(key)
+        if found is None:
+            continue
+        for earlier in sorted(index.query(found)):
+            if jaccard(grams[earlier], found) >= JACCARD:
+                yield unique[earlier], key
+        grams[position] = found
+        index.add(position, found)
+
+
 @dataclass
 class _Rep:
     cluster_id: str
@@ -93,7 +128,7 @@ class _Rep:
 class Clusterer:
     def __init__(self, reps: list[Clip] = ()):
         self.reps: list[_Rep] = []
-        self.buckets: dict[tuple[int, bytes], list[int]] = {}
+        self.index = LshIndex()
         self.short: dict[str, list[int]] = {}
         for rep in reps:
             self._add(rep.clip_id, rep.text, rep.audio_ms)
@@ -106,8 +141,7 @@ class Clusterer:
         if grams is None:
             self.short.setdefault(key, []).append(index)
             return
-        for band, value in enumerate(_bands(signature(grams))):
-            self.buckets.setdefault((band, value), []).append(index)
+        self.index.add(index, grams)
 
     def assign(self, clip: Clip) -> str | None:
         key = normalize(clip.text)
@@ -118,13 +152,8 @@ class Clusterer:
         if grams is None:
             candidates = {i: 1.0 for i in self.short.get(key, [])}
         else:
-            found = {
-                i
-                for band, value in enumerate(_bands(signature(grams)))
-                for i in self.buckets.get((band, value), [])
-            }
             candidates = {}
-            for i in found:
+            for i in self.index.query(grams):
                 score = jaccard(grams, self.reps[i].grams)
                 if score >= JACCARD:
                     candidates[i] = score

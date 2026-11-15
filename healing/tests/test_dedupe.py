@@ -64,3 +64,12 @@ def test_twenty_thousand_clips_cluster_fast():
     start = time.time()
     cluster(items)
     assert time.time() - start < 30
+
+
+def test_near_duplicate_pairs_finds_the_clusterers_matches():
+    from healing.dedupe import near_duplicate_pairs
+
+    base = " ".join(f"w{i}" for i in range(14)) + " kip " + " ".join(f"v{i}" for i in range(14))
+    near = base.replace("kip", "kit")
+    keys = [base, near, "something else entirely here and there again", "hi", "hi"]
+    assert list(near_duplicate_pairs(keys)) == [(base, near)] or list(near_duplicate_pairs(keys)) == [(near, base)]
