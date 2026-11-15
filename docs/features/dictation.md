@@ -709,6 +709,9 @@ chunks keep their existing preparation.
 `hex benchmark-transcription` accepts a scoring vocabulary and expected terms,
 and reports recall, excess vocabulary occurrences and WER by corpus group, plus
 overall latency. Its companion scorer also reports per-group latency.
+`--vocabulary <file.json> [--boost light|normal|strong]` biases each clip with
+a settings-shaped vocabulary through the same `bias_for` dictation uses
+(see [the benchmark notes](../research/transcription-benchmark.md)).
 The [fixture guide](../../tests/fixtures/vocabulary/README.md) describes
 the synthetic set, public guard download, and ignored private manifest path.
 This is offline evaluation coverage, not a shipped vocabulary feature or proof
