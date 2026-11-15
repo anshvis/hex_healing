@@ -127,7 +127,6 @@ M3_COLUMNS = {
     "weight": "REAL NOT NULL DEFAULT 0",
     "edited_positions": "TEXT",
     "review_strategy": "TEXT",
-    "split_cluster": "TEXT",
 }
 
 SCHEMA_M3 = """
@@ -148,6 +147,7 @@ CREATE TABLE IF NOT EXISTS splits (
     created_at_ms INTEGER NOT NULL,
     manifest_path TEXT,
     manifest_sha256 TEXT,
+    sidecar_sha256 TEXT,
     frozen INTEGER NOT NULL DEFAULT 0,
     n_clips INTEGER NOT NULL DEFAULT 0,
     n_words INTEGER NOT NULL DEFAULT 0
@@ -166,6 +166,10 @@ CREATE TRIGGER IF NOT EXISTS frozen_split_delete BEFORE DELETE ON splits WHEN OL
 BEGIN SELECT RAISE(ABORT, 'a frozen split never changes'); END;
 CREATE TRIGGER IF NOT EXISTS frozen_members_insert BEFORE INSERT ON split_members
 WHEN (SELECT frozen FROM splits WHERE split_id = NEW.split_id) = 1
+BEGIN SELECT RAISE(ABORT, 'a frozen split never changes'); END;
+CREATE TRIGGER IF NOT EXISTS frozen_members_update BEFORE UPDATE ON split_members
+WHEN (SELECT frozen FROM splits WHERE split_id = OLD.split_id) = 1
+   OR (SELECT frozen FROM splits WHERE split_id = NEW.split_id) = 1
 BEGIN SELECT RAISE(ABORT, 'a frozen split never changes'); END;
 CREATE TRIGGER IF NOT EXISTS frozen_members_delete BEFORE DELETE ON split_members
 WHEN (SELECT frozen FROM splits WHERE split_id = OLD.split_id) = 1
@@ -250,6 +254,9 @@ class Store:
         fresh = not database.exists()
         self.db = sqlite3.connect(database)
         self.db.row_factory = sqlite3.Row
+        # INSERT OR REPLACE deletes the old row, and only fires delete triggers when this is on.
+        self.db.execute("PRAGMA recursive_triggers = ON")
+        self.db.execute("PRAGMA busy_timeout = 60000")  # a scheduled collect may hold the file a moment
         if fresh:
             os.chmod(database, 0o600)
         self._migrate()
