@@ -12,6 +12,7 @@ from healing.cli import main
 from healing.eval.baseline import DEFAULT_GGUF
 from healing.eval.bench import BenchError, hex_binary, run_benchmark
 from healing.sets import general
+from healing import store as store_module
 from healing.store import Store
 
 CUTOFF = BASE_MS
@@ -973,3 +974,186 @@ def test_a_golden_freeze_takes_the_write_lock_before_it_writes_anything(store, h
     finally:
         other.close()
     assert golden.freeze(store) is True and golden.freeze(store) is False  # and a second freeze is a no-op
+
+
+# --- round 5 -------------------------------------------------------------------------------
+
+
+def test_a_trained_clip_whose_reference_changes_stays_out_of_review_and_golden(store, small_golden):
+    build_world(store)
+    weak = old_trainable(store, 1001, "stack the old planks against the wall of the shed", days=9, weak=True)
+    build_at(store)
+    assert weak in splits.snapshot_train(store, include_weak=True, cutoff_ms=CUTOFF)
+    # its text changes entirely afterwards (a Replace in Hex): the clip itself must still be closed
+    store.db.execute("UPDATE clips SET raw_text = 'completely different words about a boat on a lake' WHERE clip_id = ?", (weak,))
+    store.db.commit()
+    labels.refresh(store, [weak])
+    assert row(store, weak)["reference_text"] == "completely different words about a boat on a lake"
+    assert weak not in {r["clip_id"] for r in review_module.candidates(store, "random")}
+    golden.run(store, 20, player=Accept().play, ask=Accept().ask, out=lambda *_: None, seed=3)
+    assert weak not in splits.golden_members(store.db)
+
+
+def test_a_near_but_not_equal_stored_text_is_a_snapshot_overlap():
+    twelve = "set the new paint tray beside the ladder before the painters arrive"
+    thirteen = twelve + " today"
+    other = "mow the front lawn on saturday morning and trim the hedge by the gate"
+    snapshot = {"kind": "train", "split_id": "train-x", "detail": json.dumps({"members": {"a": [twelve], "b": [other]}})}
+    found = splits._snapshot_overlaps([snapshot], {("rolling-x", "t1"): [thirteen], ("rolling-x", "t2"): ["nothing alike at all here"]})
+    assert len(found) == 1 and "clip a" in found[0] and "t1 in rolling-x" in found[0]
+    assert splits._snapshot_overlaps([snapshot], {("rolling-x", "t2"): ["nothing alike at all here"]}) == []
+
+
+def test_a_second_store_sees_what_build_golden_and_snapshot_committed(store, small_golden):
+    ids, _ = build_world(store)
+    old_trainable(store, 1010, "wipe the shelves down before the new books go on", days=9)
+    build_at(store)
+    taken = splits.snapshot_train(store, cutoff_ms=CUTOFF)
+    gold = next(r["clip_id"] for r in store.db.execute(
+        "SELECT clip_id FROM clips c WHERE label = 'verified' AND review_strategy = 'random' AND golden = 0 ORDER BY clip_id")
+        if splits.Zones.load(store.db).golden(r["clip_id"]))
+    assert golden.add(store, gold)
+    other = Store()
+    try:
+        kinds = {r[0] for r in other.db.execute("SELECT kind FROM splits")}
+        assert {"rolling", "edited", "train", "golden"} <= kinds
+        assert {r[0] for r in other.db.execute("SELECT clip_id FROM split_members WHERE split_id LIKE 'train-%'")} == set(taken)
+        assert gold in splits.golden_members(other.db)
+    finally:
+        other.close()
+
+
+def test_a_member_missing_from_the_edited_sidecar_fails_verify(store):
+    ids, _ = build_world(store)
+    build_at(store)
+    edited = store.db.execute("SELECT split_id FROM splits WHERE kind = 'edited' AND manifest_path IS NOT NULL").fetchone()[0]
+    inside = {r[0] for r in store.db.execute("SELECT clip_id FROM split_members WHERE split_id = ?", (edited,))}
+    extra = next(c for c in ids["strong"] if c not in inside)
+    store.db.execute("INSERT INTO split_members VALUES (?, ?)", (edited, extra))
+    store.db.commit()
+    assert any(f"clip {extra} is not in its pinned sidecar" in p for p in splits.verify(store))
+
+
+def test_snapshot_train_refreshes_labels_first(store):
+    build_world(store)
+    cid = add_clip(store, 1020, raw="tighten every screw on the cabinet door hinges", ts=CUTOFF - 9 * DAY)
+    review(store, cid, strategy="uncertain")  # a review no one has derived the label from yet
+    assert row(store, cid)["label"] == "unlabelled"
+    assert cid in splits.snapshot_train(store, cutoff_ms=CUTOFF)
+    assert row(store, cid)["label"] == "verified"
+
+
+def test_a_rolling_members_window_is_judged_by_the_session_start_it_pinned(store):
+    build_world(store)
+    build_at(store)
+    member = store.db.execute(
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'rolling' LIMIT 1").fetchone()[0]
+    sidecar = Path(store.db.execute("SELECT manifest_path FROM splits WHERE kind = 'rolling' AND manifest_path IS NOT NULL").fetchone()[0]).parent / "clips.jsonl"
+    entry = next(e for e in map(json.loads, sidecar.read_text().splitlines()) if e["id"] == member)
+    assert entry["session_start_ms"] > CUTOFF
+    store.db.execute("UPDATE clips SET timestamp_ms = timestamp_ms - 400 * 86400000 WHERE clip_id = ?", (member,))
+    store.db.commit()
+    assert not any("predates the cut-off" in p for p in splits.verify(store))  # the pin, not the live clock
+
+
+def test_many_snapshots_of_the_same_clips_cost_one_pass(store):
+    import time
+
+    texts = {f"c{i}": [" ".join(f"w{i}x{k}" for k in range(14))] for i in range(2000)}
+    for n in range(30):
+        store.db.execute(
+            "INSERT INTO splits (split_id, kind, parent_version, created_at_ms, frozen, detail) VALUES (?, 'train', 'current', ?, 1, ?)",
+            (f"train-{n}", n, json.dumps({"members": texts})))
+    store.db.commit()
+    assert len(splits.snapshot_texts(store.db)) == 2000  # the same texts are clustered once, not 30 times
+    started = time.time()
+    splits.clip_clusters(store.db)
+    rows = store.db.execute("SELECT * FROM splits WHERE kind = 'train'").fetchall()
+    found = splits._snapshot_overlaps(rows, {("rolling-x", f"t{i}"): [" ".join(f"z{i}x{k}" for k in range(14))] for i in range(1000)})
+    assert found == [] and time.time() - started < 10
+
+
+def test_a_golden_set_never_takes_more_than_its_size(store, small_golden, monkeypatch):
+    other = Store()
+    try:
+        ids = []
+        for i in range(8):
+            cid = add_clip(store, 1100 + i, raw=f"unique phrase {i} about topic{i} zebra{i} kangaroo{i} q{i * 7}", ts=BASE_MS + i * DAY, outcome="unchanged")
+            review(store, cid)
+            ids.append(cid)
+        labels.label_all(store)
+        for cid in ids[:4]:
+            assert golden.add(store, cid)
+        real = golden.freeze_if_full
+        extra = []
+
+        def hooked(s):
+            if not extra:  # a second terminal adds before the first has frozen the full set
+                extra.append(golden.add(other, ids[5]))
+            return real(s)
+
+        monkeypatch.setattr(golden, "freeze_if_full", hooked)
+        assert golden.add(store, ids[4])  # the fifth: the set is now full
+        assert extra == [False]  # and takes no sixth
+        assert len(splits.golden_members(store.db)) == 5 and splits.golden_row(store.db)["frozen"] == 1
+        assert golden.add(store, "no-such-clip") is False
+    finally:
+        other.close()
+
+
+def test_a_missing_general_folder_is_an_error_not_a_silent_loss_of_reservation(store, home):
+    build_world(store)
+    text = "pack the tools into the grey case and lock it before you go"
+    manifest.write_set(home / "sets" / "general", [{"id": "g1", "expected": text, "terms": []}],
+                       lambda clip: np.zeros(8000, dtype="int16"))
+    build_at(store)
+    shutil.rmtree(home / "sets" / "general")
+    with pytest.raises(splits.SplitError, match="general set is registered"):
+        splits.snapshot_train(store, cutoff_ms=CUTOFF)
+    with pytest.raises(splits.SplitError, match="general set is registered"):
+        build_at(store, 5000)
+    report = splits.verify_report(store)  # verify reports it instead of raising
+    assert any(p.startswith("general-v1:") for p in report.leaks)
+
+
+def test_verify_reads_one_consistent_view_while_another_store_builds(store):
+    ids = []
+    for i in range(4):
+        cid = add_clip(store, 1200 + i, raw=f"unique phrase number {i} about topic{i} zebra{i} kangaroo{i}", ts=BASE_MS + i * DAY, outcome="unchanged")
+        review(store, cid)
+        ids.append(cid)
+    labels.label_all(store)
+    now = BASE_MS + 5 * DAY
+    splits.build(store, now=now)
+    assert splits.verify(store) == []
+    other = Store()
+    other.db.execute("PRAGMA busy_timeout = 50")
+    seen = []
+    real = splits.Zones.load.__func__
+
+    def hooked(cls, *args, **kwargs):
+        zones = real(cls, *args, **kwargs)
+        if not seen:  # another process tries to rebuild between verify's reads
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                splits.build(other, now=now + 60_000)
+            seen.append(1)
+        return zones
+
+    try:
+        splits.Zones.load = classmethod(hooked)
+        report = splits.verify_report(store)
+    finally:
+        splits.Zones.load = classmethod(real)
+        other.close()
+    assert seen == [1] and report.problems == []  # the rebuild waited out verify's view instead of tearing it
+    assert splits.verify(store) == []
+
+
+def test_a_transaction_in_flight_is_never_silently_committed(store):
+    store.db.execute("UPDATE clips SET label = label")
+    store.db.execute("INSERT INTO runs (started_at_ms, since_ms) VALUES (1, NULL)")
+    with pytest.raises(store_module.StoreError, match="already open"):
+        with store.immediate():
+            pass
+    assert store.db.in_transaction  # untouched: still the caller's to commit or roll back
+    store.db.rollback()

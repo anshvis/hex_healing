@@ -811,7 +811,8 @@ def _check_set(row: sqlite3.Row, db: sqlite3.Connection, member_ids: list[str]) 
     try:
         folder, _ = verified_set(row)
     except manifest.ManifestError as error:
-        return [str(error)]
+        text = str(error)
+        return [text if text.startswith(row["split_id"]) else f"{row['split_id']}: {text}"]
     if row["kind"] != "golden":
         return []
     problems = []
