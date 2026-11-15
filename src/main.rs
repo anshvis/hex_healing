@@ -185,16 +185,8 @@ enum Command {
         vocabulary: Option<PathBuf>,
         /// How strongly `--vocabulary` biases; Hex's own default when omitted.
         #[arg(long, value_enum, requires = "vocabulary")]
-        boost: Option<TranscriptionBenchmarkBoost>,
+        boost: Option<dictation::vocabulary::VocabularyBoost>,
     },
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, ValueEnum)]
-enum TranscriptionBenchmarkBoost {
-    Light,
-    Normal,
-    Strong,
 }
 
 #[cfg(target_os = "macos")]
@@ -600,45 +592,19 @@ fn main() -> Result<()> {
             vocabulary,
             boost,
         } => {
-            let vocabulary = match vocabulary {
-                Some(path) => {
-                    let entries = match transcription::benchmark::read_vocabulary(&path) {
-                        Ok(entries) => entries,
-                        Err(message) => {
-                            eprintln!("error: --vocabulary {message}");
-                            std::process::exit(2);
-                        }
-                    };
-                    Some(transcription::benchmark::RunVocabulary {
-                        entries,
-                        boost: match boost {
-                            None => dictation::vocabulary::VocabularyBoost::default(),
-                            Some(TranscriptionBenchmarkBoost::Light) => {
-                                dictation::vocabulary::VocabularyBoost::Light
-                            }
-                            Some(TranscriptionBenchmarkBoost::Normal) => {
-                                dictation::vocabulary::VocabularyBoost::Normal
-                            }
-                            Some(TranscriptionBenchmarkBoost::Strong) => {
-                                dictation::vocabulary::VocabularyBoost::Strong
-                            }
-                        },
-                    })
-                }
-                None => None,
+            let model = match backend {
+                TranscriptionBenchmarkBackend::Onnx => None,
+                TranscriptionBenchmarkBackend::TranscribeCpp => Some(match model {
+                    Some(model) => model,
+                    None => parakeet::default_model_path()?,
+                }),
             };
-            let backend = match backend {
-                TranscriptionBenchmarkBackend::Onnx => transcription::benchmark::Backend::Onnx,
-                TranscriptionBenchmarkBackend::TranscribeCpp => {
-                    transcription::benchmark::Backend::TranscribeCpp {
-                        model: match model {
-                            Some(model) => model,
-                            None => parakeet::default_model_path()?,
-                        },
-                    }
-                }
-            };
-            transcription::benchmark::run(&manifest, warmups, runs, backend, vocabulary)
+            let backend = transcription::benchmark::backend(model, vocabulary.as_deref(), boost)
+                .unwrap_or_else(|message| {
+                    eprintln!("error: {message}");
+                    std::process::exit(2);
+                });
+            transcription::benchmark::run(&manifest, warmups, runs, backend)
         }
     }
 }

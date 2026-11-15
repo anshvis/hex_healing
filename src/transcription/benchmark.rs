@@ -10,103 +10,118 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::dictation::resample_for_parakeet;
-use crate::dictation::vocabulary::{VocabularyBoost, VocabularyEntry, bias_for};
+use crate::dictation::vocabulary::{self, VocabularyBoost, VocabularyEntry, bias_for};
 use crate::parakeet::Parakeet;
-use crate::transcription::models::{ModelRuntime, TranscriptionModelId};
+use crate::transcription::models::{TranscriptionModelId, VocabularyUse, catalog_match};
 use crate::transcription::pad_gguf_samples;
 
 pub enum Backend {
     Onnx,
-    TranscribeCpp { model: PathBuf },
+    TranscribeCpp {
+        model: PathBuf,
+        /// `--vocabulary`: every clip is biased with it, as dictation biases.
+        vocabulary: Option<RunVocabulary>,
+    },
+}
+
+/// The backend a `benchmark-transcription` command line names, or why it
+/// cannot run. `model` is the transcribe-cpp file, `None` for ONNX.
+/// `--vocabulary` is read here, and only a Parakeet model can take it:
+/// dictation hands Whisper and Qwen3-ASR the list as a prompt, which a bias
+/// would not measure.
+pub fn backend(
+    model: Option<PathBuf>,
+    vocabulary: Option<&Path>,
+    boost: Option<VocabularyBoost>,
+) -> std::result::Result<Backend, String> {
+    let vocabulary = vocabulary
+        .map(|path| {
+            RunVocabulary::read(path, boost.unwrap_or_default())
+                .map_err(|error| format!("--vocabulary {error}"))
+        })
+        .transpose()?;
+    let Some(model) = model else {
+        if vocabulary.is_some() {
+            return Err("--vocabulary needs the transcribe-cpp backend".into());
+        }
+        return Ok(Backend::Onnx);
+    };
+    if vocabulary.is_some()
+        && let Some(id) = catalog_model(&model)
+    {
+        let definition = crate::transcription::models::definition(id);
+        if definition.vocabulary_use() != VocabularyUse::Bias {
+            return Err(format!(
+                "--vocabulary biases only Parakeet models, and {} takes its vocabulary another way",
+                definition.name
+            ));
+        }
+    }
+    Ok(Backend::TranscribeCpp { model, vocabulary })
+}
+
+/// The catalog model a file is (name and size), so clips are prepared as
+/// dictation prepares them for it. `None` for a file that is not a catalog
+/// artifact.
+fn catalog_model(path: &Path) -> Option<TranscriptionModelId> {
+    let name = path.file_name()?.to_str()?;
+    let bytes = fs::metadata(path).ok()?.len();
+    catalog_match(None, None, name, bytes)
 }
 
 impl Backend {
-    /// The catalog model whose file this run loads, so clips are prepared as
-    /// dictation prepares them for it. `None` for ONNX and for a file that is
-    /// not a catalog artifact.
     fn model_id(&self) -> Option<TranscriptionModelId> {
-        let Self::TranscribeCpp { model } = self else {
-            return None;
-        };
-        let name = model.file_name()?.to_str()?;
-        crate::transcription::models::MODELS
-            .iter()
-            .find(|definition| {
-                matches!(definition.runtime, ModelRuntime::Gguf(artifact) if artifact.filename == name)
-            })
-            .map(|definition| definition.id)
+        match self {
+            Self::TranscribeCpp { model, .. } => catalog_model(model),
+            Self::Onnx => None,
+        }
     }
 }
 
-/// `--vocabulary`: the terms and boost every run is biased with, as dictation
-/// biases (same 64-term cut, same options).
+/// The terms and boost every run is biased with, as dictation builds them
+/// (same cleaning, limits, and 64-term cut).
 pub struct RunVocabulary {
-    pub entries: Vec<VocabularyEntry>,
-    pub boost: VocabularyBoost,
+    bias: (Vec<String>, transcribe_cpp::ParakeetVocabularyOptions),
+    /// Entries read, before the engine's term cut.
+    input_terms: usize,
+    boost: VocabularyBoost,
 }
 
-/// Reads a `--vocabulary` file: a JSON list in `settings.json`'s shape, each
-/// item a term string or `{"term", "sounds_like": []}`. The error names the
-/// offending field.
-pub fn read_vocabulary(path: &Path) -> std::result::Result<Vec<VocabularyEntry>, String> {
-    let data =
-        fs::read(path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    parse_vocabulary(&data).map_err(|error| format!("{}: {error}", path.display()))
-}
-
-fn parse_vocabulary(data: &[u8]) -> std::result::Result<Vec<VocabularyEntry>, String> {
-    let value: serde_json::Value =
-        serde_json::from_slice(data).map_err(|error| format!("not valid JSON: {error}"))?;
-    let items = value
-        .as_array()
-        .ok_or("vocabulary must be a JSON list of terms or {term, sounds_like} objects")?;
-    let mut entries = Vec::with_capacity(items.len());
-    for (index, item) in items.iter().enumerate() {
-        let (term, sounds_like) = match item {
-            serde_json::Value::String(term) => (term.as_str(), None),
-            serde_json::Value::Object(object) => {
-                let term = object
-                    .get("term")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| format!("vocabulary[{index}].term must be a string"))?;
-                (term, object.get("sounds_like"))
-            }
-            _ => {
-                return Err(format!(
-                    "vocabulary[{index}] must be a string or an object with a term"
-                ));
-            }
-        };
-        if term.trim().is_empty() {
-            return Err(format!("vocabulary[{index}].term cannot be empty"));
-        }
-        let mut spellings = Vec::new();
-        match sounds_like {
-            None | Some(serde_json::Value::Null) => {}
-            Some(serde_json::Value::Array(list)) => {
-                for (spelling_index, spelling) in list.iter().enumerate() {
-                    match spelling.as_str() {
-                        Some(spelling) if !spelling.trim().is_empty() => {
-                            spellings.push(spelling.to_string());
-                        }
-                        _ => {
-                            return Err(format!(
-                                "vocabulary[{index}].sounds_like[{spelling_index}] must be a nonempty string"
-                            ));
-                        }
-                    }
-                }
-            }
-            Some(_) => {
-                return Err(format!("vocabulary[{index}].sounds_like must be a list"));
-            }
-        }
-        entries.push(VocabularyEntry {
-            term: term.to_string(),
-            sounds_like: spellings,
-        });
+impl RunVocabulary {
+    /// Reads a `--vocabulary` file: a JSON list in `settings.json`'s shape,
+    /// each item a term string or `{"term", "sounds_like": []}`, held to the
+    /// rules the Vocabulary pane applies. The error names the item.
+    pub fn read(path: &Path, boost: VocabularyBoost) -> std::result::Result<Self, String> {
+        let data = fs::read(path)
+            .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+        Self::parse(&data, boost).map_err(|error| format!("{}: {error}", path.display()))
     }
-    Ok(entries)
+
+    fn parse(data: &[u8], boost: VocabularyBoost) -> std::result::Result<Self, String> {
+        let mut deserializer = serde_json::Deserializer::from_slice(data);
+        let saved: Vec<VocabularyEntry> = serde_path_to_error::deserialize(&mut deserializer)
+            .map_err(|error| format!("at {}: {}", error.path(), error.inner()))?;
+        let mut entries = Vec::new();
+        for (index, entry) in saved.iter().enumerate() {
+            vocabulary::add(&mut entries, &entry.term, &entry.sounds_like)
+                .map_err(|error| format!("at [{index}]: {error}"))?;
+        }
+        let bias = bias_for(&entries, boost).ok_or("the vocabulary has no terms")?;
+        Ok(Self {
+            bias,
+            input_terms: entries.len(),
+            boost,
+        })
+    }
+
+    /// What the model record says was applied.
+    fn record(&self) -> serde_json::Value {
+        json!({
+            "terms": self.bias.0.len(),
+            "input_terms": self.input_terms,
+            "boost": self.boost,
+        })
+    }
 }
 
 enum LoadedBackend {
@@ -119,20 +134,9 @@ impl LoadedBackend {
     fn load(backend: Backend) -> Result<Self> {
         match backend {
             Backend::Onnx => load_onnx(),
-            Backend::TranscribeCpp { model } => Ok(Self::TranscribeCpp(Box::new(
-                Parakeet::load_for_benchmark(&model)?,
+            Backend::TranscribeCpp { model, vocabulary } => Ok(Self::TranscribeCpp(Box::new(
+                Parakeet::load_for_benchmark(&model, vocabulary.map(|vocabulary| vocabulary.bias))?,
             ))),
-        }
-    }
-
-    fn set_bias(&mut self, vocabulary: &RunVocabulary) -> Result<()> {
-        match self {
-            Self::TranscribeCpp(model) => {
-                model.set_run_bias(bias_for(&vocabulary.entries, vocabulary.boost));
-                Ok(())
-            }
-            #[cfg(feature = "onnx-benchmark")]
-            Self::Onnx(_) => bail!("--vocabulary needs the transcribe-cpp backend"),
         }
     }
 
@@ -293,13 +297,7 @@ fn term_count(text: &str, term: &str) -> usize {
     count
 }
 
-pub fn run(
-    manifest_path: &Path,
-    warmups: usize,
-    runs: usize,
-    backend: Backend,
-    run_vocabulary: Option<RunVocabulary>,
-) -> Result<()> {
+pub fn run(manifest_path: &Path, warmups: usize, runs: usize, backend: Backend) -> Result<()> {
     if warmups == 0 {
         bail!("benchmark requires at least one warmup run");
     }
@@ -313,6 +311,16 @@ pub fn run(
     validate_manifest(&manifest)?;
     let vocabulary = manifest.vocabulary;
     let model_id = backend.model_id();
+    let bias_record = match &backend {
+        Backend::TranscribeCpp { vocabulary, .. } => vocabulary.as_ref().map(RunVocabulary::record),
+        Backend::Onnx => None,
+    };
+    if matches!(backend, Backend::TranscribeCpp { .. }) && model_id.is_none() {
+        eprintln!(
+            "note: the model file is not a catalog artifact (by name and size), so clips get no model trailing silence"
+        );
+    }
+    let trailing_silence = crate::transcription::trailing_silence_samples(model_id);
     let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let clips = manifest
         .clips
@@ -325,9 +333,6 @@ pub fn run(
     let mut output = BufWriter::new(stdout.lock());
     let load_started = Instant::now();
     let mut backend = LoadedBackend::load(backend)?;
-    if let Some(run_vocabulary) = &run_vocabulary {
-        backend.set_bias(run_vocabulary)?;
-    }
     let load_ms = elapsed_ms(load_started);
     let backend_name = backend.name().to_string();
     let mut model_record = json!({
@@ -339,13 +344,11 @@ pub fn run(
         "warmups": warmups,
         "runs": runs,
         "scoring_vocabulary": vocabulary,
+        "trailing_silence_samples": trailing_silence,
     });
-    if let Some(run_vocabulary) = &run_vocabulary {
-        // Only with the flag, so a run without it prints what it always did.
-        model_record["bias_vocabulary"] = json!({
-            "terms": run_vocabulary.entries.len(),
-            "boost": run_vocabulary.boost,
-        });
+    if let Some(bias_record) = bias_record {
+        // Only with the flag.
+        model_record["bias_vocabulary"] = bias_record;
     }
     write_json(&mut output, model_record)?;
 
@@ -760,57 +763,151 @@ mod tests {
     }
 
     #[test]
-    fn vocabulary_flag_parses_settings_shape() {
-        let entries = parse_vocabulary(
-            br#"["Hex", {"term": "Qorvyx", "sounds_like": ["corvix"]}, {"term": "Rune"}]"#,
+    fn vocabulary_flag_reads_the_settings_shape_through_the_pane_rules() {
+        let read = |json: &str| RunVocabulary::parse(json.as_bytes(), VocabularyBoost::default());
+        let vocabulary = read(
+            r#"["Hex", {"term": "  Qorvyx ", "sounds_like": ["corvix", "Corvix", "qorvyx"]}, "hex"]"#,
         )
         .unwrap();
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].term, "Hex");
-        assert!(entries[0].sounds_like.is_empty());
-        assert_eq!(entries[1].term, "Qorvyx");
-        assert_eq!(entries[1].sounds_like, ["corvix"]);
+        // Cleaned, deduplicated, and the same bias dictation builds.
+        assert_eq!(vocabulary.input_terms, 2);
+        assert_eq!(vocabulary.bias.0, ["Hex", "Qorvyx"]);
+        assert_eq!(vocabulary.bias.1.sounds_like, [(1, "corvix".to_string())]);
+        assert_eq!(vocabulary.bias.1.boost, Some(2.5));
 
-        // The bias is the one dictation builds, through the same function.
-        let (terms, options) = bias_for(&entries, VocabularyBoost::default()).unwrap();
-        assert_eq!(terms, ["Hex", "Qorvyx", "Rune"]);
-        assert_eq!(options.sounds_like, [(1, "corvix".to_string())]);
-
-        // Errors name the field.
-        for (input, field) in [
-            (r#"{"term": "x"}"#, "list"),
-            (r#"[1]"#, "vocabulary[0]"),
-            (r#"[{"sounds_like": []}]"#, "vocabulary[0].term"),
-            (
-                r#"["ok", {"term": "x", "sounds_like": "y"}]"#,
-                "vocabulary[1].sounds_like",
-            ),
-            (
-                r#"[{"term": "x", "sounds_like": [2]}]"#,
-                "vocabulary[0].sounds_like[0]",
-            ),
+        let long = format!(r#"["{}"]"#, "x".repeat(65));
+        let too_many = format!(
+            r#"[{{"term": "a", "sounds_like": {:?}}}]"#,
+            (0..17).map(|n| format!("s{n}")).collect::<Vec<_>>()
+        );
+        for (input, wanted) in [
+            (r#"{"term": "x"}"#, "at ."),
+            (r#"[1]"#, "at [0]"),
+            (r#"["ok", {"sounds_like": []}]"#, "at [1]"),
+            (r#"["ok", {"term": "x", "sounds_like": null}]"#, "at [1]"),
+            (r#"["ok", {"term": "x", "sounds_like": [2]}]"#, "at [1]"),
+            (r#"["ok", "  "]"#, "at [1]"),
+            (r#"[]"#, "no terms"),
+            ("not json", "at ."),
+            (long.as_str(), "longer than 64"),
+            (too_many.as_str(), "at most 16"),
         ] {
-            let error = parse_vocabulary(input.as_bytes()).unwrap_err();
-            assert!(error.contains(field), "{input}: {error}");
+            let error = read(input)
+                .err()
+                .unwrap_or_else(|| panic!("{input} was accepted"));
+            assert!(error.contains(wanted), "{input}: {error}");
         }
     }
 
     #[test]
-    fn no_flag_no_bias() {
-        // Without the flag no bias is set: the run takes whatever the global
-        // vocabulary says (nothing, in this process).
-        assert!(bias_for(&[], VocabularyBoost::default()).is_none());
-        assert_eq!(VocabularyBoost::default(), VocabularyBoost::Normal);
-        let missing = Backend::TranscribeCpp {
-            model: PathBuf::from("not-a-catalog-file.gguf"),
-        };
-        assert_eq!(missing.model_id(), None);
-        let unified = Backend::TranscribeCpp {
-            model: PathBuf::from("parakeet-unified-en-0.6b-Q8_0.gguf"),
-        };
-        assert_eq!(
-            unified.model_id(),
-            Some(TranscriptionModelId::ParakeetUnifiedEnglish)
+    fn vocabulary_files_that_cannot_be_read_name_the_path() {
+        let missing = Path::new("/nonexistent/hex-vocabulary.json");
+        let error = RunVocabulary::read(missing, VocabularyBoost::Normal)
+            .err()
+            .unwrap();
+        assert!(
+            error.contains("/nonexistent/hex-vocabulary.json"),
+            "{error}"
         );
+        let directory = std::env::temp_dir().join(format!("hex-vocab-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("bad.json");
+        fs::write(&path, "[1,").unwrap();
+        let error = RunVocabulary::read(&path, VocabularyBoost::Normal)
+            .err()
+            .unwrap();
+        assert!(error.contains("bad.json"), "{error}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_record_reports_the_terms_the_engine_takes_not_the_terms_read() {
+        let list = (0..70)
+            .map(|n| format!(r#""term{n}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let vocabulary =
+            RunVocabulary::parse(format!("[{list}]").as_bytes(), VocabularyBoost::Strong).unwrap();
+        let record = vocabulary.record();
+        assert_eq!(record["terms"], 64);
+        assert_eq!(record["input_terms"], 70);
+        assert_eq!(record["boost"], "strong");
+    }
+
+    #[test]
+    fn vocabulary_needs_the_transcribe_cpp_backend_and_a_parakeet_model() {
+        let directory =
+            std::env::temp_dir().join(format!("hex-vocab-backend-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let vocabulary = directory.join("vocabulary.json");
+        fs::write(&vocabulary, r#"["Hex"]"#).unwrap();
+
+        let error = backend(None, Some(&vocabulary), None).err().unwrap();
+        assert!(error.contains("transcribe-cpp"), "{error}");
+        assert!(matches!(backend(None, None, None), Ok(Backend::Onnx)));
+
+        // A file that is no catalog artifact is checked once it loads.
+        let unknown = backend(
+            Some(PathBuf::from("renamed.gguf")),
+            Some(&vocabulary),
+            Some(VocabularyBoost::Light),
+        );
+        assert!(matches!(
+            unknown,
+            Ok(Backend::TranscribeCpp {
+                vocabulary: Some(_),
+                ..
+            })
+        ));
+
+        let error = backend(None, Some(&directory.join("missing.json")), None)
+            .err()
+            .unwrap();
+        assert!(error.starts_with("--vocabulary could not read"), "{error}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn clips_pad_like_dictation_for_unified_english_only() {
+        let directory = std::env::temp_dir().join(format!("hex-pad-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("one.wav");
+        let mut writer = WavWriter::create(
+            &path,
+            WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 32,
+                sample_format: SampleFormat::Float,
+            },
+        )
+        .unwrap();
+        for _ in 0..32_000 {
+            writer.write_sample(0.1f32).unwrap();
+        }
+        writer.finalize().unwrap();
+        let load = |model| {
+            load_clip(
+                &directory,
+                ClipDefinition {
+                    id: "one".into(),
+                    audio: "one.wav".into(),
+                    expected: "x".into(),
+                    expected_terms: vec![],
+                    group: ordinary_group(),
+                },
+                model,
+            )
+            .unwrap()
+            .samples
+            .len()
+        };
+        let plain = load(None);
+        assert_eq!(
+            load(Some(TranscriptionModelId::ParakeetUnifiedEnglish)),
+            plain + 6_400
+        );
+        assert_eq!(load(Some(TranscriptionModelId::ParakeetV3)), plain);
+        fs::remove_dir_all(directory).unwrap();
     }
 }
