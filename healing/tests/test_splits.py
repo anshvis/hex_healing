@@ -541,7 +541,7 @@ def test_set_folders_and_files_are_owner_only(store, home):
 
     build_world(store)
     build_at(store)
-    seen = list((home / "sets").rglob("*"))
+    seen = [home / "sets", *(home / "sets").rglob("*")]
     assert seen
     for path in seen:
         mode = stat.S_IMODE(path.stat().st_mode)
@@ -609,3 +609,53 @@ def test_review_since_cutoff_takes_the_cutoff_flag(store):
     shown.clear()
     review_module.run(store, 5, "random", True, CUTOFF, player=Quit().play, ask=Quit().ask, out=lambda *_: None)
     assert len(shown) == 1 and a and b
+
+
+def test_samplers_vary_with_the_seed_when_the_pool_is_large():
+    import random
+    from collections import Counter
+
+    from healing.review import pick
+
+    rows = [{"clip_id": f"c{i}", "application": "Notes", "timestamp_ms": 1_760_000_000_000 + i} for i in range(200)]
+    picks = {tuple(r["clip_id"] for r in pick(rows, 10, "random", random.Random(seed))) for seed in range(5)}
+    assert len(picks) > 1
+    clusters = {r["clip_id"]: r["clip_id"] for r in rows}
+    golden_picks = {
+        tuple(r["clip_id"] for r in golden.stratified_pick(rows, Counter(), set(), clusters, 10, random.Random(seed)))
+        for seed in range(5)
+    }
+    assert len(golden_picks) > 1
+
+
+def test_verify_flags_a_golden_cluster_shared_with_a_rolling_set(store, small_golden):
+    freeze_golden(store)
+    build_at(store)
+    rolling = store.db.execute("SELECT split_id FROM splits WHERE kind = 'rolling'").fetchone()[0]
+    gold = splits.golden_members(store.db)[0]
+    store.db.execute("INSERT OR IGNORE INTO split_members VALUES (?, ?)", (rolling, gold))
+    store.db.commit()
+    assert any("shares a split-cluster with the golden set" in p for p in splits.verify(store))
+
+
+def test_verify_flags_golden_members_that_differ_from_the_manifest(store, small_golden):
+    freeze_golden(store)
+    store.db.execute("DROP TRIGGER frozen_members_delete")
+    store.db.execute("DELETE FROM split_members WHERE clip_id = ?", (splits.golden_members(store.db)[0],))
+    store.db.commit()
+    assert any("differ from the registry's members" in p for p in splits.verify(store))
+
+
+def test_the_general_set_is_pinned_once(store, home):
+    build_world(store)
+
+    def write(text):
+        manifest.write_set(home / "sets" / "general", [{"id": "g1", "expected": text, "terms": []}],
+                           lambda clip: np.zeros(8000, dtype="int16"))
+
+    write("hello brave new world")
+    build_at(store)
+    shutil.rmtree(home / "sets" / "general")
+    write("a different reference entirely")
+    with pytest.raises(splits.SplitError, match="never changes"):
+        build_at(store)

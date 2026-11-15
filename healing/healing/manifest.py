@@ -133,7 +133,7 @@ def write_set(out: Path, entries: list[dict], pcm_for) -> tuple[str, int]:
 
 def _private_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for folder in (path, path.parent):
+    for folder in (path, path.parent, path.parent.parent):  # the audio folder, the set, and `sets/`
         folder.chmod(0o700)
 
 

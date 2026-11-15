@@ -280,3 +280,38 @@ def test_label_all_backfills_positions_for_clips_classified_before_they_existed(
     before = row(store, cid)["classified_at_ms"]
     labels.label_all(store)  # settled: nothing is classified again
     assert row(store, cid)["classified_at_ms"] == before
+
+
+def test_an_existing_dataset_is_copied_before_it_migrates(tmp_path, monkeypatch):
+    import stat
+
+    monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))
+    root = tmp_path / "home" / "dataset"
+    (root / "audio").mkdir(parents=True)
+    db = sqlite3.connect(root / "dataset.sqlite")
+    for step in range(5):
+        migration = MIGRATIONS[step]
+        migration(db) if callable(migration) else db.executescript(migration)
+    db.execute("PRAGMA user_version = 5")
+    db.execute(
+        "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text, collected_at_ms)"
+        " VALUES ('c1', 1, 1, 1, 'dictation', 'a b c', 'A b c.', 1)"
+    )
+    db.commit()
+    db.close()
+    Store().close()
+    backup = root / "dataset.sqlite.pre-v5"
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    old = sqlite3.connect(backup)
+    assert old.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert old.execute("SELECT raw_text FROM clips").fetchone()[0] == "a b c"
+    assert "reviews" not in {r[0] for r in old.execute("SELECT name FROM sqlite_master")}
+    old.close()
+    Store().close()  # current: no new copy, and the first backup is untouched
+    assert sorted(p.name for p in root.glob("dataset.sqlite.pre-*")) == ["dataset.sqlite.pre-v5"]
+
+
+def test_a_fresh_dataset_makes_no_backup(tmp_path, monkeypatch):
+    monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))
+    Store().close()
+    assert not list((tmp_path / "home" / "dataset").glob("dataset.sqlite.pre-*"))

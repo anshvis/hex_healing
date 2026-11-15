@@ -267,6 +267,8 @@ class Store:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
             raise StoreError(f"dataset is schema {version}; this healing knows {SCHEMA_VERSION}")
+        if 0 < version < SCHEMA_VERSION:
+            self._back_up(version)
         for step in range(version, SCHEMA_VERSION):
             migration = MIGRATIONS[step]
             if callable(migration):
@@ -275,6 +277,21 @@ class Store:
                 self.db.executescript(migration)
             self.db.execute(f"PRAGMA user_version = {step + 1}")
         self.db.commit()
+
+    def _back_up(self, version: int) -> None:
+        """Copy the dataset before a migration touches it: its rows are the user's only copy of what
+        History has since expired. One backup per starting version, owner-only, never overwritten."""
+        target = self.root / f"dataset.sqlite.pre-v{version}"
+        if target.exists():
+            return
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+        copy = sqlite3.connect(target)
+        try:
+            self.db.backup(copy)
+        finally:
+            copy.close()
+        os.chmod(target, 0o600)
 
     def close(self) -> None:
         self.db.close()

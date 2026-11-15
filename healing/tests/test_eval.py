@@ -385,3 +385,30 @@ def test_a_frozen_golden_set_is_scored(world, monkeypatch):
     document = evaluate(world, ["a.gguf"], ["golden"], vocabulary="none")
     assert [s["split_id"] for s in document["sets"]] == ["golden-v1"] and document["sets"][0]["n"] == 3
     assert document["scores"][str(world.models["a.gguf"])]["golden"]["wer"] == 0
+
+
+def test_the_cli_fails_when_no_requested_set_could_be_scored(world, capsys):
+    assert main(["eval", "--model", str(world.models["a.gguf"]), "--sets", "rolling,golden", "--vocabulary", "none"]) == 1
+    assert "none of the requested sets" in capsys.readouterr().err
+
+
+def test_an_empty_edited_set_without_strong_clips_says_so(world):
+    dataset(world.store, strong=False)
+    document = evaluate(world, ["a.gguf"], ["edited"], vocabulary="none")
+    assert "no strong clips yet" in document["unavailable_sets"]["edited"]
+
+
+def test_an_empty_edited_set_with_unplaced_strong_clips_says_so(world):
+    dataset(world.store)
+    world.store.db.execute("UPDATE clips SET edited_positions = NULL")
+    world.store.db.execute("UPDATE splits SET manifest_path = NULL, n_clips = 0 WHERE kind = 'edited'")
+    world.store.db.commit()
+    document = evaluate(world, ["a.gguf"], ["edited"], vocabulary="none")
+    assert "strong clips have no edited positions" in document["unavailable_sets"]["edited"]
+
+
+def test_the_general_set_has_no_format_counts(world):
+    general_set(world.home)
+    document = evaluate(world, ["a.gguf"], ["general"], vocabulary="none")
+    rows = document["per_clip"][str(world.models["a.gguf"])]["general"]
+    assert all(r["format_errors"] is None and r["format_words"] is None for r in rows)

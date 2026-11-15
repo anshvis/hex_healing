@@ -132,6 +132,7 @@ def subset(out: Path, prefix: str, name: str, expected: int) -> Path:
         raise BuildError(f"{len(clips)} clips start with {prefix!r}, expected {expected}")
     path = out / f"{name}.json"
     path.write_text(json.dumps({"clips": clips}, indent=1, sort_keys=True) + "\n")
+    path.chmod(0o600)
     return path
 
 
