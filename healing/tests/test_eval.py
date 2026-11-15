@@ -508,3 +508,21 @@ def test_the_edited_span_lives_in_the_set_scores(world):
     document = evaluate(world, ["a.gguf"], ["edited", "rolling"], vocabulary="none")
     scores = document["scores"][str(world.models["a.gguf"])]
     assert "edited_span" in scores["edited"] and "edited_span" not in scores["rolling"] and "edited_span" not in document
+
+
+def test_the_wanted_tie_break_changes_an_edited_span_score(tmp_path):
+    """"kit" appears twice in the reference and once in the transcript, and only the second was edited:
+    scored against the alignment that matches the edited word, nothing is wrong."""
+    from healing.eval.bench import BenchRun
+
+    folder = tmp_path / "edited"
+    manifest.write_set(
+        folder, [{"id": "c1", "expected": "kit kit", "terms": [], "edited_positions": [[1, 2]], "label": "strong"}],
+        lambda clip: __import__("numpy").zeros(8000, dtype="int16"),
+    )
+    ref = eval_run.SetRef("edited", "edited-x", folder, manifest.verify(folder), 1)
+    run = BenchRun({}, [{"id": "c1", "transcript": "kit", "word_errors": 1, "reference_words": 2}],
+                   {"wer": 0.5, "word_errors": 1, "reference_words": 2, "quality": {"term_recall": None},
+                    "median_rtf": 0.1, "p95_clip_ms": 1.0, "load_ms": 1.0})
+    scores, per_clip = eval_run.score_set(ref, [run])
+    assert scores["edited_span"] == {"errors": 0, "positions": 1} and per_clip[0]["edited_errors"] == 0

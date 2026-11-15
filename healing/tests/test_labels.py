@@ -539,3 +539,34 @@ def test_refresh_never_touches_edited_positions(store):
     review(store, cid, "fix", "send it to kit")  # verified: not strong, but the classifier's positions stay
     labels.refresh(store)
     assert label_of(store, cid)[0] == "verified" and row(store, cid)["edited_positions"] == "[[3, 4]]"
+
+
+def test_a_backup_that_opens_but_is_damaged_is_made_again(tmp_path):
+    path = tmp_path / "pre-v5"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE t (a TEXT)")
+    db.executemany("INSERT INTO t VALUES (?)", [("x" * 1800,)] * 400)
+    db.execute("PRAGMA user_version = 5")
+    db.commit()
+    db.close()
+    assert store_module._backup_is_whole(path, 5) is True
+    data = bytearray(path.read_bytes())
+    data[4096 * 6 : 4096 * 6 + 4096] = b"\xff" * 4096  # one interior page: the header and version still read fine
+    path.write_bytes(bytes(data))
+    check = sqlite3.connect(path)
+    assert check.execute("PRAGMA user_version").fetchone()[0] == 5  # it still opens at the right version
+    check.close()
+    assert store_module._backup_is_whole(path, 5) is False
+
+
+def test_forget_clears_exactly_the_classifiers_columns(store):
+    from healing import corrections
+
+    cid = add_clip(store, 1, outcome="edited")
+    store.db.execute("UPDATE clips SET edited_text = 'Send it to Kit.' WHERE clip_id = ?", (cid,))
+    corrections.label_corrections(store)
+    assert store.db.execute("SELECT COUNT(*) FROM edits WHERE clip_id = ?", (cid,)).fetchone()[0]
+    changed = {"edited_text": "x"}
+    corrections.forget(store.db, cid, changed)
+    assert changed == {"edited_text": "x", "acoustic_reference": None, "edited_positions": None, "classified_at_ms": None}
+    assert store.db.execute("SELECT COUNT(*) FROM edits WHERE clip_id = ?", (cid,)).fetchone()[0] == 0
