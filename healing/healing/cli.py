@@ -73,6 +73,22 @@ def main(argv: list[str] | None = None) -> int:
     label_all = label.add_parser("all", help="recompute every clip's label and weight from corrections and reviews")
     label_all.add_argument("--json", action="store_true")
 
+    review = commands.add_parser("review", help="confirm references by ear (plays with afplay)")
+    review.add_argument("--n", type=int, default=20)
+    review.add_argument("--strategy", choices=["random", "uncertain"], default="random")
+    review.add_argument("--since-cutoff", action="store_true",
+                        help="only clips whose session began after the parent's cut-off (fills the rolling set)")
+
+    split = commands.add_parser("split").add_subparsers(dest="command", required=True)
+    build = split.add_parser("build", help="rolling, edited-span and train splits; registers general and golden")
+    build.add_argument("--parent", default="current", help="the version the rolling set is fresh for")
+    build.add_argument("--cutoff", help="the parent's snapshot cut-off: 14d, a date or RFC 3339 (default: kept, else 14 days ago)")
+    split.add_parser("verify", help="exit 1 on any leak, stale pin or non-verified gating reference")
+
+    golden = commands.add_parser("golden").add_subparsers(dest="command", required=True)
+    golden_review = golden.add_parser("review", help="confirm golden clips; freezes at 200")
+    golden_review.add_argument("--n", type=int, default=20)
+
     report = commands.add_parser("report").add_subparsers(dest="command", required=True)
     observation = report.add_parser("observation", help="per app: pastes observed and edited")
     observation.add_argument("--json", action="store_true")
@@ -89,6 +105,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.group == "label":
         return _label_all(args) if args.command == "all" else _label(args)
+    if args.group == "review":
+        from healing import review as review_module
+
+        return review_module.main(args)
+    if args.group == "split":
+        return _split(args)
+    if args.group == "golden":
+        from healing import golden as golden_module
+
+        return golden_module.main(args)
     if args.group == "report":
         return _report(args)
     if args.group == "protocol":
@@ -166,6 +192,41 @@ def _label_all(args) -> int:
         print(json.dumps({label: counts[label] for label in LABELS}))
     else:
         print(", ".join(f"{label} {counts[label]}" for label in LABELS))
+    return 0
+
+
+def _split(args) -> int:
+    from healing import splits
+    from healing.collect import since_to_ms
+    from healing.store import Store, StoreError, now_ms, process_lock
+
+    try:
+        if args.command == "verify":
+            store = Store(sweep=False)
+            try:
+                problems = splits.verify(store)
+            finally:
+                store.close()
+            for problem in problems:
+                print(f"violation: {problem}")
+            print("split verify: " + (f"{len(problems)} violation(s)" if problems else "ok"))
+            return 1 if problems else 0
+        cutoff = None
+        if args.cutoff:
+            cutoff = since_to_ms(args.cutoff, now_ms())
+            if cutoff is None:
+                print(f"error: cannot read --cutoff {args.cutoff!r}", file=sys.stderr)
+                return 2
+        with process_lock():
+            store = Store()
+            try:
+                result = splits.build(store, args.parent, cutoff)
+            finally:
+                store.close()
+    except (StoreError, splits.SplitError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    print(result.text())
     return 0
 
 
