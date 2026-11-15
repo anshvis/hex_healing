@@ -769,3 +769,171 @@ def test_a_trainable_clip_in_a_golden_or_general_cluster_is_never_handed_out(sto
     assert {golden_twin, general_twin, lone} <= trainable
     handed = set(splits.snapshot_train(store, cutoff_ms=CUTOFF))
     assert lone in handed and golden_twin not in handed and general_twin not in handed
+
+
+# --- round 4 -------------------------------------------------------------------------------
+
+
+def test_a_text_change_after_a_snapshot_cannot_hide_what_the_model_saw(store):
+    build_world(store)
+    a = add_clip(store, 980, raw="hang the picture frame above the old fireplace kip", ts=CUTOFF - 9 * DAY,
+                 outcome="edited", final="Hang the picture frame above the old fireplace kip.",
+                 edited="Hang the picture frame above the old fireplace kit.")
+    labels.label_all(store)
+    build_at(store)
+    assert a in splits.snapshot_train(store, cutoff_ms=CUTOFF)
+    # the clip's classifier output changes later; the snapshot still stands for what it was given
+    store.db.execute("UPDATE clips SET acoustic_reference = 'Something else entirely that the classifier now says.' WHERE clip_id = ?", (a,))
+    store.db.commit()
+    labels.refresh(store, [a])
+    twin = add_clip(store, 981, raw="Hang the picture frame above the old fireplace kit", ts=CUTOFF + 5 * DAY)
+    verify_random(store, [twin])
+    zones = splits.Zones.load(store.db, CUTOFF)
+    assert not zones.rolling(twin) and not zones.random_review(twin)  # by the stored text, not the current one
+    build_at(store, 1000)
+    rolling = {r[0] for r in store.db.execute(
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'rolling'")}
+    assert twin not in rolling
+    assert splits.verify_report(store).snapshot_overlaps == []
+
+
+def test_a_golden_add_rechecks_the_frame_when_a_snapshot_lands_mid_review(store):
+    weak = [old_trainable(store, 990 + i, text, days=9, weak=True) for i, text in enumerate(
+        ["first old weak clip about the garden gate hinge", "second old weak clip about the ladder rungs today",
+         "third old weak clip about the paint tray handle"])]
+    handed = []
+
+    def ask(prompt):
+        if not handed:  # while you are looking at the clip, a training run takes it
+            handed.append(splits.snapshot_train(store, include_weak=True, cutoff_ms=CUTOFF))
+        return ""
+
+    golden.run(store, 1, player=lambda path: None, ask=ask, out=lambda *_: None, seed=1)
+    assert handed and set(handed[0]) == set(weak)
+    assert splits.golden_members(store.db) == []  # add() saw the snapshot inside its own transaction
+    assert splits.verify(store) == []
+
+
+def test_write_transactions_serialise_between_stores(store):
+    other = Store()
+    other.db.execute("PRAGMA busy_timeout = 50")
+    try:
+        with store.immediate():
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                splits.snapshot_train(other, cutoff_ms=CUTOFF)
+        assert splits.snapshot_train(other, cutoff_ms=CUTOFF) == []  # free again
+    finally:
+        other.close()
+
+
+def test_a_snapshot_overlap_check_over_thousands_of_texts_builds_its_index_once():
+    import time
+
+    def text(prefix, i):
+        return " ".join(f"{prefix}{i}x{k}" for k in range(14))
+
+    members = {f"c{i}": [text("m", i)] for i in range(2000)}
+    tests = {f"rolling-x:t{i}": [text("t", i)] for i in range(2000)}
+    members["c7"] = [text("t", 7)]  # one real overlap with test clip t7
+    row = {"kind": "train", "split_id": "train-x", "detail": json.dumps({"members": members})}
+    started = time.time()
+    found = splits._snapshot_overlaps([row], tests)
+    assert time.time() - started < 8
+    assert len(found) == 1 and "clip c7" in found[0] and "t7 in rolling-x" in found[0]
+
+
+def test_every_parents_registered_sets_close_a_clip_to_training(store):
+    build_world(store)
+    build_at(store)
+    splits.build(store, parent="v2", cutoff_ms=CUTOFF - 40 * DAY, now=CUTOFF + 30 * DAY)
+    v2 = {r[0] for r in store.db.execute(
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.parent_version = 'v2' AND s.kind IN ('rolling', 'edited')")}
+    current = {r[0] for r in store.db.execute(
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.parent_version = 'current' AND s.kind IN ('rolling', 'edited')")}
+    only_v2 = v2 - current
+    assert only_v2 & {r["clip_id"] for r in labels.trainable(store)}  # raw trainable would hand some out
+    handed = set(splits.snapshot_train(store, parent="current", cutoff_ms=CUTOFF))
+    assert not handed & v2  # the other parent's test clips are still test clips
+    assert splits.verify(store) == []
+
+
+def test_a_rebuild_replaces_only_its_own_parents_sets(store):
+    build_world(store)
+    build_at(store)
+    splits.build(store, parent="v2", cutoff_ms=CUTOFF - 40 * DAY, now=CUTOFF + 30 * DAY)
+    kinds = lambda parent: [r[0] for r in store.db.execute(  # noqa: E731
+        "SELECT split_id FROM splits WHERE parent_version = ? AND kind IN ('rolling', 'edited')", (parent,))]
+    before = kinds("current")
+    build_at(store, 5000)
+    assert len(kinds("v2")) == 2 and len(kinds("current")) == len(before)
+
+
+def test_random_review_skips_registered_edited_and_rolling_members(store):
+    build_world(store)
+    build_at(store)
+    members = {r[0] for r in store.db.execute(
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind IN ('rolling', 'edited')")}
+    assert members
+    frame = {r["clip_id"] for r in review_module.candidates(store, "random")}
+    assert not frame & members
+    windowed = {r["clip_id"] for r in review_module.candidates(store, "random", splits.Zones.load(store.db, CUTOFF).rolling)}
+    assert not windowed & members
+
+
+def test_an_edited_set_is_judged_by_what_it_pinned_not_the_live_label(store):
+    ids, _ = build_world(store)
+    build_at(store)
+    member = store.db.execute(
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'edited' LIMIT 1").fetchone()[0]
+    store.db.execute("UPDATE clips SET label = 'unlabelled', weight = 0 WHERE clip_id = ?", (member,))  # its correction moved on
+    store.db.commit()
+    assert splits.verify(store) == []  # the set is still exactly what was built
+    zones = splits.Zones.load(store.db, CUTOFF)
+    assert zones.why_not_edited(member, {"label": "weak", "edited_positions": "[[1, 2]]"}) == "is not a strong clip"
+    assert zones.why_not_edited(member, {"label": "strong", "edited_positions": None}) == "has no edited positions"
+
+
+def test_verify_flags_a_rolling_member_that_is_not_random_verified(store):
+    build_world(store)
+    build_at(store)
+    member = store.db.execute(
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'rolling' LIMIT 1").fetchone()[0]
+    store.db.execute("UPDATE clips SET review_strategy = 'uncertain' WHERE clip_id = ?", (member,))
+    store.db.commit()
+    assert any("is not a randomly sampled, verified clip" in p for p in splits.verify(store))
+
+
+def test_verify_flags_a_golden_member_that_is_not_marked_golden(store, small_golden):
+    freeze_golden(store)
+    member = splits.golden_members(store.db)[0]
+    store.db.execute("UPDATE clips SET golden = 0 WHERE clip_id = ?", (member,))
+    store.db.commit()
+    assert any("is not marked golden" in p for p in splits.verify(store))
+
+
+def test_build_labels_a_fresh_unlabelled_dataset_first(store):
+    cid = add_clip(store, 1, raw="clip number one says hello there friend", ts=CUTOFF + 5 * DAY)
+    review(store, cid)  # a review exists, but nothing has derived the label yet
+    assert row(store, cid)["label"] == "unlabelled"
+    result = build_at(store)
+    assert row(store, cid)["label"] == "verified" and result.rolling.n_clips == 1
+
+
+def test_the_cli_fails_on_a_snapshot_overlap_alone(store, capsys):
+    build_world(store)
+    text = "water the roses near the porch before the sun is up"
+    store.db.execute(
+        "INSERT INTO splits (split_id, kind, parent_version, created_at_ms, frozen, detail) VALUES"
+        " ('train-x', 'train', 'current', 1, 0, ?)", (json.dumps({"members": {"gone": [text]}}),))
+    cid = add_clip(store, 700, raw=text, ts=CUTOFF + 4 * DAY)
+    verify_random(store, [cid])
+    build_at(store)  # refuses the clip: a snapshot stored its text
+    rolling = store.db.execute("SELECT split_id FROM splits WHERE kind = 'rolling' AND manifest_path IS NOT NULL").fetchone()[0]
+    assert cid not in {r[0] for r in store.db.execute("SELECT clip_id FROM split_members WHERE split_id = ?", (rolling,))}
+    store.db.execute("INSERT INTO split_members VALUES (?, ?)", (rolling, cid))  # forced: contamination
+    store.db.commit()
+    report = splits.verify_report(store)
+    assert report.leaks == [] and len(report.snapshot_overlaps) == 1
+    assert main(["split", "verify"]) == 1
+    out = capsys.readouterr().out
+    assert "snapshot overlap:" in out and "violation:" not in out and "1 snapshot overlap" in out
