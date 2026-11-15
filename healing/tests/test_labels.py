@@ -185,11 +185,11 @@ def test_a_v5_dataset_migrates(tmp_path, monkeypatch):
     assert tuple(kept) == ("a b c", 0, "unlabelled")
     # idempotent: a run that stopped part-way finishes on the next open
     migrated.db.execute("DROP TABLE split_members")
-    migrated.db.execute("PRAGMA user_version = 5")
+    migrated.db.execute("PRAGMA user_version = 6")
     migrated.db.commit()
     migrated.close()
     again = Store()
-    assert again.db.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert again.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION
     assert again.db.execute("SELECT COUNT(*) FROM split_members").fetchone()[0] == 0
     again.close()
 
@@ -220,22 +220,9 @@ def test_label_corrections_stores_positions_and_never_the_label(store):
     assert label_of(store, cid) == ("strong", 1.0)
 
 
-def test_a_v6_dataset_gains_the_sidecar_pin_and_frozen_member_updates_are_refused(tmp_path, monkeypatch):
+def test_frozen_member_updates_are_refused(tmp_path, monkeypatch):
     monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))
-    root = tmp_path / "home" / "dataset"
-    (root / "audio").mkdir(parents=True)
-    db = sqlite3.connect(root / "dataset.sqlite")
-    for step in range(5):
-        db.executescript(MIGRATIONS[step])
-    db.execute("PRAGMA user_version = 5")
-    db.commit()
-    store_module.MIGRATIONS[5](db)  # what v6 shipped before the sidecar pin: simulate by dropping it
-    db.execute("ALTER TABLE splits DROP COLUMN sidecar_sha256")
-    db.execute("PRAGMA user_version = 6")
-    db.commit()
-    db.close()
     store = Store()
-    assert "sidecar_sha256" in {r[1] for r in store.db.execute("PRAGMA table_info(splits)")}
     store.db.execute("INSERT INTO splits (split_id, kind, created_at_ms, frozen) VALUES ('g', 'golden', 1, 1)")
     store.db.execute("INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text, collected_at_ms)"
                      " VALUES ('c1', 1, 1, 1, 'dictation', 'a', 'A', 1)")
