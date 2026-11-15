@@ -324,3 +324,37 @@ def test_labels_follow_a_run_once_not_per_row(world, monkeypatch):
     world.save()
     world.run()
     assert len(calls) == 1 and len(calls[0]) == 1  # one refresh, the one clip it changed
+
+
+def _last_run(world):
+    store = Store()
+    try:
+        return dict(store.db.execute("SELECT * FROM runs ORDER BY run_id DESC LIMIT 1").fetchone())
+    finally:
+        store.close()
+
+
+def test_a_labelling_failure_still_writes_the_runs_row_and_is_raised(world, monkeypatch):
+    from healing import labels
+
+    monkeypatch.setattr(labels, "refresh", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("derive broke")))
+    with pytest.raises(RuntimeError, match="derive broke"):
+        world.run()
+    last = _last_run(world)
+    assert last["seen"] == 3 and last["new"] == 3 and last["error"] == "labelling: RuntimeError"
+
+
+def test_a_labelling_failure_does_not_mask_what_ended_the_run(world, monkeypatch):
+    from healing import collect as collect_module
+    from healing import labels
+    from healing.collect import CollectError
+
+    monkeypatch.setattr(labels, "refresh", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("derive broke")))
+    monkeypatch.setattr(collect_module, "_collect_pages", lambda *a, **k: (_ for _ in ()).throw(CollectError("hex is gone", 2)))
+    store = Store()
+    try:
+        with pytest.raises(CollectError, match="hex is gone"):
+            collect_module.collect(store, Path("hex"))
+    finally:
+        store.close()
+    assert _last_run(world)["error"] == "hex is gone"

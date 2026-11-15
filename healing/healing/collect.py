@@ -10,7 +10,7 @@ import json
 import os
 import re
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -56,7 +56,6 @@ class Summary:
     audio_new: int = 0
     missing_audio: int = 0
     audio_skipped: int = 0  # not copied: free space is under the floor
-    touched: list[str] = field(default_factory=list)  # clips inserted or changed: labelled once at the end
 
     def __str__(self) -> str:
         text = (
@@ -156,30 +155,42 @@ def collect(
     ).lastrowid
     store.db.commit()
     error: str | None = None
+    ended = False  # something other than labelling stopped the run
+    touched: list[str] = []
     try:
-        _collect_pages(store, binary, since, summary, copy_audio)
+        _collect_pages(store, binary, since, summary, copy_audio, touched)
     except (CollectError, StoreError, OSError) as failure:
-        error = str(failure)
+        error, ended = str(failure), True
         raise
     except BaseException as failure:
         # Name only the type: a message could carry transcript text (G-4).
-        error = type(failure).__name__
+        error, ended = type(failure).__name__, True
         raise
     finally:
         # Labels follow the evidence this run changed: once for every clip it inserted or touched,
-        # never per row. Everything else is labelled by `label all` and `split build`.
-        labels.refresh(store, summary.touched)
+        # never per row. Everything else is labelled by `label all` and `split build`. A labelling
+        # failure must neither stop the runs row being written nor replace what ended the run.
+        labelling: Exception | None = None
+        try:
+            labels.refresh(store, touched)
+        except Exception as failure:
+            store.db.rollback()
+            labelling = failure
+            error = error or f"labelling: {type(failure).__name__}"
         store.db.execute(
             "UPDATE runs SET seen = ?, new = ?, audio_new = ?, missing_audio = ?, error = ?"
             " WHERE run_id = ?",
             (summary.seen, summary.new, summary.audio_new, summary.missing_audio, error, run),
         )
         store.db.commit()
+        if labelling is not None and not ended:
+            raise labelling
     return summary
 
 
 def _collect_pages(
-    store: Store, binary: Path, since: str | None, summary: Summary, copy_audio: bool = True
+    store: Store, binary: Path, since: str | None, summary: Summary, copy_audio: bool = True,
+    touched: list[str] | None = None,
 ) -> None:
     epochs = Epochs(store)
     seen: set[tuple[int, int]] = set()
@@ -190,7 +201,7 @@ def _collect_pages(
         for start in range(0, len(fresh), BATCH):
             for entry in fresh[start : start + BATCH]:
                 seen.add((entry["id"], entry["timestamp_ms"]))
-                _store_entry(store, epochs, entry, summary, copy_audio)
+                _store_entry(store, epochs, entry, summary, copy_audio, touched)
             store.db.commit()
         if not fresh or not (document.get("truncated") or len(entries) >= PAGE_LIMIT):
             return
@@ -198,8 +209,10 @@ def _collect_pages(
 
 
 def _store_entry(
-    store: Store, epochs: Epochs, entry: dict, summary: Summary, copy_audio: bool = True
+    store: Store, epochs: Epochs, entry: dict, summary: Summary, copy_audio: bool = True,
+    touched: list[str] | None = None,
 ) -> None:
+    """Store one History entry. `touched` collects the ids of clips it inserted or changed."""
     summary.seen += 1
     hex_id, timestamp = entry["id"], entry["timestamp_ms"]
     epoch = epochs.assign(hex_id, timestamp)
@@ -246,7 +259,8 @@ def _store_entry(
                 fields["edited_text"],
             ),
         )
-        summary.touched.append(clip_id(epoch, hex_id))
+        if touched is not None:
+            touched.append(clip_id(epoch, hex_id))
         return
     changed = {k: v for k, v in fields.items() if existing[k] != v}
     changed = _correction_changes(existing, correction, observed, changed)
@@ -265,7 +279,8 @@ def _store_entry(
         f"UPDATE clips SET {assignments} WHERE hex_epoch_ms = ? AND hex_id = ?",
         (*changed.values(), epoch, hex_id),
     )
-    summary.touched.append(existing["clip_id"])
+    if touched is not None:
+        touched.append(existing["clip_id"])
 
 
 def _correction_changes(existing, correction: dict | None, observed: dict, changed: dict) -> dict:
