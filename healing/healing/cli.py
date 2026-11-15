@@ -26,7 +26,14 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_argument("--name", required=True)
     sub.add_argument("--expected", type=int, required=True, help="clip count to insist on")
 
-    evals = commands.add_parser("eval").add_subparsers(dest="command", required=True)
+    evaluate = commands.add_parser("eval", help="score GGUFs on rolling, golden, general and edited-span")
+    evaluate.add_argument("--model", dest="models", action="append", type=Path, metavar="GGUF",
+                          help="a model to score; repeat to compare (interleaved per set)")
+    evaluate.add_argument("--sets", default="rolling,golden,general,edited")
+    evaluate.add_argument("--runs", type=int, default=1, help="rounds per set (extra rounds only measure speed)")
+    evaluate.add_argument("--vocabulary", choices=["current", "none"], default="current",
+                          help="bias with Hex's saved vocabulary, as dictation does (needs the T3.4 hex)")
+    evals = evaluate.add_subparsers(dest="command")
     base = evals.add_parser("baseline", help="score the shipped model on the general set")
     base.add_argument("--model", type=Path, help="GGUF to score (default: the catalog Unified)")
     base.add_argument("--model-id", default=None)
@@ -140,7 +147,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.group == "sets":
         return _subset(args) if args.command == "subset" else _build_general(args)
     if args.group == "eval":
-        return _baseline(args)
+        if args.command == "baseline":
+            return _baseline(args)
+        from healing.eval import run as eval_run
+
+        return eval_run.main(args)
     return _paired(args)
 
 

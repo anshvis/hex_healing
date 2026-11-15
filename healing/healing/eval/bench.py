@@ -22,6 +22,10 @@ class BenchError(RuntimeError):
     pass
 
 
+class VocabularyUnsupported(BenchError):
+    """The hex binary predates `benchmark-transcription --vocabulary` (T3.4)."""
+
+
 @dataclass(frozen=True)
 class BenchRun:
     model: dict
@@ -106,11 +110,22 @@ def isolated_env() -> dict[str, str]:
 
 
 def benchmark_command(
-    manifest: Path, *, model: Path | None, runs: int, warmups: int, binary: Path | None = None
+    manifest: Path,
+    *,
+    model: Path | None,
+    runs: int,
+    warmups: int,
+    binary: Path | None = None,
+    vocabulary: Path | None = None,
+    boost: str | None = None,
 ) -> list[str]:
     command = [str(binary or hex_binary()), "benchmark-transcription", str(manifest)]
     if model is not None:
         command += ["--model", str(model)]
+    if vocabulary is not None:
+        command += ["--vocabulary", str(vocabulary)]
+        if boost:
+            command += ["--boost", boost]
     return command + ["--runs", str(runs), "--warmups", str(warmups)]
 
 
@@ -121,11 +136,22 @@ def run_benchmark(
     runs: int = 1,
     warmups: int = 1,
     output: Path | None = None,
+    vocabulary: Path | None = None,
+    boost: str | None = None,
 ) -> tuple[BenchRun, list[str]]:
-    command = benchmark_command(manifest, model=model, runs=runs, warmups=warmups)
+    command = benchmark_command(
+        manifest, model=model, runs=runs, warmups=warmups, vocabulary=vocabulary, boost=boost
+    )
     completed = subprocess.run(command, capture_output=True, text=True, env=isolated_env())
     if completed.returncode != 0:
         tail = "\n".join(completed.stderr.strip().splitlines()[-15:])
+        if vocabulary is not None and "--vocabulary" in completed.stderr and (
+            "unexpected argument" in completed.stderr or "unrecognized" in completed.stderr
+        ):
+            raise VocabularyUnsupported(
+                f"{command[0]} doesn't accept --vocabulary yet (it needs the T3.4 build). "
+                "Rerun with --vocabulary none to score without your vocabulary."
+            )
         raise BenchError(f"benchmark exited {completed.returncode}:\n{tail}")
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
