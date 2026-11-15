@@ -369,8 +369,9 @@ class Store:
     def immediate(self):
         """One write transaction that takes the write lock up front (`BEGIN IMMEDIATE`), so a read
         made inside it can't be stale by the time its write lands: concurrent runs serialize here
-        (waiting out the busy timeout) instead of both deciding on the same facts."""
-        self.db.commit()
+        (waiting out the busy timeout) instead of both deciding on the same facts. Refuses to start
+        with a transaction already open, because it would have to commit someone's half-done work."""
+        self._no_pending()
         self.db.execute("BEGIN IMMEDIATE")
         try:
             yield self.db
@@ -378,6 +379,24 @@ class Store:
             self.db.rollback()
             raise
         self.db.commit()
+
+    @contextlib.contextmanager
+    def read_transaction(self):
+        """One read-only view: every read inside sees the registry as it was at the first, whatever
+        another process commits meanwhile (a writer waits at its commit until this ends). Inside a
+        transaction the caller already holds, that one is the view and stays the caller's."""
+        if self.db.in_transaction:
+            yield self.db
+            return
+        self.db.execute("BEGIN")
+        try:
+            yield self.db
+        finally:
+            self.db.rollback()
+
+    def _no_pending(self) -> None:
+        if self.db.in_transaction:
+            raise StoreError("a transaction is already open: commit it before starting another")
 
     def _back_up(self, version: int) -> None:
         """Copy the dataset before a migration touches it: its rows are the user's only copy of what

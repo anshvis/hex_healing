@@ -68,17 +68,22 @@ def stratified_pick(rows: list, taken: Counter, taken_clusters: set[str], cluste
 def add(store: Store, clip_id: str) -> bool:
     """Put a confirmed clip in golden; freezes the set when it is full. False if it can't hold one.
 
-    The check and the insert are one write transaction, and the clip must still be in the golden frame
-    when it lands: a snapshot recorded while you were reviewing it (the clip may now be one a model
-    trained on) or a build that registered its cluster is seen here, not after.
+    The check and the insert are one write transaction, and the clip must be admitted by the same
+    predicate `build` and `verify` use (`Zones.why_not("golden", ...)`): a snapshot recorded while you
+    were reviewing it (the clip may now be one a model trained on) or a build that registered its
+    cluster is seen here, not after. A set already holding `GOLDEN_SIZE` clips takes no more (a second
+    terminal adding before the first has frozen it), and an unknown id is simply refused.
     """
     db = store.db
     with store.immediate():
         clip = db.execute("SELECT * FROM clips WHERE clip_id = ?", (clip_id,)).fetchone()
-        if clip["label"] != "verified" or not normalized_words(clip["reference_text"] or ""):
+        if clip is None or not normalized_words(clip["reference_text"] or ""):
             return False
         check_open(store)
-        if not splits.Zones.load(db).golden(clip_id):
+        members = splits.golden_members(db)
+        if clip_id not in members and len(members) >= splits.GOLDEN_SIZE:
+            return False
+        if splits.Zones.load(db).why_not("golden", clip_id, splits.Facts.of(clip)) is not None:
             return False
         if splits.golden_row(db) is None:
             db.execute(

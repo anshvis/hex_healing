@@ -75,14 +75,15 @@ def test_near_duplicate_pairs_finds_the_clusterers_matches():
     assert list(near_duplicate_pairs(keys)) == [(base, near)] or list(near_duplicate_pairs(keys)) == [(near, base)]
 
 
-def test_cross_pairs_are_direct_not_transitive():
-    from healing.dedupe import near_duplicate_cross
+def test_a_near_index_answers_directly_not_transitively():
+    from healing.dedupe import NearIndex
 
     a = " ".join(f"w{i}" for i in range(30))
     b = " ".join(f"w{i}" for i in range(2, 32))   # close to a
     c = " ".join(f"w{i}" for i in range(4, 34))   # close to b, further from a
     far = " ".join(f"z{i}" for i in range(30))
-    assert list(near_duplicate_cross([a], [a, far])) == [(a, a)]
-    pairs = set(near_duplicate_cross([a], [b, c]))
-    assert (a, b) in pairs and (a, c) not in pairs  # a union-find would join all three
-    assert list(near_duplicate_cross(["hi"], ["hi", "ho"])) == [("hi", "hi")]
+    index = NearIndex([b, c, far])
+    assert list(index.near(a)) == [b]  # a union-find would join all three
+    assert list(NearIndex([a, far]).near(a)) == [a]
+    assert list(NearIndex(["hi", "ho"]).near("hi")) == ["hi"]
+    assert list(index.near(b)) == [b, c]  # an indexed key reuses its bands and finds the same neighbours

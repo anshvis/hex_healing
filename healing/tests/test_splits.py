@@ -750,7 +750,7 @@ def test_the_general_set_is_pinned_once(store, home):
     build_at(store)
     shutil.rmtree(home / "sets" / "general")
     write("a different reference entirely")
-    with pytest.raises(splits.SplitError, match="never changes"):
+    with pytest.raises(splits.SplitError, match="no longer matches its pin"):
         build_at(store)
 
 
@@ -835,7 +835,7 @@ def test_a_snapshot_overlap_check_over_thousands_of_texts_builds_its_index_once(
         return " ".join(f"{prefix}{i}x{k}" for k in range(14))
 
     members = {f"c{i}": [text("m", i)] for i in range(2000)}
-    tests = {f"rolling-x:t{i}": [text("t", i)] for i in range(2000)}
+    tests = {("rolling-x", f"t{i}"): [text("t", i)] for i in range(2000)}
     members["c7"] = [text("t", 7)]  # one real overlap with test clip t7
     row = {"kind": "train", "split_id": "train-x", "detail": json.dumps({"members": members})}
     started = time.time()
@@ -890,8 +890,8 @@ def test_an_edited_set_is_judged_by_what_it_pinned_not_the_live_label(store):
     store.db.commit()
     assert splits.verify(store) == []  # the set is still exactly what was built
     zones = splits.Zones.load(store.db, CUTOFF)
-    assert zones.why_not_edited(member, {"label": "weak", "edited_positions": "[[1, 2]]"}) == "is not a strong clip"
-    assert zones.why_not_edited(member, {"label": "strong", "edited_positions": None}) == "has no edited positions"
+    assert zones.why_not("edited", member, splits.Facts("weak", None, "[[1, 2]]")) == "is not a strong clip"
+    assert zones.why_not("edited", member, splits.Facts("strong", None, None)) == "has no edited positions"
 
 
 def test_verify_flags_a_rolling_member_that_is_not_random_verified(store):

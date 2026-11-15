@@ -89,14 +89,18 @@ class LshIndex:
     def __init__(self) -> None:
         self.buckets: dict[tuple[int, bytes], list[int]] = {}
 
-    def add(self, index: int, grams: frozenset[str]) -> None:
-        for band, value in enumerate(_bands(signature(grams))):
+    def add(self, index: int, grams: frozenset[str]) -> list[bytes]:
+        """Index `grams` and return its bands, which `query_bands` can reuse without signing again."""
+        bands = _bands(signature(grams))
+        for band, value in enumerate(bands):
             self.buckets.setdefault((band, value), []).append(index)
+        return bands
 
     def query(self, grams: frozenset[str]) -> set[int]:
-        return {
-            i for band, value in enumerate(_bands(signature(grams))) for i in self.buckets.get((band, value), [])
-        }
+        return self.query_bands(_bands(signature(grams)))
+
+    def query_bands(self, bands: list[bytes]) -> set[int]:
+        return {i for band, value in enumerate(bands) for i in self.buckets.get((band, value), [])}
 
 
 class NearIndex:
@@ -104,28 +108,31 @@ class NearIndex:
 
     Equal texts and texts whose 3-gram Jaccard is at least `JACCARD` are near; texts under 3 tokens
     have no 3-grams and are near only when equal. Built once, queried many times: a verify of 2,000
-    members against 2,000 texts builds this once, not once per member.
+    members against 2,000 texts builds this once, and a key that is itself indexed is not signed again.
     """
 
     def __init__(self, keys: Iterable[str]):
         self.keys = sorted(set(keys))
         self.position = {key: i for i, key in enumerate(self.keys)}
         self.grams: dict[int, frozenset[str]] = {}
+        self.bands: dict[int, list[bytes]] = {}
         self.index = LshIndex()
         for position, key in enumerate(self.keys):
             found = shingles(key)
             if found is not None:
                 self.grams[position] = found
-                self.index.add(position, found)
+                self.bands[position] = self.index.add(position, found)
 
     def near(self, key: str) -> Iterator[str]:
         """Indexed texts equal to `key` (itself, when indexed) or near-duplicates of it, in order."""
-        if key in self.position:
+        own = self.position.get(key)
+        if own is not None:
             yield key
-        found = shingles(key)
+        found = self.grams[own] if own in self.grams else shingles(key)
         if found is None:
             return
-        for other in sorted(self.index.query(found)):
+        candidates = self.index.query_bands(self.bands[own]) if own in self.bands else self.index.query(found)
+        for other in sorted(candidates):
             if self.keys[other] != key and jaccard(self.grams[other], found) >= JACCARD:
                 yield self.keys[other]
 
@@ -140,16 +147,6 @@ def near_duplicate_pairs(keys: Iterable[str]) -> Iterator[tuple[str, str]]:
         for other in near.near(key):
             if near.position[other] < position:
                 yield other, key
-
-
-def near_duplicate_cross(left: Iterable[str], right: Iterable[str]) -> Iterator[tuple[str, str]]:
-    """(left, right) pairs of normalized texts that are equal or near. A direct test between two sets,
-    with no clustering and so nothing transitive: an overlap exists only when two texts really are
-    near-duplicates."""
-    near = NearIndex(right)
-    for key in sorted(set(left)):
-        for other in near.near(key):
-            yield key, other
 
 
 @dataclass
