@@ -91,10 +91,9 @@ pub struct Policy(u8);
 impl Policy {
     /// This process's policy, read once.
     pub fn current() -> Self {
-        // A UI test can force a policy on its own thread, so a locked row is
-        // exercised without a managed Mac. Only Linux renders the panes
-        // tests, so only there does the override exist.
-        #[cfg(all(test, target_os = "linux"))]
+        // A test can force a policy on its own thread, so a locked row or
+        // gate is exercised without a managed Mac.
+        #[cfg(test)]
         if let Some(forced) = FORCED_FOR_TEST.with(|slot| *slot.borrow()) {
             return forced;
         }
@@ -137,7 +136,7 @@ impl Policy {
 
     /// Forces `policy` on this thread until the guard drops, so a pane test
     /// can see what an organization's lock does to a row.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(test)]
     pub fn forced_for_test(policy: Policy) -> ForcedPolicy {
         FORCED_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(policy));
         ForcedPolicy
@@ -146,19 +145,16 @@ impl Policy {
     /// The lock on a Labs feature: Labs, Meetings for Meetings, Annotate for
     /// Annotate replay, or OpenCode processing for a voice prompt.
     pub fn labs_lock(self, feature: crate::labs::Feature) -> Option<Lock> {
-        if feature == crate::labs::Feature::Meetings && self.locks(Lock::Meetings) {
-            return Some(Lock::Meetings);
-        }
-        if feature == crate::labs::Feature::AnnotateReplay && self.locks(Lock::Annotate) {
-            return Some(Lock::Annotate);
-        }
-        if feature == crate::labs::Feature::VoicePrompt && self.locks(Lock::OpenCodeProcessing) {
-            return Some(Lock::OpenCodeProcessing);
-        }
-        if feature == crate::labs::Feature::LearnFromCorrections && self.locks(Lock::Corrections) {
-            return Some(Lock::Corrections);
-        }
-        self.locks(Lock::Labs).then_some(Lock::Labs)
+        use crate::labs::Feature;
+        let own = match feature {
+            Feature::Meetings => Some(Lock::Meetings),
+            Feature::AnnotateReplay => Some(Lock::Annotate),
+            Feature::VoicePrompt => Some(Lock::OpenCodeProcessing),
+            Feature::LearnFromCorrections => Some(Lock::Corrections),
+            _ => None,
+        };
+        own.filter(|lock| self.locks(*lock))
+            .or_else(|| self.locks(Lock::Labs).then_some(Lock::Labs))
     }
 
     /// The lock on `hex settings` key `name`, if any.
@@ -228,7 +224,7 @@ impl Policy {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 thread_local! {
     /// The policy a test forced on this thread ([`Policy::forced_for_test`]),
     /// read ahead of the process's own so a locked row needs no managed Mac.
@@ -237,10 +233,10 @@ thread_local! {
 }
 
 /// Clears a test's forced policy when it drops ([`Policy::forced_for_test`]).
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 pub struct ForcedPolicy;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 impl Drop for ForcedPolicy {
     fn drop(&mut self) {
         FORCED_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
