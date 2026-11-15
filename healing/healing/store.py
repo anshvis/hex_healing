@@ -102,6 +102,7 @@ ALTER TABLE clips ADD COLUMN correction_outcome TEXT;
 ALTER TABLE clips ADD COLUMN correction_reason TEXT;
 ALTER TABLE clips ADD COLUMN edited_text TEXT;
 ALTER TABLE clips ADD COLUMN reference_text TEXT;
+ALTER TABLE clips ADD COLUMN classified_at_ms INTEGER;
 CREATE TABLE edits (
     clip_id TEXT NOT NULL REFERENCES clips(clip_id),
     idx INTEGER NOT NULL,

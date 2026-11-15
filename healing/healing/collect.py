@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from healing.corrections import label_after
 from healing.eval.bench import BenchError, hex_binary
 from healing.store import Store, StoreError, process_lock, clip_id, now_ms, read_wav
 
@@ -249,8 +250,9 @@ def _store_entry(
         # Hex added or changed the correction: `label corrections` classifies it again.
         store.db.execute("DELETE FROM edits WHERE clip_id = ?", (existing["clip_id"],))
         changed["reference_text"] = None
-        if existing["label"] == "strong":
-            changed["label"] = "unlabelled"
+        changed["classified_at_ms"] = None
+        if (label := label_after(existing["label"], False)) != existing["label"]:
+            changed["label"] = label
     assignments = ", ".join(f"{name} = ?" for name in changed)
     store.db.execute(
         f"UPDATE clips SET {assignments} WHERE hex_epoch_ms = ? AND hex_id = ?",

@@ -210,7 +210,9 @@ def score(plan: dict, results: list[dict], entries: list[dict]) -> dict:
     matched = match_entries(results, entries)
     apps: dict[str, dict] = {}
     for key, entry in matched.items():
-        run = by_run[key]
+        run = by_run.get(key)
+        if run is None:
+            continue
         row = apps.setdefault(
             run["app"],
             {"seeded": 0, "captured": 0, "unedited": 0, "false_edits": 0, "no_entry": 0, "observed": 0},
@@ -230,10 +232,17 @@ def score(plan: dict, results: list[dict], entries: list[dict]) -> dict:
     for row in apps.values():
         row["recall"] = row["captured"] / row["seeded"] if row["seeded"] else 0.0
         row["false_edit_rate"] = row["false_edits"] / row["unedited"] if row["unedited"] else 0.0
+    # A gate needs the whole matrix: every app of the protocol, every planned run (the unedited
+    # controls included). Partial results still report, but never pass or trigger X-3.
+    done = {(r["app"], r["index"]) for r in results}
+    missing = sum(key not in done for key in by_run)
+    untested = [app for app in APPS if app not in {run["app"] for run in plan["runs"]}]
+    complete = not missing and not untested and bool(total["unedited"])
     return {
         "apps": apps, "recall": recall, "false_edit_rate": false_rate,
-        "pass": bool(total["seeded"]) and recall >= MIN_RECALL and false_rate <= MAX_FALSE_EDIT,
-        "x3": recall < MIN_RECALL,
+        "complete": complete, "missing_runs": missing, "untested_apps": untested,
+        "pass": complete and recall >= MIN_RECALL and false_rate <= MAX_FALSE_EDIT,
+        "x3": complete and recall < MIN_RECALL,
     }
 
 
@@ -246,7 +255,13 @@ def format_score(result: dict) -> str:
         )
     lines.append(f"edit recall {result['recall']:.0%} (need >= {MIN_RECALL:.0%}), "
                  f"false-edit rate {result['false_edit_rate']:.0%} (need <= {MAX_FALSE_EDIT:.0%})")
-    lines.append("PASS" if result["pass"] else "FAIL" + (": X-3 triggers, replan M2 toward an explicit Correct this" if result["x3"] else ""))
+    if not result["complete"]:
+        reasons = [f"{result['missing_runs']} planned runs have no result"] if result["missing_runs"] else []
+        if result["untested_apps"]:
+            reasons.append("untested: " + ", ".join(result["untested_apps"]))
+        lines.append("INCOMPLETE (" + "; ".join(reasons or ["no unedited controls"]) + "): neither a pass nor a fail")
+    else:
+        lines.append("PASS" if result["pass"] else "FAIL" + (": X-3 triggers, replan M2 toward an explicit Correct this" if result["x3"] else ""))
     return "\n".join(lines)
 
 

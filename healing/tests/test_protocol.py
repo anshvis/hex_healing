@@ -77,7 +77,7 @@ def _history(plan, results, captured_every=1, false_edit=False):
 
 
 def _run_all(tmp_path):
-    plan = protocol.build_plan(1, {"TextEdit": "x", "Notes": "y"})
+    plan = protocol.build_plan(1)
     results_path = tmp_path / "r.json"
     protocol.run_plan(plan, results_path, FakeDriver())
     return plan, json.loads(results_path.read_text())
@@ -101,3 +101,34 @@ def test_score_needs_the_seeded_word_in_the_span(tmp_path):
         if e["correction"]["outcome"] == "edited":
             e["correction"]["edited_text"] = "Send it to Kip."  # edited, but not what was typed
     assert protocol.score(plan, results, entries)["recall"] == 0
+
+
+def test_a_partial_run_is_reported_but_never_passes(tmp_path):
+    plan, results = _run_all(tmp_path)
+    one_seeded = [r for r in results if next(p for p in plan["runs"] if (p["app"], p["index"]) == (r["app"], r["index"]))["seeded"]][:1]
+    partial = protocol.score(plan, one_seeded, _history(plan, one_seeded))
+    assert partial["recall"] == 1.0 and partial["false_edit_rate"] == 0
+    assert not partial["complete"] and not partial["pass"] and not partial["x3"]
+    assert partial["missing_runs"] == 59
+    assert "INCOMPLETE" in protocol.format_score(partial)
+
+    # Poor recall on a partial run is not X-3 either.
+    poor = protocol.score(plan, results[:10], _history(plan, results[:10], captured_every=10**6))
+    assert not poor["pass"] and not poor["x3"]
+
+
+def test_a_plan_without_every_app_never_passes(tmp_path):
+    plan = protocol.build_plan(1, {"TextEdit": "x", "Notes": "y"})
+    results_path = tmp_path / "r.json"
+    protocol.run_plan(plan, results_path, FakeDriver())
+    results = json.loads(results_path.read_text())
+    result = protocol.score(plan, results, _history(plan, results))
+    assert result["missing_runs"] == 0 and result["untested_apps"]
+    assert not result["complete"] and not result["pass"]
+    assert "untested" in protocol.format_score(result)
+
+
+def test_every_app_and_control_run_done_can_pass(tmp_path):
+    plan, results = _run_all(tmp_path)
+    result = protocol.score(plan, results, _history(plan, results))
+    assert result["complete"] and result["pass"] and result["untested_apps"] == []

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from healing import corrections
 from healing.cli import main
-from healing.corrections import find_edits, label_corrections, observation_report, reference_text
+from healing.corrections import find_edits, label_after, label_corrections, observation_report, reference_text
 from healing.store import Store, clip_id
 
 from test_collect import world  # noqa: F401  (the fake-hex fixture)
@@ -20,7 +20,7 @@ def test_maps_final_edit_to_raw():
 def test_rewrite_changes_no_reference():
     edits = find_edits("see you tomorrow", "See you tomorrow.", "See you Friday.")
     assert [e.kind for e in edits] == ["rewrite"]
-    assert reference_text("see you tomorrow", edits) == "see you tomorrow"
+    assert reference_text("see you tomorrow", edits) is None
 
 
 def test_casing_only_is_dropped():
@@ -52,6 +52,25 @@ def test_insertion_and_deletion_are_rewrites():
     assert [e.kind for e in find_edits("hello big world", "Hello big world.", "Hello world.")] == ["rewrite"]
 
 
+def test_reference_keeps_what_the_person_typed():
+    raw = "i said can not meet at five"
+    # Apostrophes and number spelling survive; only the raw text's lower case is followed.
+    edit = corrections.Edit("kip", "Kip", "Can't", "acoustic", None, (6, 9))
+    assert reference_text("it is kip", [edit]) == "it is can't"
+    edits = find_edits("meet at fife", "Meet at fife.", "Meet at five.")
+    assert [e.kind for e in edits] == ["acoustic"]
+    assert reference_text("meet at fife", edits) == "meet at five"
+    assert reference_text(raw, []) is None
+
+
+def test_label_after_is_the_one_rule():
+    assert label_after("unlabelled", True) == "strong"
+    assert label_after("verified", True) == "verified"
+    assert label_after("strong", False) == "unlabelled"
+    assert label_after("verified", False) == "verified"
+    assert label_after("unlabelled", False) == "unlabelled"
+
+
 def _entry(i, **extra):
     base = {"id": i, "timestamp_ms": 1760000000000 + i * 1000, "application": "Notes", "kind": "dictation",
             "raw_text": "send it to kip", "final_text": "Send it to Kip.", "model_id": "m"}
@@ -75,6 +94,7 @@ def test_collect_stores_correction_and_label_corrections(world, capsys):  # noqa
     rows = {r["hex_id"]: dict(r) for r in db.execute("SELECT * FROM clips")}
     assert rows[1]["label"] == "strong" and rows[1]["reference_text"] == "send it to kit"
     assert rows[2]["reference_text"] is None and rows[2]["label"] == "unlabelled"  # rewrite mode skipped
+    assert rows[1]["classified_at_ms"] is not None and rows[2]["classified_at_ms"] is None
     assert rows[3]["correction_reason"] == "span_not_found" and rows[5]["correction_outcome"] is None
     assert db.execute("SELECT COUNT(*) FROM edits").fetchone()[0] == 1
 
@@ -89,7 +109,9 @@ def test_collect_stores_correction_and_label_corrections(world, capsys):  # noqa
     assert main(["label", "corrections"]) == 0
     rows = {r["hex_id"]: dict(r) for r in world.db().execute("SELECT * FROM clips")}
     assert rows[4]["label"] == "strong" and rows[1]["label"] == "unlabelled"
-    assert rows[1]["reference_text"] == "send it to kip"  # processed: nothing acoustic
+    # Processed, nothing acoustic: no reference, and not classified again.
+    assert rows[1]["reference_text"] is None and rows[1]["classified_at_ms"] is not None
+    assert label_corrections(Store())["clips"] == 0
 
 
 def test_report_observation(world, capsys):  # noqa: F811
@@ -121,3 +143,40 @@ def test_ten_thousand_rows_fast(world):  # noqa: F811
     started = time.time()
     counts = label_corrections(store)
     assert counts["acoustic"] == 10_000 and time.time() - started < 10
+
+
+def test_v4_dataset_with_rows_migrates_to_v5(tmp_path):
+    import sqlite3
+
+    from healing import store as store_module
+
+    root = tmp_path / "dataset"
+    root.mkdir()
+    db = sqlite3.connect(root / "dataset.sqlite")
+    for step in range(4):
+        db.executescript(store_module.MIGRATIONS[step])
+    db.execute("PRAGMA user_version = 4")
+    db.execute(
+        "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text, label,"
+        " collected_at_ms) VALUES ('a', 1, 1, 10, 'dictation', 'send it to kip', 'Send it to Kip.', 'verified', 5)"
+    )
+    db.commit()
+    db.close()
+
+    store = Store(root)
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION == 5
+    row = store.db.execute("SELECT * FROM clips").fetchone()
+    assert (row["clip_id"], row["raw_text"], row["label"], row["collected_at_ms"]) == (
+        "a", "send it to kip", "verified", 5
+    )
+    assert all(row[c] is None for c in (
+        "correction_outcome", "correction_reason", "edited_text", "reference_text", "classified_at_ms"
+    ))
+    assert store.db.execute("SELECT COUNT(*) FROM edits").fetchone()[0] == 0
+    # The migrated row takes a correction and classifies like any other.
+    store.db.execute(
+        "UPDATE clips SET correction_outcome = 'edited', edited_text = 'Send it to Kit.' WHERE clip_id = 'a'"
+    )
+    assert label_corrections(store)["acoustic"] == 1
+    row = store.db.execute("SELECT label, reference_text FROM clips").fetchone()
+    assert (row["label"], row["reference_text"]) == ("verified", "send it to kit")

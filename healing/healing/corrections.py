@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from healing import phonetic
-from healing.store import Store
+from healing.store import Store, now_ms
 
 MAX_ACOUSTIC_WORDS = 4  # a longer replaced span is a rewrite, however it sounds
 
@@ -90,48 +90,84 @@ def _raw_index_of_final(raw: list[Token], final: list[Token]) -> dict[int, int]:
     return mapping
 
 
+@dataclass(frozen=True)
+class _Alignment:
+    """One clip's three texts and the token alignment between them."""
+
+    raw_text: str
+    final_text: str
+    edited_text: str
+    raw: list[Token]
+    final: list[Token]
+    edited: list[Token]
+    to_raw: dict[int, int]
+
+    @classmethod
+    def of(cls, raw_text: str, final_text: str, edited_text: str) -> _Alignment:
+        raw, final, edited = tokens(raw_text), tokens(final_text), tokens(edited_text)
+        return cls(raw_text, final_text, edited_text, raw, final, edited, _raw_index_of_final(raw, final))
+
+    def edit(self, i1: int, i2: int, j1: int, j2: int) -> Edit:
+        """The edit that replaced final tokens [i1, i2) with edited tokens [j1, j2)."""
+        final_from = _span(self.final_text, self.final[i1:i2])
+        to_text = _span(self.edited_text, self.edited[j1:j2])
+        mapped = [self.to_raw.get(i) for i in range(i1, i2)]
+        contiguous = bool(mapped) and None not in mapped and mapped == list(range(mapped[0], mapped[0] + len(mapped)))
+        raw_tokens = self.raw[mapped[0] : mapped[-1] + 1] if contiguous else []
+        raw_from = _span(self.raw_text, raw_tokens)
+        if i1 == i2 or j1 == j2:
+            # An insertion or deletion has no counterpart to sound like.
+            return Edit(raw_from, final_from, to_text, "rewrite")
+        if not contiguous:
+            return Edit("", final_from, to_text, "unmapped")
+        kind, scores = phonetic.classify(raw_from, to_text)
+        if kind == "acoustic" and max(len(raw_tokens), j2 - j1) > MAX_ACOUSTIC_WORDS:
+            kind = "rewrite"
+        span = (raw_tokens[0].start, raw_tokens[-1].end)
+        return Edit(raw_from, final_from, to_text, kind, scores, span)
+
+
 def find_edits(raw_text: str, final_text: str, edited_text: str) -> list[Edit]:
-    raw, final, edited = tokens(raw_text), tokens(final_text), tokens(edited_text)
-    to_raw = _raw_index_of_final(raw, final)
-    matcher = SequenceMatcher(None, [t.norm for t in final], [t.norm for t in edited], autojunk=False)
+    alignment = _Alignment.of(raw_text, final_text, edited_text)
+    matcher = SequenceMatcher(
+        None, [t.norm for t in alignment.final], [t.norm for t in alignment.edited], autojunk=False
+    )
     edits: list[Edit] = []
     for op, i1, i2, j1, j2 in matcher.get_opcodes():
         if op == "equal":
             continue
         if op == "replace" and i2 - i1 == j2 - j1:
-            pairs = [(i, i + 1, j, j + 1) for i, j in zip(range(i1, i2), range(j1, j2))]
+            edits.extend(alignment.edit(i, i + 1, j, j + 1) for i, j in zip(range(i1, i2), range(j1, j2)))
         else:
-            pairs = [(i1, i2, j1, j2)]
-        for a, b, c, d in pairs:
-            edits.append(_edit(raw_text, final_text, edited_text, raw, final, edited, to_raw, a, b, c, d))
+            edits.append(alignment.edit(i1, i2, j1, j2))
     return edits
 
 
-def _edit(raw_text, final_text, edited_text, raw, final, edited, to_raw, i1, i2, j1, j2) -> Edit:
-    final_from = _span(final_text, final[i1:i2])
-    to_text = _span(edited_text, edited[j1:j2])
-    mapped = [to_raw.get(i) for i in range(i1, i2)]
-    contiguous = bool(mapped) and None not in mapped and mapped == list(range(mapped[0], mapped[0] + len(mapped)))
-    raw_tokens = raw[mapped[0] : mapped[-1] + 1] if contiguous else []
-    raw_from = _span(raw_text, raw_tokens)
-    if i1 == i2 or j1 == j2:
-        # An insertion or deletion has no counterpart to sound like.
-        return Edit(raw_from, final_from, to_text, "rewrite")
-    if not contiguous:
-        return Edit("", final_from, to_text, "unmapped")
-    kind, scores = phonetic.classify(raw_from, to_text)
-    if kind == "acoustic" and max(len(raw_tokens), j2 - j1) > MAX_ACOUSTIC_WORDS:
-        kind = "rewrite"
-    span = (raw_tokens[0].start, raw_tokens[-1].end)
-    return Edit(raw_from, final_from, to_text, kind, scores, span)
+def label_after(label: str, acoustic: bool) -> str:
+    """A clip's label once its corrections are classified (or, with `acoustic` false, unknown).
+
+    An acoustic edit makes a clip `strong` unless it was `verified`; a `strong` clip with none
+    (or whose classification was thrown away) falls back to `unlabelled`.
+    """
+    if acoustic and label != "verified":
+        return "strong"
+    if not acoustic and label == "strong":
+        return "unlabelled"
+    return label
 
 
-def reference_text(raw_text: str, edits: list[Edit]) -> str:
-    """`raw_text` with only the acoustic edits applied, in the raw text's own casing style."""
+def reference_text(raw_text: str, edits: list[Edit]) -> str | None:
+    """`raw_text` with only the acoustic edits applied, or None when no edit is acoustic.
+
+    The person's own span replaces each one, as they typed it ("can't", "five"); only its case
+    follows the raw text, which the speech model writes in lower case.
+    """
+    acoustic = sorted((e for e in edits if e.kind == "acoustic"), key=lambda e: e.raw_span[0], reverse=True)
+    if not acoustic:
+        return None
     result = raw_text
-    for edit in sorted((e for e in edits if e.kind == "acoustic"), key=lambda e: e.raw_span[0], reverse=True):
-        words = " ".join(t.norm for t in tokens(edit.to_text))
-        replacement = words if edit.raw_from == edit.raw_from.lower() else edit.to_text
+    for edit in acoustic:
+        replacement = edit.to_text.lower() if edit.raw_from == edit.raw_from.lower() else edit.to_text
         result = result[: edit.raw_span[0]] + replacement + result[edit.raw_span[1] :]
     return result
 
@@ -141,7 +177,7 @@ def label_corrections(store: Store, since_ms: int | None = None, recompute: bool
     where = "correction_outcome = 'edited' AND edited_text IS NOT NULL AND rewritten = 0"
     parameters: list = []
     if not recompute:
-        where += " AND reference_text IS NULL"
+        where += " AND classified_at_ms IS NULL"
     if since_ms is not None:
         where += " AND timestamp_ms >= ?"
         parameters.append(since_ms)
@@ -166,14 +202,9 @@ def label_corrections(store: Store, since_ms: int | None = None, recompute: bool
             )
             counts[edit.kind] += 1
         acoustic = any(e.kind == "acoustic" for e in edits)
-        label = row["label"]
-        if acoustic and label != "verified":
-            label = "strong"
-        elif not acoustic and label == "strong":
-            label = "unlabelled"
         store.db.execute(
-            "UPDATE clips SET reference_text = ?, label = ? WHERE clip_id = ?",
-            (reference_text(row["raw_text"], edits), label, row["clip_id"]),
+            "UPDATE clips SET reference_text = ?, label = ?, classified_at_ms = ? WHERE clip_id = ?",
+            (reference_text(row["raw_text"], edits), label_after(row["label"], acoustic), now_ms(), row["clip_id"]),
         )
         counts["clips"] += 1
         if acoustic:
