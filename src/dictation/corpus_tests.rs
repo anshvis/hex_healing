@@ -245,13 +245,9 @@ fn evaluate_dictation_corpus() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(24);
 
-    let mut model = Parakeet::load_from(
-        &model_path,
-        false,
-        Some(&TranscriptionSelection::default()),
-        None,
-    )
-    .expect("load Parakeet Unified English");
+    let mut model =
+        Parakeet::load_from(&model_path, false, Some(&TranscriptionSelection::default()))
+            .expect("load Parakeet Unified English");
 
     let mut items: Vec<(String, String, String, PathBuf, String)> = Vec::new();
 

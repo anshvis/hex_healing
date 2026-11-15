@@ -49,11 +49,6 @@ impl Backend {
             .and_then(|name| name.to_str())
             .zip(fs::metadata(&model).ok())
             .and_then(|(name, meta)| catalog_match(None, None, name, meta.len()));
-        if model_id.is_none() {
-            eprintln!(
-                "note: the model file is not a catalog artifact (by name and size), so clips get no model trailing silence"
-            );
-        }
         if vocabulary.is_some() {
             require_bias_model(model_id)?;
         }
@@ -64,25 +59,38 @@ impl Backend {
         })
     }
 
-    /// The model the clips are prepared for, and what the `model` record adds
-    /// to say how they were prepared and biased.
-    fn preparation(&self) -> (Option<TranscriptionModelId>, serde_json::Value) {
-        let model_id = match self {
+    /// The catalog model the clips are prepared for.
+    fn model_id(&self) -> Option<TranscriptionModelId> {
+        match self {
             Self::TranscribeCpp { model_id, .. } => *model_id,
             Self::Onnx => None,
-        };
-        let mut record = json!({
-            "trailing_silence_samples": crate::transcription::trailing_silence_samples(model_id),
-        });
-        if let Self::TranscribeCpp {
-            vocabulary: Some(vocabulary),
-            ..
-        } = self
-        {
-            // Only with the flag.
-            record["bias_vocabulary"] = vocabulary.record();
         }
-        (model_id, record)
+    }
+
+    /// Said on stderr when an existing file is no catalog artifact, so a
+    /// renamed copy cannot silently lose the model's trailing silence.
+    fn unrecognised_model_note(&self) -> Option<&'static str> {
+        match self {
+            Self::TranscribeCpp {
+                model,
+                model_id: None,
+                ..
+            } if model.is_file() => Some(
+                "note: the model file is not a catalog artifact (by name and size), so clips get no model trailing silence",
+            ),
+            _ => None,
+        }
+    }
+
+    /// The `model` record's `bias_vocabulary`, only with `--vocabulary`.
+    fn bias_record(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::TranscribeCpp {
+                vocabulary: Some(vocabulary),
+                ..
+            } => Some(vocabulary.record()),
+            _ => None,
+        }
     }
 }
 
@@ -95,8 +103,14 @@ fn require_bias_model(id: Option<TranscriptionModelId>) -> std::result::Result<(
     if definition.vocabulary_use() == VocabularyUse::Bias {
         return Ok(());
     }
+    let why = match definition.vocabulary_use() {
+        VocabularyUse::Prompt => {
+            "reads its vocabulary as a context prompt, which a bias does not measure"
+        }
+        _ => "takes no vocabulary",
+    };
     Err(format!(
-        "--vocabulary biases only Parakeet models, and {} takes its vocabulary another way",
+        "--vocabulary biases only Parakeet models, and {} {why}",
         definition.name
     ))
 }
@@ -336,7 +350,12 @@ pub fn run(manifest_path: &Path, warmups: usize, runs: usize, backend: Backend) 
         .wrap_err_with(|| format!("could not parse {}", manifest_path.display()))?;
     validate_manifest(&manifest)?;
     let vocabulary = manifest.vocabulary;
-    let (model_id, preparation) = backend.preparation();
+    let model_id = backend.model_id();
+    let trailing_silence = crate::transcription::trailing_silence_samples(model_id);
+    let bias_record = backend.bias_record();
+    if let Some(note) = backend.unrecognised_model_note() {
+        eprintln!("{note}");
+    }
     let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let clips = manifest
         .clips
@@ -360,11 +379,12 @@ pub fn run(manifest_path: &Path, warmups: usize, runs: usize, backend: Backend) 
         "warmups": warmups,
         "runs": runs,
         "scoring_vocabulary": vocabulary,
+        "trailing_silence_samples": trailing_silence,
     });
-    model_record
-        .as_object_mut()
-        .expect("a json! object")
-        .extend(preparation.as_object().expect("a json! object").clone());
+    if let Some(bias_record) = bias_record {
+        // Only with the flag.
+        model_record["bias_vocabulary"] = bias_record;
+    }
     write_json(&mut output, model_record)?;
 
     let mut first_warmup_ms = None;
@@ -778,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn vocabulary_flag_reads_the_settings_shape_through_the_pane_rules() {
+    fn vocabulary_flag_parses_settings_shape() {
         let read = |json: &str| RunVocabulary::parse(json.as_bytes(), VocabularyBoost::default());
         let vocabulary = read(
             r#"["Hex", {"term": "  Qorvyx ", "sounds_like": ["corvix", "Corvix", "qorvyx"]}, "hex"]"#,
@@ -850,30 +870,66 @@ mod tests {
     }
 
     #[test]
-    fn vocabulary_is_refused_for_models_that_take_it_as_a_prompt() {
-        use crate::transcription::models::MODELS;
+    fn vocabulary_is_refused_with_a_reason_per_model_family() {
+        use TranscriptionModelId::*;
         assert_eq!(require_bias_model(None), Ok(()));
-        for model in MODELS {
-            let result = require_bias_model(Some(model.id));
-            if model.vocabulary_use() == VocabularyUse::Bias {
-                assert_eq!(result, Ok(()), "{}", model.name);
-            } else {
-                assert!(
-                    result.unwrap_err().contains("only Parakeet"),
-                    "{}",
-                    model.name
-                );
-            }
-        }
-        assert!(
-            require_bias_model(Some(TranscriptionModelId::WhisperLargeV3Turbo)).is_err(),
-            "Whisper reads the vocabulary as a prompt"
-        );
-        assert!(require_bias_model(Some(TranscriptionModelId::ParakeetUnifiedEnglish)).is_ok());
+        assert_eq!(require_bias_model(Some(ParakeetUnifiedEnglish)), Ok(()));
+        assert_eq!(require_bias_model(Some(ParakeetV3)), Ok(()));
+        let whisper = require_bias_model(Some(WhisperLargeV3Turbo)).unwrap_err();
+        assert!(whisper.contains("context prompt"), "{whisper}");
+        let qwen = require_bias_model(Some(Qwen3Asr06B)).unwrap_err();
+        assert!(qwen.contains("context prompt"), "{qwen}");
+        let cohere = require_bias_model(Some(CohereTranscribe)).unwrap_err();
+        assert!(cohere.contains("takes no vocabulary"), "{cohere}");
     }
 
     #[test]
-    fn the_transcribe_cpp_backend_reads_the_vocabulary_once_and_names_a_bad_file() {
+    fn no_flag_no_bias() {
+        use crate::transcription::models::{ModelRuntime, definition};
+        let ModelRuntime::Gguf(artifact) =
+            definition(TranscriptionModelId::ParakeetUnifiedEnglish).runtime
+        else {
+            panic!("Unified English is a GGUF model");
+        };
+        let directory = std::env::temp_dir().join(format!("hex-no-flag-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(artifact.filename);
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(artifact.bytes).unwrap();
+
+        // Without the flag nothing is biased and the record says nothing of it.
+        let backend = Backend::transcribe_cpp(path.clone(), None, None).unwrap();
+        assert!(matches!(
+            backend,
+            Backend::TranscribeCpp {
+                vocabulary: None,
+                ..
+            }
+        ));
+        assert!(backend.bias_record().is_none());
+        // The catalog file is recognised by name and size, and padded as dictation pads.
+        assert_eq!(
+            backend.model_id(),
+            Some(TranscriptionModelId::ParakeetUnifiedEnglish)
+        );
+        assert_eq!(
+            crate::transcription::trailing_silence_samples(backend.model_id()),
+            6_400
+        );
+        assert!(backend.unrecognised_model_note().is_none());
+
+        // The same name at another size is no catalog artifact.
+        file.set_len(artifact.bytes - 1).unwrap();
+        let backend = Backend::transcribe_cpp(path, None, None).unwrap();
+        assert_eq!(backend.model_id(), None);
+        assert!(backend.unrecognised_model_note().is_some());
+        assert!(Backend::Onnx.bias_record().is_none());
+        assert_eq!(Backend::Onnx.model_id(), None);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_unnamed_file_takes_the_bias_check_to_load_and_a_bad_vocabulary_names_its_path() {
         let directory =
             std::env::temp_dir().join(format!("hex-vocab-backend-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
@@ -887,10 +943,10 @@ mod tests {
             Some(VocabularyBoost::Light),
         )
         .unwrap();
-        let (model_id, record) = unknown.preparation();
-        assert_eq!(model_id, None);
-        assert_eq!(record["trailing_silence_samples"], 0);
-        assert_eq!(record["bias_vocabulary"]["boost"], "light");
+        assert_eq!(unknown.model_id(), None);
+        assert_eq!(unknown.bias_record().unwrap()["boost"], "light");
+        // A path that does not exist is no "not a catalog artifact" note.
+        assert!(unknown.unrecognised_model_note().is_none());
 
         let error = Backend::transcribe_cpp(
             PathBuf::from("renamed.gguf"),
@@ -900,17 +956,13 @@ mod tests {
         .err()
         .unwrap();
         assert!(error.starts_with("--vocabulary could not read"), "{error}");
-
-        let (_, record) = Backend::Onnx.preparation();
-        assert_eq!(record["trailing_silence_samples"], 0);
-        assert!(record.get("bias_vocabulary").is_none());
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn clips_pad_like_dictation_for_unified_english_only() {
         let directory = std::env::temp_dir().join(format!("hex-pad-{}", std::process::id()));
-        fs::create_dir(&directory).unwrap();
+        fs::create_dir_all(&directory).unwrap();
         let path = directory.join("one.wav");
         let mut writer = WavWriter::create(
             &path,

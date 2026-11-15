@@ -1271,7 +1271,7 @@ impl Parakeet {
             return Err(eyre!("{} is not installed", definition.name));
         }
         let path = model_path(definition)?;
-        let mut parakeet = Self::load_from(&path, true, Some(selection), None)?;
+        let mut parakeet = Self::load_from(&path, true, Some(selection))?;
         parakeet.prewarm()?;
         let stream_run = parakeet.stream_run_options();
         let architecture = match definition.runtime {
@@ -1310,19 +1310,22 @@ impl Parakeet {
     }
 
     /// Loads `model_path` for the benchmark, every run biased with `bias`
-    /// when given, set once on the run options.
+    /// when given (refused for a model dictation would not bias).
     pub(crate) fn load_for_benchmark(
         model_path: &std::path::Path,
         bias: Option<crate::transcription::gguf_session::RunBias>,
     ) -> Result<Self> {
-        Self::load_from(model_path, false, None, bias)
+        let mut parakeet = Self::load_from(model_path, false, None)?;
+        if let Some(bias) = bias {
+            parakeet.session.fix_run_bias(bias, &mut parakeet.options)?;
+        }
+        Ok(parakeet)
     }
 
     fn load_from(
         model_path: &std::path::Path,
         diagnostics: bool,
         selection: Option<&TranscriptionSelection>,
-        bias: Option<crate::transcription::gguf_session::RunBias>,
     ) -> Result<Self> {
         if diagnostics {
             TRANSCRIBE_LOGGING.call_once(transcribe_cpp::init_logging);
@@ -1392,9 +1395,6 @@ impl Parakeet {
                 ));
             }
             options.language = runtime_language;
-        }
-        if let Some(bias) = bias {
-            crate::transcription::gguf_session::fixed_run_bias(&model, bias, &mut options)?;
         }
         let session = OfflineGgufSession::new(model)?;
         let weights_bytes = std::fs::metadata(model_path).map_or(0, |meta| meta.len() as usize);
@@ -1570,7 +1570,7 @@ mod tests {
             model: TranscriptionModelId::CohereTranscribe,
             language: "en".into(),
         };
-        let mut model = Parakeet::load_from(&model_path, false, Some(&selection), None).unwrap();
+        let mut model = Parakeet::load_from(&model_path, false, Some(&selection)).unwrap();
         eprintln!(
             "Cohere maximum chunk: {:?} samples",
             model.max_audio_samples
@@ -1900,7 +1900,6 @@ mod tests {
             &PathBuf::from(std::env::var("HEX_STREAM_MODEL").unwrap()),
             false,
             Some(&selection),
-            None,
         )
         .unwrap();
         model.stream = model
@@ -2183,5 +2182,5 @@ mod dictation_corpus_tests;
 /// recordings without the installed model catalog.
 #[cfg(test)]
 pub(crate) fn load_test_model(path: &std::path::Path) -> Result<Parakeet> {
-    Parakeet::load_from(path, false, Some(&TranscriptionSelection::default()), None)
+    Parakeet::load_from(path, false, Some(&TranscriptionSelection::default()))
 }
