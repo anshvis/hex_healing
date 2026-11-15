@@ -315,3 +315,90 @@ def test_a_fresh_dataset_makes_no_backup(tmp_path, monkeypatch):
     monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))
     Store().close()
     assert not list((tmp_path / "home" / "dataset").glob("dataset.sqlite.pre-*"))
+
+
+def _v5_dataset(tmp_path, monkeypatch):
+    monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))
+    root = tmp_path / "home" / "dataset"
+    (root / "audio").mkdir(parents=True)
+    db = sqlite3.connect(root / "dataset.sqlite")
+    for step in range(5):
+        migration = MIGRATIONS[step]
+        migration(db) if callable(migration) else db.executescript(migration)
+    db.execute("PRAGMA user_version = 5")
+    db.execute(
+        "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text, collected_at_ms)"
+        " VALUES ('c1', 1, 1, 1, 'dictation', 'a b c', 'A b c.', 1)"
+    )
+    db.commit()
+    db.close()
+    return root
+
+
+def test_an_empty_or_damaged_backup_is_made_again(tmp_path, monkeypatch):
+    root = _v5_dataset(tmp_path, monkeypatch)
+    (root / "dataset.sqlite.pre-v5").write_bytes(b"")  # an interrupted earlier attempt
+    (root / "dataset.sqlite.pre-v5.tmp").write_bytes(b"half")  # and its leftover
+    Store().close()
+    backup = sqlite3.connect(root / "dataset.sqlite.pre-v5")
+    assert backup.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert backup.execute("SELECT raw_text FROM clips").fetchone()[0] == "a b c"
+    backup.close()
+    assert not (root / "dataset.sqlite.pre-v5.tmp").exists()
+
+
+def test_a_wrong_version_backup_is_not_trusted(tmp_path, monkeypatch):
+    root = _v5_dataset(tmp_path, monkeypatch)
+    other = sqlite3.connect(root / "dataset.sqlite.pre-v5")
+    other.execute("CREATE TABLE x (y)")
+    other.execute("PRAGMA user_version = 3")
+    other.commit()
+    other.close()
+    Store().close()
+    backup = sqlite3.connect(root / "dataset.sqlite.pre-v5")
+    assert backup.execute("PRAGMA user_version").fetchone()[0] == 5
+    backup.close()
+
+
+def test_a_failed_backup_stops_the_migration_with_a_store_error(tmp_path, monkeypatch):
+    root = _v5_dataset(tmp_path, monkeypatch)
+    def boom(self, target, **kwargs):
+        raise sqlite3.OperationalError("disk full")
+
+    class Broken(Store):
+        def _back_up(self, version):
+            real = self.db
+
+            class Wrapper:
+                def backup(self, target):
+                    boom(self, target)
+
+            self.db = Wrapper()
+            try:
+                super()._back_up(version)
+            finally:
+                self.db = real
+
+    from healing.store import StoreError
+
+    with pytest.raises(StoreError, match="could not back up"):
+        Broken()
+    assert not (root / "dataset.sqlite.pre-v5").exists() and not (root / "dataset.sqlite.pre-v5.tmp").exists()
+    check = sqlite3.connect(root / "dataset.sqlite")
+    assert check.execute("PRAGMA user_version").fetchone()[0] == 5  # not migrated without a backup
+    check.close()
+
+
+def test_concurrent_first_opens_migrate_once(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    root = _v5_dataset(tmp_path, monkeypatch)
+    code = "from healing.store import Store; s = Store(); print(s.db.execute('PRAGMA user_version').fetchone()[0]); s.close()"
+    env = {**__import__("os").environ, "HEALING_HOME": str(tmp_path / "home")}
+    procs = [subprocess.Popen([sys.executable, "-c", code], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+             for _ in range(12)]
+    results = [(p.communicate(), p.returncode) for p in procs]
+    assert all(rc == 0 for _, rc in results), [r[0][1] for r in results if r[1]]
+    assert {out.strip() for (out, _), _ in results} == {str(store_module.SCHEMA_VERSION)}
+    assert sorted(p.name for p in root.glob("dataset.sqlite.pre-*")) == ["dataset.sqlite.pre-v5"]

@@ -127,6 +127,7 @@ M3_COLUMNS = {
     "weight": "REAL NOT NULL DEFAULT 0",
     "edited_positions": "TEXT",
     "review_strategy": "TEXT",
+    "acoustic_reference": "TEXT",  # the classifier's output; `reference_text` is derived from the label
 }
 
 SCHEMA_M3 = """
@@ -150,7 +151,8 @@ CREATE TABLE IF NOT EXISTS splits (
     sidecar_sha256 TEXT,
     frozen INTEGER NOT NULL DEFAULT 0,
     n_clips INTEGER NOT NULL DEFAULT 0,
-    n_words INTEGER NOT NULL DEFAULT 0
+    n_words INTEGER NOT NULL DEFAULT 0,
+    detail TEXT  -- a train snapshot's record: model, note, and each member's texts (verified against test sets)
 );
 CREATE TABLE IF NOT EXISTS split_members (
     split_id TEXT NOT NULL REFERENCES splits(split_id),
@@ -183,6 +185,13 @@ def _migrate_m3(db: sqlite3.Connection) -> None:
         if name not in have:
             db.execute(f"ALTER TABLE clips ADD COLUMN {name} {definition}")
     db.executescript(SCHEMA_M3)
+    # One time: before `acoustic_reference` the classifier wrote `reference_text`, which labels later
+    # overwrote, and `edited_positions` did not exist. Classify those clips again (the next `label all`
+    # does), so their strong references and edited words come back. Nothing re-runs this.
+    db.execute(
+        "UPDATE clips SET classified_at_ms = NULL WHERE classified_at_ms IS NOT NULL AND acoustic_reference IS NULL"
+        " AND clip_id IN (SELECT clip_id FROM edits WHERE kind = 'acoustic')"
+    )
 
 
 MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, _migrate_m3]
@@ -245,6 +254,21 @@ def _owner_dir(path: Path) -> None:
     os.chmod(path, 0o700)
 
 
+def _backup_is_whole(path: Path, version: int) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        copy = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            return copy.execute("PRAGMA user_version").fetchone()[0] == version and (
+                copy.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
+            )
+        finally:
+            copy.close()
+    except sqlite3.Error:
+        return False
+
+
 class Store:
     def __init__(self, root: Path | None = None, sweep: bool = True):
         self.root = root or dataset_root()
@@ -264,34 +288,65 @@ class Store:
             self.sweep_temporaries()
 
     def _migrate(self) -> None:
-        version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > SCHEMA_VERSION:
-            raise StoreError(f"dataset is schema {version}; this healing knows {SCHEMA_VERSION}")
-        if 0 < version < SCHEMA_VERSION:
-            self._back_up(version)
-        for step in range(version, SCHEMA_VERSION):
-            migration = MIGRATIONS[step]
-            if callable(migration):
-                migration(self.db)
-            else:
-                self.db.executescript(migration)
-            self.db.execute(f"PRAGMA user_version = {step + 1}")
-        self.db.commit()
+        """Bring the file to the current schema, one process at a time.
+
+        The exclusive lock covers reading the version, the backup and the steps, and the version is
+        read again once it is held, so a second opener finds the work done instead of repeating it.
+        """
+        descriptor = os.open(self.root / ".migrate.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            version = self.db.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise StoreError(f"dataset is schema {version}; this healing knows {SCHEMA_VERSION}")
+            if 0 < version < SCHEMA_VERSION:
+                self._back_up(version)
+            for step in range(version, SCHEMA_VERSION):
+                migration = MIGRATIONS[step]
+                if callable(migration):
+                    migration(self.db)
+                else:
+                    self.db.executescript(migration)
+                self.db.execute(f"PRAGMA user_version = {step + 1}")
+            self.db.commit()
+        finally:
+            os.close(descriptor)
 
     def _back_up(self, version: int) -> None:
         """Copy the dataset before a migration touches it: its rows are the user's only copy of what
-        History has since expired. One backup per starting version, owner-only, never overwritten."""
+        History has since expired. One backup per starting version, owner-only.
+
+        Written beside the target and moved into place only once complete and synced, so a crash
+        leaves no half file under the real name. A backup already there is kept only if it opens at
+        that version; an empty or damaged one is made again.
+        """
         target = self.root / f"dataset.sqlite.pre-v{version}"
-        if target.exists():
+        if _backup_is_whole(target, version):
             return
-        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        os.close(descriptor)
-        copy = sqlite3.connect(target)
+        temporary = target.with_name(target.name + ".tmp")
         try:
-            self.db.backup(copy)
-        finally:
-            copy.close()
-        os.chmod(target, 0o600)
+            temporary.unlink(missing_ok=True)
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(descriptor)
+            copy = sqlite3.connect(temporary)
+            try:
+                self.db.backup(copy)
+            finally:
+                copy.close()
+            descriptor = os.open(temporary, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(temporary, target)
+            directory = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except (sqlite3.Error, OSError) as error:
+            temporary.unlink(missing_ok=True)
+            raise StoreError(f"could not back up the dataset before migrating it: {error}") from error
 
     def close(self) -> None:
         self.db.close()
