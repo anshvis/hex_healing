@@ -37,7 +37,7 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 ├── Vocabulary biasing no labs.vocabulary_biasing                Parakeet transcription biased toward the vocabulary (#452/#457)
 ├── Screen vocabulary no labs.screen_vocabulary         (macOS)   names and terms in the focused window become temporary vocabulary for each dictation; read locally through Accessibility, never saved, password fields skipped
 ├── Rewrite reads nearby text no labs.cursor_context (macOS) the mode's OpenCode rewrite reads the focused text element's text around the caret as context for names, terms, and where the result lands; password fields skipped
-├── Learn from corrections no labs.learn_from_corrections (macOS) after a successful paste with History recording, Hex keeps the pasted-into field's Accessibility element for the correction watcher; secure fields and Hex's own window are skipped; off, or locked by `DisableCorrections`/`DisableLabs`, nothing is read or queued ([corrections](corrections.md))
+├── Learn from corrections no labs.learn_from_corrections (macOS) after a successful paste with History recording, Hex reads the pasted-into field through Accessibility for up to 30 s (at most 8,192 characters at a time, in memory) and keeps the span you edit on that History entry; secure fields and Hex's own window are skipped; off, or locked by `DisableCorrections`/`DisableLabs`, nothing is read or queued ([corrections](corrections.md); proof so far is unit tests, no live run)
 ├── Switch model with keyboard language  no  keyboard_model_switching.enabled  (macOS, Windows, X11)
 │                                        the input source picks its mapped model (#216); General shows the mappings while on
 ├── Switch model with app no  labs.app_model_switching       (macOS, Windows)
@@ -71,7 +71,6 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 │                                        // (app_settings/persistence/tests.rs); voice_prompt_shows_its_phrase_on_its_card_while_on
 │                                        // (rune_ui/tests/panes.rs); not observed with a real dictation, and no request
 │                                        // ran against a live model
-├── Learn from corrections no labs.learn_from_corrections (macOS) keeps the span you edit right after a paste on its History entry; locked by DisableCorrections or DisableLabs; see corrections.md (specified, not yet implemented)
 ├── Spoken formatting no labs.spoken_formatting      spoken "new line"/"line break", "new paragraph", "open/close quote", "quote … unquote" become line breaks and quotation marks; Spanish "nuevo párrafo", "nueva línea", "abre/cierra comillas", … too (#630, #1040)
 ├── Spoken symbols  no    labs.spoken_symbols          spoken "hashtag", "underscore", "comma", … become symbols joined to their words: "#release", "my_variable", "done, thanks"; Spanish "arroba", "guion bajo", "coma", … too (#678, #1040)
 ├── Remove filler words no labs.filler_words          English dictations lose um, umm, uh, uhh, erm, er, ah, with no model (#631)

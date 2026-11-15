@@ -34,6 +34,11 @@ me to flip any of them. Format: `D-n (agent default): <call>. Instead: <alternat
   - at +30 s.
 
   The watch ends at 30 s. *Instead:* a single read at +30 s (simpler). That misses chat apps, where you fix the text and send within seconds. *(Revised after the challenge.)*
+
+  *Revised again at the M2 review gate (PR #4):*
+  - A value change is read at once, then at most every 100 ms (leading and trailing), not once a second. With a 1 s debounce, select "Kip", type "Kit", press Return inside a second kept the half-typed "send it to K". Reads that find the field as it was before do not count toward the 30-read cap; only reads that found a change do.
+  - Return closes the watch only if it emptied or shortened the field (a send). In a notes app Return is a newline, so the watch goes on and a later edit is kept. The listener counts Return presses (as it counts Escape for YOLO mode) instead of the watcher polling key state every 50 ms, which missed short taps and treated a Return in any app as a send.
+  - An app losing focus closes the watch too (`AXApplicationDeactivated`), since switching away does not change the old app's focused element.
 - **D-9** An edit counts as `acoustic` when either:
   - its Double Metaphone codes match;
   - normalized character edit distance is ≤ 0.6 and phonetic-code edit distance is ≤ 0.5.

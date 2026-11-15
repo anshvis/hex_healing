@@ -43,7 +43,7 @@ hidden while off; a behaviour-only feature is just its toggle. Today: Meetings
 (beta), Voice Filter (Dev; locked on while its macOS driver is installed, and
 a stable build with the driver keeps its pane for Uninstall alone), Playground
 (Dev), Live text, Live chapters, Vocabulary biasing, Screen vocabulary
-(macOS), Rewrite reads nearby text (macOS), Learn from corrections (macOS), Switch model with keyboard
+(macOS), Rewrite reads nearby text (macOS), Switch model with keyboard
 language (#216), Mouse shortcuts (#209, macOS), Also pause the browser (#301,
 macOS), Share dictation shortcut (#176, Windows), Unload model when idle
 (#442), Smaller model files (macOS), Terminal paste (Windows), and Terminal
@@ -244,7 +244,7 @@ substitute for source inspection or a second roadmap.
 - `accessibility`: bounded focused-window and selected-text capture through
   Accessibility without touching the clipboard, including the bounded visible
   window text Labs › Screen vocabulary reads (macOS), and the post-paste
-  read of the pasted-into field's value (≤ 8 KiB, 30 s, never a secure field)
+  read of the pasted-into field's value (≤ 8,192 characters, 30 s, never a secure field)
   for Labs › Learn from corrections.
 - `recognition`: the macOS listener coordinator for hotkey and programmatic
   dictation controls, workers, and observations. It does not own the
