@@ -6,7 +6,11 @@
 //! Tokens fold case and punctuation. An exact token scores +2; a near token
 //! (three or more letters, one edit apart, such as "Kip" and "Kit") +1, so a
 //! one-word edit at the start, end, or alone still aligns; any other pair
-//! -1; a gap -1. A field with no near or exact token never aligns.
+//! -1; a gap -1. A field with no near or exact token never aligns, except a
+//! lone word replaced by a lone word. An edited first or last word scores
+//! below zero, so it falls outside the aligned core: the span extends over
+//! one field token for each inserted token left unaligned at either end,
+//! never across sentence punctuation.
 
 /// How the inserted text sits in the field.
 #[derive(Debug, Eq, PartialEq)]
@@ -97,10 +101,26 @@ fn score(inserted: &Token, field: &Token) -> i32 {
     }
 }
 
+/// `text` without object-replacement characters (attachments).
+fn strip(text: &str) -> String {
+    text.replace('\u{FFFC}', "")
+}
+
+/// Whether `text` holds nothing a person typed.
+pub fn is_blank(text: &str) -> bool {
+    strip(text).trim().is_empty()
+}
+
+/// Whether a sentence ends in `token`, or on the line break before the next.
+fn ends_sentence(field: &str, token: &Token, next: Option<&Token>) -> bool {
+    field[token.start..token.end].ends_with(['.', '!', '?'])
+        || next.is_some_and(|next| field[token.end..next.start].contains('\n'))
+}
+
 /// Aligns `inserted` against `field`. U+FFFC is stripped from both.
 pub fn align(field: &str, inserted: &str) -> Alignment {
-    let field = field.replace('\u{FFFC}', "");
-    let inserted = inserted.replace('\u{FFFC}', "");
+    let field = strip(field);
+    let inserted = strip(inserted);
     let inserted = inserted.trim();
     if inserted.is_empty() {
         return Alignment::NotFound;
@@ -130,9 +150,14 @@ pub fn align(field: &str, inserted: &str) -> Alignment {
         }
     }
     if best == 0 {
+        // One word in, one word out: the field is that word's replacement.
+        if let ([_], [only]) = (&want[..], &have[..]) {
+            return Alignment::Edited(field[only.start..only.end].to_string());
+        }
         return Alignment::NotFound;
     }
     let (mut i, mut j) = at;
+    let trailing = want.len() - i;
     let (mut aligned, mut exact) = (0, 0);
     let (mut first, mut last) = (None, None);
     let mut gaps = false;
@@ -159,14 +184,33 @@ pub fn align(field: &str, inserted: &str) -> Alignment {
     } else {
         want.len().div_ceil(2)
     };
-    let (Some(first), Some(last)) = (first, last) else {
+    let (Some(mut first), Some(mut last)) = (first, last) else {
         return Alignment::NotFound;
     };
-    if aligned < needed {
-        return Alignment::NotFound;
-    }
     if exact == want.len() && aligned == want.len() && !gaps {
         return Alignment::Unchanged;
+    }
+    // Each inserted token left over at an end stands for the field token the
+    // person typed over it.
+    let mut taken = 0;
+    for _ in 0..i {
+        let sentence_start =
+            first > 0 && ends_sentence(&field, &have[first - 1], Some(&have[first]));
+        if first == 0 || sentence_start {
+            break;
+        }
+        first -= 1;
+        taken += 1;
+    }
+    for _ in 0..trailing {
+        if last + 1 >= have.len() || ends_sentence(&field, &have[last], Some(&have[last + 1])) {
+            break;
+        }
+        last += 1;
+        taken += 1;
+    }
+    if aligned + taken < needed {
+        return Alignment::NotFound;
     }
     let span: String = field[have[first].start..have[last].end]
         .chars()
@@ -281,5 +325,97 @@ mod tests {
             ),
             "send it to Kit"
         );
+    }
+
+    #[test]
+    fn a_replaced_last_word_stays_in_the_span() {
+        // Not one letter off, so it scores below zero and sits outside the core.
+        assert_eq!(
+            edited("send it to Hex", "send it to Hanks"),
+            "send it to Hex"
+        );
+        assert_eq!(
+            edited("send it to Hex and then more", "send it to Hanks"),
+            "send it to Hex"
+        );
+    }
+
+    #[test]
+    fn a_replaced_first_word_stays_in_the_span() {
+        assert_eq!(edited("Hex said hi", "Hanks said hi"), "Hex said hi");
+        assert_eq!(edited("Hex said", "Hanks said"), "Hex said");
+    }
+
+    #[test]
+    fn a_lone_word_replaced_by_a_lone_word() {
+        assert_eq!(edited("Hex", "Hanks"), "Hex");
+        assert_eq!(edited(" Hex.", "Hanks"), "Hex.");
+        assert_eq!(align("Hex and Rune", "Hanks"), Alignment::NotFound);
+    }
+
+    #[test]
+    fn the_span_stops_at_sentence_punctuation() {
+        // The word before the pasted sentence is not part of its replaced start.
+        assert_eq!(
+            edited("Earlier text. Hex said hi", "Hanks said hi"),
+            "Hex said hi"
+        );
+        assert_eq!(
+            edited("Hex said hi. Then more words.", "Hanks said hi"),
+            "Hex said hi."
+        );
+        // A last word replaced at the sentence end keeps its full stop but
+        // nothing after it.
+        assert_eq!(
+            edited("send it to Hex. Then more", "send it to Hanks"),
+            "send it to Hex."
+        );
+        assert_eq!(
+            edited("Done.\nsend it to Hex\nbye", "send it to Hanks"),
+            "send it to Hex"
+        );
+    }
+
+    /// The seeded protocol (`healing/healing/protocol.py`): this phrase is
+    /// dictated and its last word selected and typed over with one of these.
+    const PHRASE: &str = "send it to kip tomorrow";
+    const REPLACEMENTS: [&str; 7] = ["Kit", "Rune", "Friday", "Hex", "Sarah", "Monday", "banana"];
+
+    #[test]
+    fn every_protocol_replacement_lands_inside_the_span() {
+        let (head, _) = PHRASE.rsplit_once(' ').unwrap();
+        for pasted in [PHRASE.to_string(), "Send it to kip tomorrow.".to_string()] {
+            for replacement in REPLACEMENTS {
+                for field in [
+                    format!("{head} {replacement}"),
+                    format!("Send it to kip {replacement}."),
+                    format!("Earlier note. Send it to kip {replacement}"),
+                    format!("send it to kip {replacement}\nand then something new"),
+                ] {
+                    let span = edited(&field, &pasted);
+                    assert!(
+                        span.contains(replacement),
+                        "{replacement:?} fell outside {span:?} of {field:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_protocol_replacement_of_each_word_lands_inside_the_span() {
+        let words: Vec<&str> = PHRASE.split(' ').collect();
+        for at in 0..words.len() {
+            for replacement in REPLACEMENTS {
+                let mut field = words.clone();
+                field[at] = replacement;
+                let field = field.join(" ");
+                let span = edited(&field, PHRASE);
+                assert!(
+                    span.contains(replacement),
+                    "{replacement:?} fell outside {span:?} of {field:?}"
+                );
+            }
+        }
     }
 }
