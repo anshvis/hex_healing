@@ -76,7 +76,7 @@ def render(command: list[str], hex_path: Path, home: Path, log: Path) -> str:
 
 def install(hex_path: Path | None = None, directory: Path | None = None) -> Path:
     try:
-        binary = Path(hex_path or hex_binary()).resolve()
+        binary = Path(hex_path or hex_binary(prefer_installed=True)).resolve()
     except BenchError as error:
         raise ScheduleError(str(error)) from error
     if not binary.is_file():

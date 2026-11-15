@@ -265,7 +265,7 @@ def main(args) -> int:
         return 2
     results_path = directory / "results.json"
     try:
-        binary = Path(args.hex or hex_binary())
+        binary = Path(args.hex or hex_binary(prefer_installed=True))
     except BenchError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

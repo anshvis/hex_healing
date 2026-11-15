@@ -62,11 +62,16 @@ def parse_jsonl(text: str) -> BenchRun:
     return BenchRun(model, clips, summary)
 
 
-def hex_binary() -> Path:
-    """`$HEX_BIN`, else this checkout's release build, else the installed app."""
+def hex_binary(prefer_installed: bool = False) -> Path:
+    """`$HEX_BIN`, else this checkout's release build, else the installed app.
+
+    `prefer_installed` swaps the last two: reading History needs the Hex that writes it, and a
+    checkout's build may be from another branch that doesn't know its newer fields.
+    """
     named = os.environ.get("HEX_BIN")
     candidates = [Path(named)] if named else []
-    candidates += [repo_root() / "target" / "release" / "hex", INSTALLED_HEX]
+    builds = [repo_root() / "target" / "release" / "hex", INSTALLED_HEX]
+    candidates += builds[::-1] if prefer_installed else builds
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate

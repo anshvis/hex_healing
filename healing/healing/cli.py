@@ -205,7 +205,7 @@ def _status(args) -> int:
     try:
         budget = parse_size(args.budget)
         min_free = parse_size(args.min_free)
-        binary = Path(args.hex or hex_binary())
+        binary = Path(args.hex or hex_binary(prefer_installed=True))
     except (ValueError, BenchError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

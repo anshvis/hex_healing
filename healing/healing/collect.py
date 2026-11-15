@@ -279,7 +279,7 @@ def main_collect(since: str | None, hex_path: Path | None, min_free: int | None 
         if since is not None:
             check_since(since)
         try:
-            binary = Path(hex_path or hex_binary()).resolve()
+            binary = Path(hex_path or hex_binary(prefer_installed=True)).resolve()
         except BenchError as error:
             raise CollectError(str(error), 2) from error
         if not Path(binary).is_file():
