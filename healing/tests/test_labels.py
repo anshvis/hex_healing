@@ -61,10 +61,10 @@ def test_transitions_never_downgrade(store):
                      " reference_text = NULL WHERE clip_id = ?", (cid,))
     labels.label_all(store)
     assert label_of(store, cid) == ("strong", 1.0)
-    # strong stays strong when the evidence later reads weaker
+    # derived labels follow their evidence (collect demotes a changed correction before this runs)
     store.db.execute("UPDATE clips SET correction_outcome = 'unchanged' WHERE clip_id = ?", (cid,))
     labels.label_all(store)
-    assert row(store, cid)["label"] == "strong" and row(store, cid)["weight"] == 1.0
+    assert label_of(store, cid) == ("weak", 0.2)
     # any -> verified, and verified is never downgraded by the corrections
     review(store, cid, "accept", "send it to kit")
     labels.label_all(store)
@@ -192,3 +192,29 @@ def test_a_v5_dataset_migrates(tmp_path, monkeypatch):
     assert again.db.execute("PRAGMA user_version").fetchone()[0] == 6
     assert again.db.execute("SELECT COUNT(*) FROM split_members").fetchone()[0] == 0
     again.close()
+
+
+def test_acoustic_and_unmapped_together_stay_unlabelled(store):
+    cid = add_clip(store, 1, outcome="edited")
+    store.db.execute("UPDATE clips SET edited_text = 'Send it to Kit.' WHERE clip_id = ?", (cid,))
+    from healing import corrections
+
+    corrections.label_corrections(store)
+    store.db.execute(
+        "INSERT INTO edits (clip_id, idx, raw_from, final_from, to_text, kind) VALUES (?, 9, '', 'x', 'y', 'unmapped')",
+        (cid,),
+    )
+    labels.refresh(store)
+    assert label_of(store, cid) == ("unlabelled", 0)
+
+
+def test_label_corrections_stores_positions_and_never_the_label(store):
+    from healing import corrections
+
+    cid = add_clip(store, 1, outcome="edited")
+    store.db.execute("UPDATE clips SET edited_text = 'Send it to Kit.' WHERE clip_id = ?", (cid,))
+    corrections.label_corrections(store)
+    r = row(store, cid)
+    assert r["label"] == "unlabelled" and r["reference_text"] == "send it to kit" and r["edited_positions"] == "[[3, 4]]"
+    labels.refresh(store)
+    assert label_of(store, cid) == ("strong", 1.0)

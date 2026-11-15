@@ -157,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _label(args) -> int:
     from healing.collect import CollectError, check_since, since_to_ms
+    from healing import labels
     from healing.corrections import label_corrections
     from healing.store import Store, StoreError, now_ms, process_lock
 
@@ -171,6 +172,7 @@ def _label(args) -> int:
             store = Store()
             try:
                 counts = label_corrections(store, since_ms, args.recompute)
+                labels.refresh(store)  # the one label writer
             finally:
                 store.close()
     except CollectError as error:

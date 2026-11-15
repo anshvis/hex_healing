@@ -7,8 +7,9 @@
 | unlabelled   | never observed, unmapped edits, an OpenCode rewrite, or rejected | 0 |
 
 Labels derive from the `edits` table (T2.4's classifier; no second one) and the `reviews` table,
-so `label all` is a pure function of its evidence and running it twice changes nothing. `verified`
-and `strong` are never downgraded, except by rejecting a clip in a review.
+so `label all` is a pure function of its evidence and running it twice changes nothing. This is
+the one writer of `label`: `corrections.label_corrections` stores edits, `reference_text` and
+`edited_positions` only. A `verified` clip is never downgraded, except by rejecting it in a review.
 
 Weak references are the model's own output, and so are a strong clip's untouched words, so they
 never gate (AC-7): gating sets take `verified` references only.
@@ -16,16 +17,14 @@ never gate (AC-7): gating sets take `verified` references only.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from collections import Counter
 
-from healing import corrections, wer
+from healing import corrections
 from healing.store import Store
 
 WEIGHTS = {"strong": 1.0, "verified": 1.0, "weak": 0.2, "unlabelled": 0.0}
 LABELS = tuple(WEIGHTS)
-_RANK = {"unlabelled": 0, "weak": 1, "strong": 2, "verified": 3}
 
 # A clip's audio exists on disk and the index agrees.
 HAS_AUDIO = (
@@ -53,29 +52,16 @@ def derive(row: sqlite3.Row, kinds: set[str], review: sqlite3.Row | None) -> tup
     if outcome == "unchanged" and not row["rewritten"]:
         return "weak", row["raw_text"], None
     if outcome == "edited" and not row["rewritten"]:
+        if "unmapped" in kinds:
+            return "unlabelled", None, None  # an edit we can't place: the reference may be wrong
         if "acoustic" in kinds:
             return "strong", row["reference_text"], None
-        if "unmapped" in kinds or row["reference_text"] is None:
-            return "unlabelled", None, None
+        if row["classified_at_ms"] is None:
+            return "unlabelled", None, None  # not classified yet
         # Only rewrites: you changed your mind, but the speech was heard right.
         return "weak", row["raw_text"], None
     # Never observed, lost, or an OpenCode rewrite produced the pasted text.
     return "unlabelled", None, None
-
-
-def edited_positions(row: sqlite3.Row) -> list[list[int]] | None:
-    """Word spans [start, end) of `reference_text` (in `wer.normalized_words` order) that you fixed."""
-    edits = corrections.find_edits(row["raw_text"], row["final_text"], row["edited_text"] or "")
-    text, spans = corrections.reference_with_spans(row["raw_text"], edits)
-    if text != row["reference_text"] or not spans:
-        return None  # classified under other thresholds: `label corrections --recompute` first
-    words = wer.word_spans(text)
-    positions = []
-    for start, end in spans:
-        covered = [i for i, (_, a, b) in enumerate(words) if a < end and b > start]
-        if covered:
-            positions.append([covered[0], covered[-1] + 1])
-    return positions or None
 
 
 def refresh(store: Store, clip_ids: list[str] | None = None) -> Counter:
@@ -95,15 +81,15 @@ def refresh(store: Store, clip_ids: list[str] | None = None) -> Counter:
         label, reference, strategy = derive(row, kinds.get(row["clip_id"], set()), review)
         rejected = review is not None and review["action"] == "reject"
         current = row["label"]
-        if not rejected and _RANK[current] >= _RANK["strong"] and _RANK[label] < _RANK[current]:
-            label, reference = current, row["reference_text"]  # never downgraded
+        if not rejected and current == "verified" and label != "verified":
+            label, reference = current, row["reference_text"]  # a confirmed clip is never downgraded
         weight = WEIGHTS[label]
         reference = reference if reference is not None else row["reference_text"]
-        positions = edited_positions(row) if label == "strong" else None
+        positions = row["edited_positions"] if label == "strong" else None
         db.execute(
             "UPDATE clips SET label = ?, weight = ?, reference_text = ?, edited_positions = ?,"
             " review_strategy = ? WHERE clip_id = ?",
-            (label, weight, reference, json.dumps(positions) if positions else None, strategy, row["clip_id"]),
+            (label, weight, reference, positions, strategy, row["clip_id"]),
         )
         counts[label] += 1
     db.commit()

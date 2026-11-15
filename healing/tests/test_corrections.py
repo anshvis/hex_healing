@@ -3,7 +3,7 @@ from pathlib import Path
 
 from healing import corrections
 from healing.cli import main
-from healing.corrections import find_edits, label_after, label_corrections, observation_report, reference_text
+from healing.corrections import find_edits, label_reset, label_corrections, observation_report, reference_text
 from healing.store import Store, clip_id
 
 from test_collect import world  # noqa: F401  (the fake-hex fixture)
@@ -63,12 +63,9 @@ def test_reference_keeps_what_the_person_typed():
     assert reference_text(raw, []) is None
 
 
-def test_label_after_is_the_one_rule():
-    assert label_after("unlabelled", True) == "strong"
-    assert label_after("verified", True) == "verified"
-    assert label_after("strong", False) == "unlabelled"
-    assert label_after("verified", False) == "verified"
-    assert label_after("unlabelled", False) == "unlabelled"
+def test_invalidation_drops_only_strong():
+    assert label_reset("strong") == "unlabelled"
+    assert [label_reset(x) for x in ("verified", "weak", "unlabelled")] == ["verified", "weak", "unlabelled"]
 
 
 def _entry(i, **extra):
@@ -108,9 +105,9 @@ def test_collect_stores_correction_and_label_corrections(world, capsys):  # noqa
     assert rows[1]["label"] == "unlabelled" and rows[1]["reference_text"] is None
     assert main(["label", "corrections"]) == 0
     rows = {r["hex_id"]: dict(r) for r in world.db().execute("SELECT * FROM clips")}
-    assert rows[4]["label"] == "strong" and rows[1]["label"] == "unlabelled"
-    # Processed, nothing acoustic: no reference, and not classified again.
-    assert rows[1]["reference_text"] is None and rows[1]["classified_at_ms"] is not None
+    assert rows[4]["label"] == "strong" and rows[1]["label"] == "weak"  # edited back to what Hex pasted
+    # Processed, nothing acoustic: weak, its reference what Hex heard, and not classified again.
+    assert rows[1]["reference_text"] == "send it to kip" and rows[1]["classified_at_ms"] is not None
     assert label_corrections(Store())["clips"] == 0
 
 

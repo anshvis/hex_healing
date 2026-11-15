@@ -255,6 +255,7 @@ def _store_entry(
         # Hex added or changed the correction: `label corrections` classifies it again.
         store.db.execute("DELETE FROM edits WHERE clip_id = ?", (existing["clip_id"],))
         changed["reference_text"] = None
+        changed["edited_positions"] = None
         changed["classified_at_ms"] = None
         if (label := label_reset(existing["label"])) != existing["label"]:
             changed["label"] = label
