@@ -181,9 +181,9 @@ def label_corrections(
     `backfill` also classifies again a clip classified before `edited_positions` existed (it has a
     reference and no positions), so a migrated dataset's strong clips reach the edited set.
 
-Writes the edits, `reference_text` and `edited_positions` only; `labels.refresh` is the one
-writer of `label`.
-"""
+    Writes the edits, `reference_text` and `edited_positions` only; `labels.refresh` is the one
+    writer of `label`.
+    """
     where = "correction_outcome = 'edited' AND edited_text IS NOT NULL AND rewritten = 0"
     parameters: list = []
     if not recompute:
