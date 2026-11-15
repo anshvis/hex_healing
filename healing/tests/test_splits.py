@@ -1157,3 +1157,27 @@ def test_a_transaction_in_flight_is_never_silently_committed(store):
             pass
     assert store.db.in_transaction  # untouched: still the caller's to commit or roll back
     store.db.rollback()
+
+
+def test_a_rebuild_in_the_same_second_gets_its_own_ids_and_leaves_no_old_folder(store, home):
+    build_world(store)
+    first = build_at(store)
+    second = build_at(store)  # the same clock second
+    assert second.rolling.split_id != first.rolling.split_id and second.rolling.split_id.startswith(first.rolling.split_id)
+    names = {p.name for p in (home / "sets").iterdir()}
+    assert second.rolling.split_id in names and first.rolling.split_id not in names
+    assert splits.verify(store) == []
+
+
+def test_a_failed_build_leaves_the_registry_and_removes_the_folders_it_wrote(store, home, monkeypatch):
+    build_world(store)
+    first = build_at(store)
+    monkeypatch.setattr(splits, "_register_general", lambda db, when: (_ for _ in ()).throw(RuntimeError("register broke")))
+    with pytest.raises(RuntimeError, match="register broke"):
+        build_at(store, 5000)
+    ids = {r[0] for r in store.db.execute("SELECT split_id FROM splits WHERE kind IN ('rolling', 'edited')")}
+    assert first.rolling.split_id in ids  # the registered sets are intact
+    on_disk = {p.name for p in (home / "sets").iterdir()}
+    assert on_disk == {first.rolling.split_id, first.edited.split_id}  # and nothing half-written is left
+    monkeypatch.undo()
+    assert splits.verify(store) == []
