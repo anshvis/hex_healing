@@ -126,9 +126,17 @@ unsafe extern "C" {
         port: *mut c_void,
         order: isize,
     ) -> *mut c_void;
-    fn CFRunLoopAddSource(run_loop: *mut c_void, source: *mut c_void, mode: *const c_void);
-    fn CFRunLoopRemoveSource(run_loop: *mut c_void, source: *mut c_void, mode: *const c_void);
-    fn CFRunLoopGetCurrent() -> *mut c_void;
+    pub(crate) fn CFRunLoopAddSource(
+        run_loop: *mut c_void,
+        source: *mut c_void,
+        mode: *const c_void,
+    );
+    pub(crate) fn CFRunLoopRemoveSource(
+        run_loop: *mut c_void,
+        source: *mut c_void,
+        mode: *const c_void,
+    );
+    pub(crate) fn CFRunLoopGetCurrent() -> *mut c_void;
     fn CFRunLoopRun();
     fn CFRunLoopStop(run_loop: *mut c_void);
     fn CFRunLoopTimerCreate(
@@ -223,6 +231,14 @@ impl DiscardCause {
 }
 
 impl InputEvent {
+    /// Return or the keypad's Enter going down.
+    pub fn is_return_down(self) -> bool {
+        matches!(
+            self,
+            Self::Key { code, down: true, .. } if hotkey::RETURN_KEY_CODES.contains(&code)
+        )
+    }
+
     pub fn is_escape_down(self) -> bool {
         matches!(
             self,

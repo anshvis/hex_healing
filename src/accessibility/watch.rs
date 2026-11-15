@@ -6,10 +6,11 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
 use super::{
-    AxUiElementRef, CfObject, CfRange, CfStringRef, CfTypeRef, Keep, RetainedElement, cf_string,
-    cf_string_literal, copy_number, copy_range, copy_text_for_range, foreign_application,
-    is_secure_text_field,
+    AxUiElementRef, CFGetTypeID, CFStringGetLength, CFStringGetTypeID, CfObject, CfRange,
+    CfStringRef, CfTypeRef, Keep, RetainedElement, cf_string, cf_string_literal, copy_number,
+    copy_range, copy_text_for_range, fetch_attribute, foreign_application, is_secure_text_field,
 };
+use crate::suppression::{CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRemoveSource};
 
 /// Why a bounded read of the field gave no text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,33 +29,45 @@ const AX_ERROR_INVALID_UI_ELEMENT: i32 = -25202;
 const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25205;
 const AX_ERROR_NO_VALUE: i32 = -25212;
 
-unsafe extern "C" {
-    fn AXUIElementCopyAttributeValue(
-        element: AxUiElementRef,
-        attribute: CfStringRef,
-        value: *mut CfTypeRef,
-    ) -> i32;
-}
-
 /// An attribute with its failure kept: `Ok(None)` when the element has none.
 fn read_attribute(
     element: &CfObject,
     name: &std::ffi::CStr,
 ) -> Result<Option<CfObject>, ReadError> {
-    let attribute = CfObject(cf_string_literal(name).ok_or(ReadError::Timeout)?);
-    let mut value = std::ptr::null();
-    // SAFETY: both objects are live and `value` receives a retained object.
-    let status = unsafe { AXUIElementCopyAttributeValue(element.0, attribute.0, &mut value) };
+    let (status, value) = fetch_attribute(element, name).ok_or(ReadError::Timeout)?;
     match status {
-        0 if !value.is_null() => Ok(Some(CfObject(value))),
-        0 | AX_ERROR_NO_VALUE | AX_ERROR_ATTRIBUTE_UNSUPPORTED => Ok(None),
+        0 => Ok(value),
+        AX_ERROR_NO_VALUE | AX_ERROR_ATTRIBUTE_UNSUPPORTED => Ok(None),
         AX_ERROR_INVALID_UI_ELEMENT => Err(ReadError::ElementGone),
         _ => Err(ReadError::Timeout),
     }
 }
 
+/// `max_chars` of a field of `characters` UTF-16 units around the caret (half
+/// before, half after).
+fn read_around_caret(
+    element: &CfObject,
+    characters: i64,
+    max_chars: usize,
+) -> Result<String, ReadError> {
+    let caret = copy_range(element, c"AXSelectedTextRange").ok_or(ReadError::TooLarge)?;
+    let start = (caret.location - (max_chars / 2) as isize).max(0);
+    let length = (characters as isize - start).min(max_chars as isize);
+    copy_text_for_range(
+        element,
+        CfRange {
+            location: start,
+            length,
+        },
+        Keep::Head,
+    )
+    .ok_or(ReadError::Timeout)
+}
+
 /// The field's text: the whole `AXValue` when it has at most `max_chars`
-/// characters, else `max_chars` around the caret (half before, half after).
+/// characters, else `max_chars` around the caret. The size is known before
+/// any text is copied: from `AXNumberOfCharacters`, else from the value's
+/// `CFStringGetLength`.
 pub fn read_value_bounded(
     element: &RetainedElement,
     max_chars: usize,
@@ -67,29 +80,21 @@ pub fn read_value_bounded(
     if let Some(characters) = copy_number(element, c"AXNumberOfCharacters")
         && characters > max_chars as i64
     {
-        let caret = copy_range(element, c"AXSelectedTextRange").ok_or(ReadError::TooLarge)?;
-        let start = (caret.location - (max_chars / 2) as isize).max(0);
-        let length = (characters as isize - start).min(max_chars as isize);
-        return copy_text_for_range(
-            element,
-            CfRange {
-                location: start,
-                length,
-            },
-            Keep::Head,
-        )
-        .ok_or(ReadError::Timeout);
+        return read_around_caret(element, characters, max_chars);
     }
     let Some(value) = read_attribute(element, c"AXValue")? else {
         return Ok(String::new());
     };
-    let Some(text) = cf_string(value.0) else {
+    // SAFETY: `value` is a live Core Foundation object.
+    if unsafe { CFGetTypeID(value.0) != CFStringGetTypeID() } {
         return Ok(String::new());
-    };
-    if text.chars().count() > max_chars {
-        return Err(ReadError::TooLarge);
     }
-    Ok(text)
+    // SAFETY: the type was checked as a string just above.
+    let length = unsafe { CFStringGetLength(value.0) }.max(0);
+    if length as usize > max_chars {
+        return read_around_caret(element, length as i64, max_chars);
+    }
+    Ok(cf_string(value.0).unwrap_or_default())
 }
 
 /// What an observer reported.
@@ -122,16 +127,11 @@ unsafe extern "C" {
         notification: CfStringRef,
     ) -> i32;
     fn AXObserverGetRunLoopSource(observer: AxObserverRef) -> CfTypeRef;
-    fn CGEventSourceKeyState(state: u32, key: u16) -> bool;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     static kCFRunLoopDefaultMode: CfStringRef;
-    fn CFRunLoopGetCurrent() -> *mut c_void;
-    // `source` is `*mut` to match `suppression.rs`'s declaration of the same symbols.
-    fn CFRunLoopAddSource(run_loop: *mut c_void, source: *mut c_void, mode: CfStringRef);
-    fn CFRunLoopRemoveSource(run_loop: *mut c_void, source: *mut c_void, mode: CfStringRef);
     fn CFRunLoopRunInMode(mode: CfStringRef, seconds: f64, return_after_source: u8) -> i32;
 }
 
@@ -148,14 +148,17 @@ unsafe extern "C" fn deliver(
     let inbox = unsafe { &*(refcon as *const Inbox) };
     let kind = match cf_string(notification).as_deref() {
         Some("AXValueChanged") => Notification::ValueChanged,
-        Some("AXFocusedUIElementChanged") => Notification::FocusChanged,
+        Some("AXFocusedUIElementChanged" | "AXApplicationDeactivated") => {
+            Notification::FocusChanged
+        }
         _ => return,
     };
     inbox.lock().unwrap_or_else(|e| e.into_inner()).push(kind);
 }
 
 /// An `AXObserver` on one target app for its element's value changes and
-/// the app's focus changes. Its source runs on the run loop of the thread
+/// the app's focus changes and deactivation (switching away from the app
+/// leaves its focused element as it was). Its source runs on the run loop of the thread
 /// that created it; callbacks fire only while that thread runs the loop
 /// ([`run_loop_once`]). Dropping it unregisters everything.
 pub struct Observer {
@@ -188,30 +191,18 @@ impl Observer {
             element,
             inbox,
         };
-        let value = cf_string_literal(c"AXValueChanged")?;
-        let focus = cf_string_literal(c"AXFocusedUIElementChanged")?;
-        let (value, focus) = (CfObject(value), CfObject(focus));
-        // SAFETY: the refcon outlives every registration (see `Drop`).
-        let (added_value, added_focus) = unsafe {
-            (
-                AXObserverAddNotification(
-                    this.observer.0,
-                    this.element.0,
-                    value.0,
-                    inbox as *mut _,
-                ),
-                AXObserverAddNotification(
-                    this.observer.0,
-                    this.application.0,
-                    focus.0,
-                    inbox as *mut _,
-                ),
-            )
-        };
         // The value registration is best effort: a field that refuses it is
         // still read on focus out, Return and the deadline.
-        let _ = added_value;
-        if added_focus != 0 && added_value != 0 {
+        let mut registered = 0;
+        for (target, name) in this.registrations() {
+            let name = CfObject(cf_string_literal(name)?);
+            // SAFETY: the refcon outlives every registration (see `Drop`).
+            let status = unsafe {
+                AXObserverAddNotification(this.observer.0, target.0, name.0, inbox as *mut _)
+            };
+            registered += usize::from(status == 0);
+        }
+        if registered == 0 {
             return None;
         }
         // SAFETY: the source is owned by the observer and not retained here.
@@ -224,6 +215,15 @@ impl Observer {
         this.source = source;
         this.run_loop = run_loop;
         Some(this)
+    }
+
+    /// Each notification and the object it is registered on.
+    fn registrations(&self) -> [(&CfObject, &'static std::ffi::CStr); 3] {
+        [
+            (&self.element, c"AXValueChanged"),
+            (&self.application, c"AXFocusedUIElementChanged"),
+            (&self.application, c"AXApplicationDeactivated"),
+        ]
     }
 
     /// Everything reported since the last call.
@@ -242,10 +242,7 @@ impl Drop for Observer {
                 CFRunLoopRemoveSource(self.run_loop, self.source.cast_mut(), kCFRunLoopDefaultMode)
             };
         }
-        for (target, name) in [
-            (&self.element, c"AXValueChanged"),
-            (&self.application, c"AXFocusedUIElementChanged"),
-        ] {
+        for (target, name) in self.registrations() {
             if let Some(name) = cf_string_literal(name).map(CfObject) {
                 // SAFETY: both are live; failure (an element gone) is fine.
                 unsafe { AXObserverRemoveNotification(self.observer.0, target.0, name.0) };
@@ -261,12 +258,4 @@ impl Drop for Observer {
 pub fn run_loop_once(seconds: f64) -> bool {
     // SAFETY: the default mode constant is always valid.
     unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, 0) != 1 }
-}
-
-/// Whether Return or keypad Enter is down now. A key-state query, not an
-/// event tap: it needs no Input Monitoring and sees no other key.
-pub fn return_down() -> bool {
-    // SAFETY: `kCGEventSourceStateCombinedSessionState` is 1; 0x24 and 0x4C
-    // are Return and keypad Enter.
-    unsafe { CGEventSourceKeyState(1, 0x24) || CGEventSourceKeyState(1, 0x4C) }
 }

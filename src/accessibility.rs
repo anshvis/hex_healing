@@ -6,9 +6,7 @@ use std::time::{Duration, Instant};
 use crate::dictation::caret_text::{Keep, bounded_units};
 
 mod watch;
-pub use watch::{
-    Notification, Observer, ReadError, read_value_bounded, return_down, run_loop_once,
-};
+pub use watch::{Notification, Observer, ReadError, read_value_bounded, run_loop_once};
 
 type CfTypeRef = *const c_void;
 type CfStringRef = *const c_void;
@@ -577,12 +575,19 @@ fn bounded_element(element: AxUiElementRef) -> Option<CfObject> {
         .then_some(element)
 }
 
-fn copy_attribute(element: &CfObject, name: &CStr) -> Option<CfObject> {
+/// An attribute and the status that came with it, for a caller that tells
+/// failures apart (`None` when the name itself can't be made).
+fn fetch_attribute(element: &CfObject, name: &CStr) -> Option<(i32, Option<CfObject>)> {
     let attribute = CfObject(cf_string_literal(name)?);
     let mut value = ptr::null();
     let status = unsafe { AXUIElementCopyAttributeValue(element.0, attribute.0, &mut value) };
     // `then`, not `then_some`: dropping a `CfObject(null)` would CFRelease(NULL).
-    (status == 0 && !value.is_null()).then(|| CfObject(value))
+    let value = (status == 0 && !value.is_null()).then(|| CfObject(value));
+    Some((status, value))
+}
+
+fn copy_attribute(element: &CfObject, name: &CStr) -> Option<CfObject> {
+    fetch_attribute(element, name)?.1
 }
 
 fn copy_element(element: &CfObject, name: &CStr) -> Option<CfObject> {
