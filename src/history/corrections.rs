@@ -19,7 +19,8 @@ pub struct HistoryCorrection {
     /// `unchanged`, `edited`, or `lost`.
     pub outcome: String,
     /// Why it was lost (`element_gone`, `secure`, `too_large`,
-    /// `span_not_found`, `read_timeout`, `cleared_before_read`).
+    /// `span_not_found`, `read_timeout`, `read_failed`,
+    /// `cleared_before_read`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Milliseconds from the paste to the read this comes from.
@@ -57,24 +58,29 @@ impl HistoryStore {
         correction.edited_text = correction
             .edited_text
             .map(|text| truncated(&text, MAX_TEXT_BYTES));
+        // Retention may have gone Off since the paste: keep nothing.
+        if !self.records() {
+            return Ok(false);
+        }
         let Some(index) = self.entries.iter().position(|entry| entry.id == id) else {
             return Ok(false);
         };
         if self.entries[index].correction.is_some() {
             return Ok(false);
         }
-        let previous = self.entries[index].clone();
+        let before = self.entries.clone();
         self.entries[index].correction = Some(correction);
         // The added text may take the store past its byte cap: prune, then
         // save once.
         self.prune(now_ms());
         if let Err(error) = self.persist() {
-            if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
-                *entry = previous;
-            }
+            self.entries = before;
             return Err(error);
         }
-        Ok(true)
+        Ok(self
+            .entries
+            .iter()
+            .any(|entry| entry.id == id && entry.correction.is_some()))
     }
 }
 
@@ -250,5 +256,26 @@ mod tests {
         assert!(store.observe_correction(id, edited("x")).unwrap());
         assert!(store.restore_version(id, 0).unwrap());
         assert_eq!(store.entry(id).unwrap().correction, None);
+    }
+
+    #[test]
+    fn nothing_is_kept_while_retention_is_off_and_a_failed_save_restores_everything() {
+        let (path, mut store) = store("off");
+        let id = store.record(draft("hello"), now_ms()).unwrap().unwrap();
+        store
+            .set_retention(HistoryRetention::Off, now_ms())
+            .unwrap();
+        assert!(!store.observe_correction(id, edited("Hullo")).unwrap());
+        store
+            .set_retention(HistoryRetention::Week, now_ms())
+            .unwrap();
+        assert_eq!(store.entry(id).unwrap().correction, None);
+        // A save that cannot happen (the folder is a file) restores the entries.
+        let blocked = path.with_file_name("blocked");
+        std::fs::write(&blocked, "").unwrap();
+        store.path = blocked.join("history.json");
+        assert!(store.observe_correction(id, edited("Hullo")).is_err());
+        assert_eq!(store.entry(id).unwrap().correction, None);
+        assert_eq!(store.len(), 1);
     }
 }
