@@ -46,12 +46,13 @@ listener bumps, as for YOLO mode's Escape; no key-state poll, no event tap of
 its own) that left the field empty or shorter, or 30 s. The kept read is the
 last one in which the field still held the pasted text, so a chat field
 cleared by send still yields the edit: for a second after a Return (Cmd+Return
-included) the field going blank, shorter, or holding other text ends the watch
-with the read kept at the Return, because the app clears the field a moment
+included) the field going blank, shorter, or holding text that is not the paste
+ends the watch with the read kept at the Return (the paste still there, changed
+or not, is an ordinary read: a notes app's newline, then a fix), because the app clears the field a moment
 after the listener counts the Return. A field that goes blank with no Return
-(a send button, or select all and delete, which cannot be told apart) is
-`cleared_before_read`: a send button without a Return loses the observation,
-which is the training-safe side. Outside that second, a read that finds other,
+for two ticks (100 ms, so a Return the listener counts a moment late converts
+it) is `cleared_before_read`: a send button, or select all and delete, which
+cannot be told apart, loses the observation, which is the training-safe side. Outside that second, a read that finds other,
 non-empty text drops the kept read. A field with no string value
 (a web view, a terminal) is `read_failed`, never an empty one, and a field over
 8,192 characters is read around the caret and can show the paste whole or not
@@ -65,26 +66,49 @@ starts when the paste completes, not after History's write. Outcome IDs:
 `return`, `timeout`. The log line carries those IDs, a character count and
 milliseconds only.
 
-Where to look (`locate.rs`). Before the paste, Hex reads the field's caret
-(`AXSelectedTextRange`, `AXNumberOfCharacters`), so it knows the paste's offset
-and, with the selection it replaces, how long the field is with it in. That is
-the anchor.
+**Invariant: fail closed.** Hex stores only text inside the paste's own region
+in the current field (what now occupies the place the pasted text occupied,
+plus a token that touches its edge, for a replaced edge word) and never text
+from before or after it. When unsure the answer is "not found" or "unchanged".
+No edit is stored before the paste has been seen whole in the field.
+`property_tests.rs` checks it over 4,000 generated cases: the paste in a field
+between corpus sentences (some sharing its words, some empty, some with
+attachments, emoji or CJK), put through edits of one word, two, a trailing two
+words, replacement and deletion of the paste, text typed before and after it, a
+second dictation, a Return and a newline then a fix, and a cleared field. The
+stored span never leaves the region (plus one token), a deleted paste stores
+nothing, and the one-word, two-word and trailing replacements are stored
+exactly. Before the anchor rework the same run stored text outside the region
+in 448 cases and from a deleted paste in 489.
+
+Where to look (`locate.rs`). Before the paste, Hex reads the caret
+(`AXSelectedTextRange`'s location, in UTF-16 units, which is where a paste
+starts); with the paste's length that is the anchor.
 
 - Anchored. The anchor is trusted once a read shows the paste whole at that
-  offset (a read before that only reports the paste unchanged, never an edit:
-  with no position to trust there is no evidence of one). A paste found in the
-  field but not at the offset means the app counts differently, so the watch
-  falls back to the strict rules below. From then on only the field's region at
-  the anchor is judged, so text anywhere else in the field can never match, and
-  position is evidence enough to call a one-word replacement an edit ("Hanks" to
-  "Hex", "Yes" to "No", two words for two, a trailing word for three). The region
-  moves with the field's length: an edit before the paste shifts it and an edit
-  inside stretches it, both are tried, and the one that holds more of the paste
-  wins (a tie goes to the smaller region). Intact at the anchor is unchanged
-  whatever else the field says; the same text elsewhere does not count. An empty
-  region is the paste deleted, which is `span_not_found` (nothing to learn
-  from). Offsets are UTF-16 units, as Accessibility counts. A field read as a
-  window (over 8,192 characters) is judged only if the window holds the region.
+  offset (until then a read only reports the paste unchanged or not found,
+  never an edit). A paste found in the field but not at the offset is waited on
+  for half a second (the read may have come before the app applied the paste),
+  then the anchor is given up and the strict rules below apply. Once landed,
+  the paste's region is followed through every read by diffing the field
+  against the read before: text inserted or removed before the region moves it,
+  a change inside stretches or shrinks it, one after it leaves it (so text typed
+  after an edit is never part of it), an insertion at its start counts as
+  before and at its end as after, and a change that crosses an edge, or that
+  could as well have been made on either side of one (text typed before the
+  paste that begins with the paste's first letters), loses it. Only the field's
+  text in the region is judged. Intact in the region is unchanged, whatever
+  else the field says, and the same text elsewhere does not count. For a paste
+  of one or two words, position is evidence: whatever now sits in the region
+  is what it became ("Hanks" to "Hex", "Yes" to "No", two words for two, a
+  trailing word for three). A longer paste must still resemble itself: half its
+  words (exact or near) in order, two of them exact. An empty region is the paste
+  deleted, and the paste wholly replaced by unrelated words, both
+  `span_not_found`. Two changes in one read (typed before and edited inside)
+  lose the region; one change per read, which is what polling at the tick
+  gives, is followed. Offsets are UTF-16 units, attachment placeholders
+  (U+FFFC) keep their place in the text, and a field read as a window (over
+  8,192 characters) cannot be followed.
 - Strict, with no anchor (the app reports no selection range) or one that did
   not hold. A token-level local alignment of the pasted text against the whole
   field: a one-letter-off word of three or more letters is a near match, so
@@ -98,7 +122,16 @@ the anchor.
   core, so the span extends one field token over it, never across sentence
   punctuation or a line break. Whole words only: "Yes" is not found in
   "Yesterday", and a one-word paste is an edit only when the field is that one
-  word. It cannot tell a text pasted twice apart while one copy is intact.
+  word. It cannot tell a text pasted twice apart while one copy is intact, and
+  an app that clears the field a tick after Return with the next message typed
+  in the same tick cannot be told from an edit.
+
+Known limits, stated plainly: a send button without a Return loses the
+observation (the field going blank looks like delete-all); text without
+whitespace (CJK) is one token, so it is effectively unsupported; a window over
+8,192 characters is never followed; two changes in one read lose the anchored
+region; the strict fallback is the only protection for apps that report no
+caret, with the measured rate below.
 
 Precision, measured on a corpus of 36 unrelated chat sentences, every ordered
 pair (1,260): the strict rules store 14 as edits (1.1%); anchored, none, and an
