@@ -23,10 +23,14 @@ DEFAULT_GGUF = (
 )
 
 
+class BaselineError(RuntimeError):
+    pass
+
+
 def baseline(model: Path, model_id: str, output: Path) -> dict:
     document = eval_run.evaluate([model], ["general"], vocabulary="none")
     if "general" in document["unavailable_sets"]:
-        raise SystemExit(document["unavailable_sets"]["general"])
+        raise BaselineError(document["unavailable_sets"]["general"])
     scores = document["scores"][str(model)]["general"]
     (ref,) = document["sets"]
     result = {

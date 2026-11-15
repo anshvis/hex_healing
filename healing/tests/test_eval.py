@@ -412,3 +412,9 @@ def test_the_general_set_has_no_format_counts(world):
     document = evaluate(world, ["a.gguf"], ["general"], vocabulary="none")
     rows = document["per_clip"][str(world.models["a.gguf"])]["general"]
     assert all(r["format_errors"] is None and r["format_words"] is None for r in rows)
+
+
+def test_baseline_without_a_general_set_is_an_error_the_cli_reports(world, capsys):
+    world.settings({})
+    assert main(["eval", "baseline", "--model", str(world.models["a.gguf"])]) == 1
+    assert "no general set" in capsys.readouterr().err

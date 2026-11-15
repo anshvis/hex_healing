@@ -401,12 +401,13 @@ def _subset(args) -> int:
 def _baseline(args) -> int:
     from healing.eval import baseline
     from healing.eval.bench import BenchError
+    from healing.eval.run import EvalError
 
     model = args.model or baseline.DEFAULT_GGUF
     model_id = args.model_id or (baseline.DEFAULT_MODEL_ID if args.model is None else model.stem)
     try:
         result = baseline.baseline(model, model_id, args.output or baseline.default_output())
-    except BenchError as error:
+    except (BenchError, EvalError, baseline.BaselineError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2))

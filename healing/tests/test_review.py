@@ -150,3 +150,9 @@ def test_an_uncertain_review_does_not_shrink_the_random_frame(store):
     assert {r["clip_id"] for r in review.candidates(store, "random")} == {a, b}
     store.db.execute("INSERT INTO reviews (clip_id, reviewed_at_ms, action, text, strategy) VALUES (?, 1, 'reject', NULL, 'random')", (b,))
     assert {r["clip_id"] for r in review.candidates(store, "random")} == {a}
+
+
+def test_a_cutoff_without_since_cutoff_is_an_error(store):
+    add_clip(store, 1, raw="clip number 1 says hello there")
+    with pytest.raises(review.ReviewError, match="--cutoff only means something"):
+        drive(store, Script(), n=1, cutoff_ms=BASE_MS)

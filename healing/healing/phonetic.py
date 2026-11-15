@@ -11,9 +11,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from healing import wer
-
 from metaphone import doublemetaphone
+
+from healing import wer
 
 CHAR_MAX = 0.6
 PHONE_MAX = 0.5

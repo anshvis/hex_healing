@@ -7,7 +7,8 @@ stored number. The eval JSON keeps per-clip records for the paired bootstrap and
 
 Scores per set:
 - `wer`: the benchmark's own (case and punctuation stripped); n/a on the edited set, whose references
-  are mostly the model's own untouched words (AC-7: strong clips are scored only at edited positions);
+  are mostly the model's own untouched words (AC-7: strong clips are scored only at edited positions).
+  Which scores a set gets is `SCORING`, one policy per set;
 - `format_error_rate`: errors over whitespace tokens that keep case and punctuation (so it sees a
   model that forgot a comma); n/a on the general set, whose references are unformatted;
 - `term_error_rate`: 1 - the benchmark's `term_recall`;
@@ -27,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from healing import labels
 from healing import manifest as manifest_module
 from healing import splits
 from healing.eval.bench import (
@@ -39,7 +41,23 @@ from healing.wer import matched_positions, normalized_words, surface_errors
 
 SET_NAMES = ("rolling", "golden", "general", "edited")
 VOCABULARY_MODES = ("current", "none")
-UNFORMATTED = {"general"}  # LibriSpeech and AMI references carry no casing or punctuation
+
+
+@dataclass(frozen=True)
+class Scoring:
+    """What a set's references are good for, so scoring asks the policy and never the set's name."""
+
+    whole_reference: bool  # WER over every reference word (false: the strong clips' own words are the model's)
+    formatted: bool  # references carry casing and punctuation, so the format error rate means something
+    edited_words: bool  # score the words you corrected, and only those
+
+
+SCORING = {
+    "rolling": Scoring(whole_reference=True, formatted=True, edited_words=False),
+    "golden": Scoring(whole_reference=True, formatted=True, edited_words=False),
+    "general": Scoring(whole_reference=True, formatted=False, edited_words=False),  # LibriSpeech and AMI are unformatted
+    "edited": Scoring(whole_reference=False, formatted=False, edited_words=True),
+}
 
 
 class EvalError(RuntimeError):
@@ -124,11 +142,11 @@ def resolve_set(name: str, store: Store | None) -> SetRef | Unavailable:
 def _why_empty(store: Store, name: str) -> str:
     if name == "rolling":
         return "it needs random-verified clips in the window; run `healing review --since-cutoff`"
-    strong = store.db.execute("SELECT COUNT(*) FROM clips WHERE label = 'strong'").fetchone()[0]
+    strong = store.db.execute(f"SELECT COUNT(*) FROM clips c WHERE c.label = 'strong' AND {labels.USABLE}").fetchone()[0]
     if not strong:
         return "there are no strong clips yet (edits you made that sound like what Hex heard)"
     unplaced = store.db.execute(
-        "SELECT COUNT(*) FROM clips WHERE label = 'strong' AND edited_positions IS NULL").fetchone()[0]
+        f"SELECT COUNT(*) FROM clips c WHERE c.label = 'strong' AND c.edited_positions IS NULL AND {labels.USABLE}").fetchone()[0]
     if unplaced:
         return f"{unplaced} of {strong} strong clips have no edited positions; run `healing label all`"
     return f"{strong} strong clips exist, but none is inside the window and outside the golden, general and trained clusters"
@@ -159,8 +177,7 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict], dict
     manifest = json.loads(ref.manifest.read_text())
     definitions = {c["id"]: c for c in manifest["clips"]}
     sidecar = _sidecar(ref.folder)
-    edited_set = ref.name == "edited"
-    formatted = ref.name not in UNFORMATTED and not edited_set
+    policy = SCORING[ref.name]
     per_clip, term_hits = [], []
     format_errors = format_words = span_errors = span_positions = 0
     for record in first.clips:
@@ -169,18 +186,18 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict], dict
         terms = definition.get("expected_terms", [])
         hit = [t for t in terms if manifest_module.term_count(transcript, t) > 0]
         term_hits += [{"id": record["id"], "term": t, "hit": t in hit} for t in terms]
-        errors, words = surface_errors(definition["expected"], transcript) if formatted else (None, None)
+        errors, words = surface_errors(definition["expected"], transcript) if policy.formatted else (None, None)
         format_errors, format_words = format_errors + (errors or 0), format_words + (words or 0)
         row = {
             "id": record["id"], "terms_hit": hit, "terms_expected": terms, "transcript": transcript,
             # A strong clip's reference is the model's own words outside the edited ones, so the
             # whole-reference counts would reward agreeing with oneself: not recorded for edited.
-            "word_errors": None if edited_set else record["word_errors"],
-            "reference_words": None if edited_set else record["reference_words"],
+            "word_errors": record["word_errors"] if policy.whole_reference else None,
+            "reference_words": record["reference_words"] if policy.whole_reference else None,
             "format_errors": errors, "format_words": words,
         }
         positions = sidecar.get(record["id"], {}).get("edited_positions")
-        if edited_set and positions:
+        if policy.edited_words and positions:
             matched = matched_positions(normalized_words(definition["expected"]), normalized_words(transcript))
             wrong = sum(1 for start, end in positions for i in range(start, end) if not matched[i])
             total = sum(end - start for start, end in positions)
@@ -189,9 +206,9 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict], dict
         per_clip.append(row)
     recall = first.summary["quality"].get("term_recall")
     scores = {
-        "wer": None if edited_set else first.summary["wer"],
-        "word_errors": None if edited_set else first.summary["word_errors"],
-        "ref_words": None if edited_set else first.summary["reference_words"],
+        "wer": first.summary["wer"] if policy.whole_reference else None,
+        "word_errors": first.summary["word_errors"] if policy.whole_reference else None,
+        "ref_words": first.summary["reference_words"] if policy.whole_reference else None,
         "format_error_rate": format_errors / format_words if format_words else None,
         "term_error_rate": None if recall is None else 1 - recall,
         "term_hits": term_hits,
@@ -200,9 +217,9 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict], dict
         "load_ms": first.summary.get("load_ms"),
     }
     sources = {r["id"]: r["source"] for r in sidecar.values() if "source" in r}
-    if sources and not edited_set:
+    if sources and policy.whole_reference:
         scores["wer_by_source"] = wer_by_source(first, sources)
-    span = {"errors": span_errors, "positions": span_positions} if edited_set else None
+    span = {"errors": span_errors, "positions": span_positions} if policy.edited_words else None
     return scores, per_clip, span
 
 
