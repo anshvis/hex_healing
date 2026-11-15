@@ -7,7 +7,7 @@ use crate::dictation::caret_text::{Keep, bounded_units};
 
 mod watch;
 pub use watch::{
-    Caret, FieldText, Notification, Observer, ReadError, caret, read_value_bounded, run_loop_once,
+    FieldText, Notification, Observer, ReadError, caret, read_value_bounded, run_loop_once,
 };
 
 type CfTypeRef = *const c_void;

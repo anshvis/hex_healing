@@ -16,11 +16,13 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::accessibility::{self, Caret, RetainedElement};
+use crate::accessibility::{self, RetainedElement};
 use crate::dictation::key_counts;
 use crate::history::History;
 
 mod locate;
+#[cfg(test)]
+mod property_tests;
 use locate::Anchor;
 mod session;
 mod worker;
@@ -54,11 +56,12 @@ pub struct PasteTarget {
 pub struct Pending {
     pid: i32,
     element: RetainedElement,
-    caret: Option<Caret>,
+    /// Where the caret is (a paste starts there), if the app says.
+    caret: Option<usize>,
 }
 
 impl Pending {
-    pub fn new(pid: i32, element: RetainedElement, caret: Option<Caret>) -> Self {
+    pub fn new(pid: i32, element: RetainedElement, caret: Option<usize>) -> Self {
         Self {
             pid,
             element,
@@ -134,8 +137,7 @@ impl Watch {
     }
 
     /// The paste completed now, having put `inserted` in the field. The
-    /// caret read before it says where that is: the paste's offset, and how
-    /// long the field is with it in.
+    /// caret read before it says where that is.
     pub fn pasted(&mut self, inserted: String) {
         let State::Before(pending) = std::mem::replace(&mut self.0, State::Off) else {
             return;
@@ -143,11 +145,9 @@ impl Watch {
         if inserted.is_empty() {
             return;
         }
-        let len = inserted.encode_utf16().count();
-        let anchor = pending.caret.map(|caret| Anchor {
-            start: caret.location,
-            len,
-            total: (caret.characters + len).saturating_sub(caret.selected),
+        let anchor = pending.caret.map(|start| Anchor {
+            start,
+            len: inserted.encode_utf16().count(),
         });
         let landed = Landed {
             inserted,
@@ -228,7 +228,7 @@ static QUEUE: Queue = Queue(Mutex::new(VecDeque::new()));
 
 /// A History over a throwaway file, for tests.
 #[cfg(test)]
-fn history_for_test() -> History {
+pub(crate) fn history_for_test() -> History {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let directory = std::env::temp_dir().join(format!(
         "hex-correction-watch-{}-{}",
@@ -299,7 +299,7 @@ mod tests {
     }
 
     struct Fake {
-        caret: Option<Caret>,
+        caret: Option<usize>,
         submitted: Vec<PasteTarget>,
     }
 
@@ -332,31 +332,19 @@ mod tests {
     #[test]
     fn the_target_carries_what_was_pasted_when_and_where() {
         let history = history_for_test();
-        let caret = Caret {
-            location: 10,
-            selected: 3,
-            characters: 40,
-        };
         let mut fake = Fake {
-            caret: Some(caret),
+            caret: Some(10),
             submitted: Vec::new(),
         };
         let mut watch = Watch::before(&mut fake, Some(&history));
         std::thread::sleep(std::time::Duration::from_millis(20));
-        // A three-character selection is replaced by a six-character paste.
+        // A six-character paste at the caret.
         watch.pasted(" hello".into());
         let State::Pasted(_, landed) = &watch.0 else {
             panic!("the paste is noted");
         };
         let pasted_at = landed.at;
-        assert_eq!(
-            landed.anchor,
-            Some(Anchor {
-                start: 10,
-                len: 6,
-                total: 43
-            })
-        );
+        assert_eq!(landed.anchor, Some(Anchor { start: 10, len: 6 }));
         std::thread::sleep(std::time::Duration::from_millis(20));
         let mut again = Watch::before(&mut fake, Some(&history));
         again.pasted(" hello".into());

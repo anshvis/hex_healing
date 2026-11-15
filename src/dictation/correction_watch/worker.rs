@@ -79,29 +79,50 @@ impl Active {
         }
     }
 
-    /// What happened since the last tick, ending with the tick.
+    /// What happened since the last tick.
     fn events(&mut self, now: Instant) -> Vec<Event> {
-        let mut events: Vec<Event> = Vec::new();
-        for notification in self.observer.iter().flat_map(Observer::drain) {
-            events.push(match notification {
-                Notification::ValueChanged => Event::ValueChanged,
-                Notification::FocusChanged => Event::FocusOut,
-            });
-        }
-        if self.poll_at.is_some_and(|at| at <= now) {
-            self.poll_at = Some(now + POLL);
-            events.push(Event::ValueChanged);
-        }
-        // A burst inside one tick is one read of where the field ended.
-        events.dedup_by(|a, b| *a == Event::ValueChanged && *b == Event::ValueChanged);
+        // The Return count is sampled before the notifications are drained:
+        // the listener counts a Return before the app handles it, so any
+        // clear it causes is in the notifications that follow.
         let count = key_counts::returns();
-        if count != self.returns {
-            self.returns = count;
-            events.push(Event::Return);
+        let returned = count != self.returns;
+        self.returns = count;
+        let notifications: Vec<Notification> =
+            self.observer.iter().flat_map(Observer::drain).collect();
+        let polled = self.poll_at.is_some_and(|at| at <= now);
+        if polled {
+            self.poll_at = Some(now + POLL);
         }
-        events.push(Event::Tick);
-        events
+        order(returned, notifications, polled)
     }
+}
+
+/// The events of one tick, in the order the session needs: a Return first
+/// (it enters the send window before the clear it causes is read), then what
+/// the observer reported, a burst of value changes as one read of where the
+/// field ended (a field that reports no changes is `polled` instead), then
+/// the tick.
+fn order(
+    returned: bool,
+    notifications: impl IntoIterator<Item = Notification>,
+    polled: bool,
+) -> Vec<Event> {
+    let mut events = Vec::new();
+    if returned {
+        events.push(Event::Return);
+    }
+    for notification in notifications {
+        events.push(match notification {
+            Notification::ValueChanged => Event::ValueChanged,
+            Notification::FocusChanged => Event::FocusOut,
+        });
+    }
+    if polled {
+        events.push(Event::ValueChanged);
+    }
+    events.dedup_by(|a, b| *a == Event::ValueChanged && *b == Event::ValueChanged);
+    events.push(Event::Tick);
+    events
 }
 
 fn run() {
@@ -129,15 +150,15 @@ fn run() {
         let now = Instant::now();
         active.retain_mut(|watched| {
             let events = watched.events(now);
-            match advance(
+            match feed(
                 &mut watched.session,
                 events,
                 now,
                 &crate::labs::learn_from_corrections,
             ) {
-                Advance::Watching => true,
-                Advance::Dropped => false,
-                Advance::Observed(seen) => {
+                Step::Wait => true,
+                Step::Drop => false,
+                Step::Done(seen) => {
                     keep(&watched.history, watched.entry_id, seen);
                     false
                 }
@@ -146,28 +167,20 @@ fn run() {
     }
 }
 
-enum Advance {
-    Watching,
-    /// The gate closed: stop without a result.
-    Dropped,
-    Observed(CorrectionObservation),
-}
-
-/// Feeds `session` its `events` at `now`.
-fn advance<F: Field>(
+/// Feeds `session` its `events` at `now`; the first step that is not a wait.
+fn feed<F: Field>(
     session: &mut Session<F>,
     events: impl IntoIterator<Item = Event>,
     now: Instant,
     gate: &dyn Fn() -> bool,
-) -> Advance {
+) -> Step {
     for event in events {
         match session.step(now, event, gate) {
             Step::Wait => {}
-            Step::Drop => return Advance::Dropped,
-            Step::Done(seen) => return Advance::Observed(seen),
+            step => return step,
         }
     }
-    Advance::Watching
+    Step::Wait
 }
 
 /// Stores `seen` on its History entry. Counts and outcome IDs are logged,
@@ -215,8 +228,6 @@ mod tests {
             Ok(FieldText {
                 text: self.0.get().to_string(),
                 windowed: false,
-                offset: 0,
-                total: self.0.get().encode_utf16().count(),
             })
         }
     }
@@ -236,31 +247,110 @@ mod tests {
         assert_eq!(QUEUE.len(), 0);
     }
 
+    const OPEN: &dyn Fn() -> bool = &|| true;
+
+    fn at(t0: Instant, ms: u64) -> Instant {
+        t0 + Duration::from_millis(ms)
+    }
+
+    /// A session over `field` that has seen the paste whole and then its edit.
+    fn edited<'a>(field: &'a Cell<&'static str>, t0: Instant) -> Session<Fake<'a>> {
+        let mut session = Session::new(Fake(field), "send it to Kip".into(), t0, None);
+        field.set("send it to Kip");
+        assert_eq!(
+            feed(&mut session, order(false, [], false), at(t0, 50), OPEN),
+            Step::Wait
+        );
+        field.set("send it to Kit");
+        let changed = order(false, [Notification::ValueChanged], false);
+        assert_eq!(feed(&mut session, changed, at(t0, 1_000), OPEN), Step::Wait);
+        session
+    }
+
+    fn kept(step: Step) -> CorrectionObservation {
+        match step {
+            Step::Done(seen) => seen,
+            other => panic!("expected the watch to end, got {other:?}"),
+        }
+    }
+
     #[test]
     fn a_send_ends_the_watch_with_the_last_edited_read() {
-        let field = Cell::new("send it to Kit");
+        let field = Cell::new("");
         let t0 = now();
-        let mut session = Session::new(Fake(&field), "send it to Kip".into(), t0, None);
-        let gate: &dyn Fn() -> bool = &|| true;
-        let step = |session: &mut Session<Fake>, events: &[Event], ms| {
-            advance(
-                session,
-                events.iter().copied(),
-                t0 + Duration::from_millis(ms),
-                gate,
-            )
-        };
-        assert!(matches!(
-            step(&mut session, &[Event::ValueChanged, Event::Tick], 1_000),
-            Advance::Watching
-        ));
+        let mut session = edited(&field, t0);
         field.set("");
-        let Advance::Observed(seen) = step(&mut session, &[Event::Return, Event::Tick], 2_000)
-        else {
-            panic!("a cleared field on Return ends the watch");
-        };
+        let seen = kept(feed(
+            &mut session,
+            order(true, [], false),
+            at(t0, 2_000),
+            OPEN,
+        ));
         assert_eq!(seen.outcome, Outcome::Edited("send it to Kit".into()));
         assert_eq!(seen.trigger, Trigger::ValueChanged);
+    }
+
+    #[test]
+    fn a_return_and_its_clear_in_one_drain_are_read_in_that_order() {
+        let notifications = [Notification::ValueChanged, Notification::FocusChanged];
+        assert_eq!(
+            order(true, notifications, false),
+            [
+                Event::Return,
+                Event::ValueChanged,
+                Event::FocusOut,
+                Event::Tick
+            ]
+        );
+        assert_eq!(
+            order(
+                false,
+                [Notification::ValueChanged, Notification::ValueChanged],
+                true
+            ),
+            [Event::ValueChanged, Event::Tick],
+            "a burst, and a poll on top of it, is one read"
+        );
+        // With the Return first the clear that follows it in the same drain
+        // is the app clearing after a send: the edit is kept.
+        let field = Cell::new("");
+        let t0 = now();
+        let mut session = edited(&field, t0);
+        field.set("");
+        let events = order(true, [Notification::ValueChanged], false);
+        let seen = kept(feed(&mut session, events, at(t0, 2_000), OPEN));
+        assert_eq!(seen.outcome, Outcome::Edited("send it to Kit".into()));
+    }
+
+    #[test]
+    fn a_return_one_tick_after_its_clear_still_makes_it_a_send() {
+        let field = Cell::new("");
+        let t0 = now();
+        let mut session = edited(&field, t0);
+        // The clear is read on one tick, the Return the listener counts on the next.
+        field.set("");
+        let first = order(false, [Notification::ValueChanged], false);
+        assert_eq!(feed(&mut session, first, at(t0, 2_000), OPEN), Step::Wait);
+        let seen = kept(feed(
+            &mut session,
+            order(true, [], false),
+            at(t0, 2_050),
+            OPEN,
+        ));
+        assert_eq!(seen.outcome, Outcome::Edited("send it to Kit".into()));
+        // Without a Return the grace passes and it is lost.
+        let field = Cell::new("");
+        let mut session = edited(&field, t0);
+        field.set("");
+        let first = order(false, [Notification::ValueChanged], false);
+        assert_eq!(feed(&mut session, first, at(t0, 2_000), OPEN), Step::Wait);
+        let seen = kept(feed(
+            &mut session,
+            order(false, [], false),
+            at(t0, 2_150),
+            OPEN,
+        ));
+        assert_eq!(seen.outcome, Outcome::Lost(Lost::ClearedBeforeRead));
     }
 
     #[test]
@@ -269,8 +359,8 @@ mod tests {
         let t0 = now();
         let mut session = Session::new(Fake(&field), "send it".into(), t0, None);
         let closed: &dyn Fn() -> bool = &|| false;
-        let result = advance(&mut session, [Event::ValueChanged], t0, closed);
-        assert!(matches!(result, Advance::Dropped));
+        let step = feed(&mut session, [Event::ValueChanged], t0, closed);
+        assert_eq!(step, Step::Drop);
         assert_eq!(session.reads(), 0);
     }
 
@@ -279,11 +369,8 @@ mod tests {
         let field = Cell::new("");
         let t0 = now();
         let mut session = Session::new(Fake(&field), "send it".into(), t0, None);
-        let gate: &dyn Fn() -> bool = &|| true;
-        let result = advance(&mut session, [Event::Return, Event::ValueChanged], t0, gate);
-        let Advance::Observed(seen) = result else {
-            panic!("ends on the first Return");
-        };
+        let step = feed(&mut session, [Event::Return, Event::ValueChanged], t0, OPEN);
+        let seen = kept(step);
         assert_eq!(seen.outcome, Outcome::Lost(Lost::ClearedBeforeRead));
         assert_eq!(session.reads(), 1);
     }

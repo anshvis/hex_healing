@@ -2,16 +2,25 @@
 //! the field, this decides whether the text is still there, and if not,
 //! which span of the field replaced it.
 //!
+//! The invariant is to fail closed: only text inside the paste's own region
+//! in the current field is ever reported (what now occupies the place the
+//! pasted text occupied, plus a token that touches its edge), never text from
+//! before or after it. When unsure the answer is `NotFound` or `Unchanged`.
+//!
 //! Two ways to look, by what is known about where the paste went:
 //!
-//! - **Anchored** ([`landing`], [`align_at`]): the caret was read before the
-//!   paste, so the paste's offset in the field is known. Once the paste has
-//!   been seen where it was put (`Landing::Landed`), only the field's region
-//!   at that offset is judged, so text elsewhere in the field can never
-//!   match, and position is evidence enough to call a one- or two-word
-//!   replacement an edit. The region moves with the field's length: an edit
-//!   before the paste shifts it, an edit inside stretches it; both are tried
-//!   and the one that holds more of the paste wins.
+//! - **Anchored** ([`landing`], [`follow`], [`judge`]): the caret was read
+//!   before the paste, so the paste's offset in the field is known. Once a
+//!   read shows the paste whole there ([`landing`] gives its [`Region`]), the
+//!   region is followed through every later read by diffing the field against
+//!   the read before ([`follow`]): text typed before it shifts it, typing
+//!   inside it stretches it, typing after it leaves it alone, and a change
+//!   that crosses its edge loses it. Only the field's text in that region is
+//!   judged ([`judge`]), so text anywhere else can never match, and for a
+//!   paste of one or two words position is evidence enough to call whatever
+//!   now sits there what the paste became. Longer pastes need the strict
+//!   floor below, inside the region. An empty region (the paste deleted) is
+//!   `NotFound`.
 //! - **Strict** ([`align`]): no anchor (the app exposes no selection range),
 //!   or one that did not hold. A token-level Smith-Waterman of the inserted
 //!   tokens against the whole field's. An exact token scores +2; a near one
@@ -23,8 +32,11 @@
 //!   core and the span extends one field token over it, never across
 //!   sentence punctuation. A lone word is found whole, or is the whole field.
 //!
-//! Tokens split on whitespace and fold case and punctuation, so text without
-//! spaces (CJK) is one token and effectively unsupported.
+//! Neither reports an edit until the paste has been seen whole (the caller
+//! checks). Tokens split on whitespace and on U+FFFC (attachments keep their
+//! place in the text, so offsets match the app's) and fold case and
+//! punctuation, so text without spaces (CJK) is one token and effectively
+//! unsupported.
 
 /// How the inserted text sits in the field.
 #[derive(Debug, Eq, PartialEq)]
@@ -79,7 +91,7 @@ fn tokens(text: &str) -> Vec<Token> {
         }
     };
     for (at, c) in text.char_indices() {
-        match (c.is_whitespace(), open) {
+        match (is_space(c), open) {
             (false, None) => open = Some((at, at16)),
             (true, Some(from)) => {
                 flush(from, (at, at16), &mut out);
@@ -125,14 +137,16 @@ fn score(inserted: &Token, field: &Token) -> i32 {
     }
 }
 
-/// `text` without object-replacement characters (attachments).
-fn strip(text: &str) -> String {
-    text.replace('\u{FFFC}', "")
+/// An attachment's placeholder in the text.
+const ATTACHMENT: char = '\u{FFFC}';
+
+fn is_space(c: char) -> bool {
+    c.is_whitespace() || c == ATTACHMENT
 }
 
 /// Whether `text` holds nothing a person typed.
 pub fn is_blank(text: &str) -> bool {
-    strip(text).trim().is_empty()
+    text.chars().all(is_space)
 }
 
 /// Whether a sentence ends in `token`, or on the line break before the next.
@@ -243,10 +257,8 @@ fn capped(field: &str, from: usize, to: usize, inserted: &str) -> String {
 /// more than a read takes): it can show the paste whole, or not at all,
 /// never an edit of it.
 pub fn align(field: &str, inserted: &str, windowed: bool) -> Alignment {
-    let field = strip(field);
-    let inserted = strip(inserted);
     let inserted = inserted.trim();
-    let (want, have) = (tokens(inserted), tokens(&field));
+    let (want, have) = (tokens(inserted), tokens(field));
     if want.is_empty() || have.is_empty() {
         return Alignment::NotFound;
     }
@@ -285,17 +297,17 @@ pub fn align(field: &str, inserted: &str, windowed: bool) -> Alignment {
     let (mut first, mut last) = (core.first, core.last);
     // One inserted token left over at an end stands for the field token the
     // person typed over it.
-    if core.leading > 0 && first > 0 && !ends_sentence(&field, &have[first - 1], Some(&have[first]))
+    if core.leading > 0 && first > 0 && !ends_sentence(field, &have[first - 1], Some(&have[first]))
     {
         first -= 1;
     }
     if core.trailing > 0
         && last + 1 < have.len()
-        && !ends_sentence(&field, &have[last], Some(&have[last + 1]))
+        && !ends_sentence(field, &have[last], Some(&have[last + 1]))
     {
         last += 1;
     }
-    Alignment::Edited(capped(&field, have[first].start, have[last].end, inserted))
+    Alignment::Edited(capped(field, have[first].start, have[last].end, inserted))
 }
 
 /// The strict floor: the core alone covers half the text by exact and near
@@ -309,202 +321,194 @@ fn accepted(core: &Core, want: &[Token], needed: usize) -> bool {
         && core.trailing <= 1
 }
 
-/// A read of the field with where it sits in the whole field.
-pub struct View<'a> {
-    pub text: &'a str,
-    /// UTF-16 units of the field before `text` (a window around the caret
-    /// starts after the beginning).
-    pub offset: usize,
-    /// UTF-16 units in the whole field.
-    pub total: usize,
-    pub windowed: bool,
-}
-
-/// Where the paste went, read before it: the caret's offset, the paste's
-/// length, and how long the field then was, all in UTF-16 units.
+/// Where the paste went, read before it: the caret's offset and the paste's
+/// length, in UTF-16 units (what Accessibility counts in).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Anchor {
     pub start: usize,
     pub len: usize,
-    /// The field's length with the paste in it; set from the first read that
-    /// finds the paste where it was put, and the reference for how far the
-    /// region has moved since.
-    pub total: usize,
+}
+
+/// The paste's place in the field, `[from, to)` in UTF-16 units.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Region {
+    pub from: usize,
+    pub to: usize,
 }
 
 /// Whether a read shows the paste where it was put.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Landing {
-    /// The paste, whole, at the anchor.
-    Landed,
-    /// The paste is in the field, but not at the anchor: the offset is
-    /// not in this app's units, or the paste went elsewhere.
+    /// The paste, whole, at the anchor: its region.
+    Landed(Region),
+    /// The paste is in the field, but not at the anchor: the offset is not in
+    /// this app's units, or the read came before the app applied the paste.
     Elsewhere,
     /// Not there (yet).
     Absent,
 }
 
-/// The two places the paste's region can be: edits before it shift it, edits
-/// inside it stretch it. `(from, to)` in UTF-16 units of the whole field.
-fn regions(anchor: &Anchor, total: usize) -> [(i64, i64); 2] {
-    let delta = total as i64 - anchor.total as i64;
-    let (start, end) = (anchor.start as i64, (anchor.start + anchor.len) as i64);
-    [
-        (start, (end + delta).max(start)),
-        ((start + delta).max(0), (end + delta).max(0)),
-    ]
+/// The tokens that overlap `region`.
+fn tokens_in(have: &[Token], region: Region) -> &[Token] {
+    let overlaps = |t: &Token| t.u16_end > region.from && t.u16_start < region.to;
+    match (
+        have.iter().position(overlaps),
+        have.iter().rposition(overlaps),
+    ) {
+        (Some(from), Some(to)) => &have[from..=to],
+        _ => &[],
+    }
 }
 
-/// The field tokens inside `region`, if a window holds all of it.
-fn tokens_in<'a>(
-    have: &'a [Token],
-    view: &View,
-    text_u16: usize,
-    region: (i64, i64),
-) -> Option<&'a [Token]> {
-    let offset = view.offset as i64;
-    if view.windowed && (region.0 < offset || region.1 > offset + text_u16 as i64) {
-        return None;
-    }
-    let inside = |t: &Token| {
-        (t.u16_end as i64 + offset) > region.0 && (t.u16_start as i64 + offset) < region.1
+fn same_words(a: &[Token], b: &[Token]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.fold == b.fold)
+}
+
+/// Whether `text` shows `inserted` where `anchor` says it went.
+pub fn landing(text: &str, inserted: &str, anchor: &Anchor) -> Landing {
+    let (have, want) = (tokens(text), tokens(inserted.trim()));
+    let region = Region {
+        from: anchor.start,
+        to: anchor.start + anchor.len,
     };
-    let from = have.iter().position(inside)?;
-    let to = have.iter().rposition(inside)?;
-    Some(&have[from..=to])
-}
-
-fn utf16_len(text: &str) -> usize {
-    text.encode_utf16().count()
-}
-
-/// Whether `view` shows `inserted` where `anchor` says it went.
-pub fn landing(view: &View, inserted: &str, anchor: &Anchor) -> Landing {
-    let (text, inserted) = (strip(view.text), strip(inserted));
-    let (want, have) = (tokens(inserted.trim()), tokens(&text));
-    if !contains_run(&have, &want) {
-        return Landing::Absent;
-    }
-    let view = View {
-        text: &text,
-        ..*view
-    };
-    let u16s = utf16_len(&text);
-    let landed = regions(
-        &Anchor {
-            total: view.total,
-            ..*anchor
-        },
-        view.total,
-    )
-    .into_iter()
-    .filter_map(|region| tokens_in(&have, &view, u16s, region))
-    .any(|region| contains_run(region, &want));
-    if landed {
-        Landing::Landed
-    } else {
-        Landing::Elsewhere
-    }
-}
-
-/// What sits at the anchor now, once the paste has landed there: the field's
-/// region, not the whole field. An empty region is the paste deleted (nothing
-/// to learn from); text there that is not the paste is what it was changed to.
-pub fn align_at(view: &View, inserted: &str, anchor: &Anchor) -> Alignment {
-    let (text, inserted) = (strip(view.text), strip(inserted));
-    let inserted = inserted.trim();
-    let (want, have) = (tokens(inserted), tokens(&text));
     if want.is_empty() {
+        Landing::Absent
+    } else if same_words(tokens_in(&have, region), &want) {
+        Landing::Landed(region)
+    } else if contains_run(&have, &want) {
+        Landing::Elsewhere
+    } else {
+        Landing::Absent
+    }
+}
+
+/// Where `region` of `before` is in `after`, from the one change between
+/// them (their common prefix and suffix bound it): text inserted or removed
+/// before the region moves it, a change inside it stretches or shrinks it,
+/// one after it leaves it, and an insertion at its start counts as before it
+/// and one at its end as after. `None` when the change crosses an edge, or
+/// when the same change could as well have been made on either side of one
+/// (text typed before the paste that begins with what the paste begins with
+/// is also an insertion a few characters in): the text that went with the
+/// paste is then not known.
+pub fn follow(before: &str, after: &str, region: Region) -> Option<Region> {
+    if before == after {
+        return Some(region);
+    }
+    let (b, a): (Vec<u16>, Vec<u16>) = (
+        before.encode_utf16().collect(),
+        after.encode_utf16().collect(),
+    );
+    let shorter = b.len().min(a.len());
+    let prefix = b.iter().zip(&a).take_while(|(x, y)| x == y).count();
+    let suffix_alone = b
+        .iter()
+        .rev()
+        .zip(a.iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    let suffix = suffix_alone.min(shorter - prefix);
+    // The change could have been made this many units earlier, as well.
+    let slide = (prefix + suffix_alone).saturating_sub(shorter);
+    let (from, to) = (region.from, region.to);
+    let shift = |at: usize| (at + a.len()).saturating_sub(b.len());
+    let moved = Region {
+        from: shift(from),
+        to: shift(to),
+    };
+    let place = |changed_from: usize, changed_to: usize| {
+        if changed_from == changed_to {
+            // Pure insertion.
+            return Some(match changed_from {
+                at if at <= from => moved,
+                at if at >= to => region,
+                _ => Region { from, to: moved.to },
+            });
+        }
+        if changed_to <= from {
+            Some(moved)
+        } else if changed_from >= to {
+            Some(region)
+        } else if from <= changed_from && changed_to <= to {
+            Some(Region { from, to: moved.to })
+        } else {
+            None
+        }
+    };
+    let (changed_from, changed_to) = (prefix, b.len() - suffix);
+    let placed = place(changed_from, changed_to);
+    (0..=slide)
+        .all(|back| place(changed_from - back, changed_to - back) == placed)
+        .then_some(placed)
+        .flatten()
+}
+
+/// What `text` says of the paste now, from its region alone. An empty region
+/// is the paste deleted: nothing to learn from.
+pub fn judge(text: &str, inserted: &str, region: Region) -> Alignment {
+    let inserted = inserted.trim();
+    let (have, want) = (tokens(text), tokens(inserted));
+    if want.is_empty() || region.from >= region.to {
         return Alignment::NotFound;
     }
-    let u16s = utf16_len(&text);
-    let view = View {
-        text: &text,
-        ..*view
+    let found = tokens_in(&have, region);
+    if found.is_empty() {
+        return Alignment::NotFound;
+    }
+    if contains_run(found, &want) {
+        return Alignment::Unchanged;
+    }
+    let edited = || {
+        Alignment::Edited(capped(
+            text,
+            found[0].start,
+            found[found.len() - 1].end,
+            inserted,
+        ))
     };
-    let mut best: Option<Judged> = None;
-    for (n, region) in regions(anchor, view.total).into_iter().enumerate() {
-        let Some(found) = tokens_in(&have, &view, u16s, region) else {
-            continue;
+    if want.len() <= 2 {
+        // Position is evidence: one or two words now sitting where the paste
+        // went are what it became, if they did not grow far past it.
+        return if found.len() <= want.len() + 4 {
+            edited()
+        } else {
+            Alignment::NotFound
         };
-        // The first region is an edit inside the paste, the second one before.
-        let Some(judged) = judge(&text, found, &want, inserted, n == 0) else {
-            continue;
-        };
-        // Ties go to the smaller region, then to the first.
-        if best.as_ref().is_none_or(|held| judged.beats(held)) {
-            best = Some(judged);
+    }
+    // A longer paste must still resemble itself: half its words (exact or
+    // near) in order, two of them exact, inside the region. Where the edited
+    // words sit does not matter here: the region is already the paste's.
+    if want.len().saturating_mul(found.len()) > MAX_CELLS {
+        return Alignment::NotFound;
+    }
+    let same = |a: &Token, b: &Token| score(a, b) > 0;
+    let exact = |a: &Token, b: &Token| a.fold == b.fold;
+    if common_run(&want, found, same) >= want.len().div_ceil(2)
+        && common_run(&want, found, exact) >= 2
+    {
+        edited()
+    } else {
+        Alignment::NotFound
+    }
+}
+
+/// The most words of `want` that follow each other, in order, among `have`
+/// (the longest common subsequence under `same`).
+fn common_run(want: &[Token], have: &[Token], same: impl Fn(&Token, &Token) -> bool) -> usize {
+    let mut row = vec![0_usize; have.len() + 1];
+    for w in want {
+        let mut diagonal = 0;
+        for (j, h) in have.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = if same(w, h) {
+                diagonal + 1
+            } else {
+                above.max(row[j])
+            };
+            diagonal = above;
         }
     }
-    best.map_or(Alignment::NotFound, |judged| judged.alignment)
-}
-
-/// One region against the paste.
-struct Judged {
-    /// How much of the paste the region holds.
-    rank: usize,
-    tokens: usize,
-    alignment: Alignment,
-}
-
-impl Judged {
-    fn beats(&self, other: &Judged) -> bool {
-        (self.rank, std::cmp::Reverse(self.tokens)) > (other.rank, std::cmp::Reverse(other.tokens))
-    }
-}
-
-/// What a region says of the paste. `None` for an empty region, or one that
-/// shows nothing of the paste and is not the paste's own place.
-fn judge(
-    text: &str,
-    region: &[Token],
-    want: &[Token],
-    inserted: &str,
-    inside: bool,
-) -> Option<Judged> {
-    if region.is_empty() {
-        return None;
-    }
-    let judged = |rank, tokens: &[Token]| Judged {
-        rank,
-        tokens: tokens.len(),
-        alignment: Alignment::Edited(capped(
-            text,
-            tokens[0].start,
-            tokens[tokens.len() - 1].end,
-            inserted,
-        )),
-    };
-    if contains_run(region, want) {
-        return Some(Judged {
-            rank: usize::MAX,
-            tokens: region.len(),
-            alignment: Alignment::Unchanged,
-        });
-    }
-    let core = (want.len() > 1)
-        .then(|| fill(want, region).and_then(|m| traceback(&m, want, region)))
-        .flatten();
-    let Some(core) = core else {
-        // Position is evidence: a lone word, or text with nothing in common,
-        // now sitting where the paste went is what it became. Only for an
-        // edit inside the paste, and only if the region did not grow far
-        // past it.
-        return (inside && region.len() <= want.len() + 2).then(|| judged(0, region));
-    };
-    if inside {
-        // The region is the paste, however far its edits stretched it.
-        return Some(judged(core.aligned, region));
-    }
-    // Before it, the region also holds text the shift brought in: keep the
-    // core and what the paste had left over at an end.
-    let first = if core.leading > 0 { 0 } else { core.first };
-    let last = if core.trailing > 0 {
-        region.len() - 1
-    } else {
-        core.last
-    };
-    Some(judged(core.aligned, &region[first..=last]))
+    row[have.len()]
 }
 
 #[cfg(test)]
@@ -779,34 +783,47 @@ mod tests {
 
     // ---- anchored ----
 
-    fn view(text: &str) -> View<'_> {
-        View {
-            text,
-            offset: 0,
-            total: utf16_len(text),
-            windowed: false,
-        }
+    fn utf16_len(text: &str) -> usize {
+        text.encode_utf16().count()
     }
 
-    /// The anchor of `pasted` in the field as it first stood, `base`.
+    /// The anchor of `pasted` (its last copy) in the field as it first stood.
     fn anchor_of(base: &str, pasted: &str) -> Anchor {
         let at = base.rfind(pasted).expect("the paste is in the base field");
         Anchor {
             start: utf16_len(&base[..at]),
             len: utf16_len(pasted),
-            total: utf16_len(base),
         }
     }
 
-    /// What the field `now` says of `pasted`, which first stood in `base`.
+    /// What the field `now` says of `pasted`, which first stood in `base`,
+    /// the way a watch reads it: land it, follow its region, judge it.
     fn at(base: &str, pasted: &str, now: &str) -> Alignment {
         let anchor = anchor_of(base, pasted);
-        assert_eq!(
-            landing(&view(base), pasted, &anchor),
-            Landing::Landed,
-            "{base:?}"
-        );
-        align_at(&view(now), pasted, &anchor)
+        let Landing::Landed(region) = landing(base, pasted, &anchor) else {
+            panic!("{pasted:?} did not land in {base:?}");
+        };
+        match follow(base, now, region) {
+            Some(region) => judge(now, pasted, region),
+            None => Alignment::NotFound,
+        }
+    }
+
+    /// Like [`at`] over several reads, each followed from the last.
+    fn edited_in_steps(base: &str, pasted: &str, reads: &[&str]) -> String {
+        let anchor = anchor_of(base, pasted);
+        let Landing::Landed(mut region) = landing(base, pasted, &anchor) else {
+            panic!("{pasted:?} did not land in {base:?}");
+        };
+        let mut before = base;
+        for read in reads {
+            region = follow(before, read, region).expect("followed");
+            before = read;
+        }
+        match judge(before, pasted, region) {
+            Alignment::Edited(span) => span,
+            other => panic!("{reads:?}: {other:?}"),
+        }
     }
 
     fn edited_at(base: &str, pasted: &str, now: &str) -> String {
@@ -865,18 +882,48 @@ mod tests {
     }
 
     #[test]
+    fn text_typed_after_an_edit_is_not_the_edit() {
+        let base = "ok. send it to Kip";
+        // Typed after, in a later read: the region does not grow to hold it.
+        let edited = "ok. send it to Kit";
+        let typed = "ok. send it to Kit please also tell Bob";
+        let anchor = anchor_of(base, "send it to Kip");
+        let Landing::Landed(region) = landing(base, "send it to Kip", &anchor) else {
+            panic!()
+        };
+        let region = follow(base, edited, region).unwrap();
+        let region = follow(edited, typed, region).unwrap();
+        assert_eq!(
+            judge(typed, "send it to Kip", region),
+            Alignment::Edited("send it to Kit".into())
+        );
+    }
+
+    #[test]
     fn the_paste_deleted_whole_is_nothing_to_learn_from() {
         assert_eq!(
             at("hello Hanks bye", "Hanks", "hello bye"),
             Alignment::NotFound
         );
+        assert_eq!(
+            at("report to HR. Hanks", "Hanks", "report to HR."),
+            Alignment::NotFound
+        );
         assert_eq!(at("Hanks", "Hanks", ""), Alignment::NotFound);
+        // The paste and the text before it deleted: the region is lost.
+        assert_eq!(
+            at("report to HR. ok Hanks", "Hanks", "bye"),
+            Alignment::NotFound
+        );
+        // An empty region selects no token, even one it touches.
+        let text = "abcxyz";
+        let region = Region { from: 3, to: 3 };
+        assert_eq!(judge(text, "Hanks", region), Alignment::NotFound);
     }
 
     #[test]
     fn the_same_text_elsewhere_in_the_document_is_not_the_paste() {
         let base = "send it to Kip. Later: send it to Kip";
-        // The first copy is intact; the pasted one (at the end) was edited.
         assert_eq!(
             edited_at(
                 base,
@@ -885,7 +932,6 @@ mod tests {
             ),
             "send it to Kit"
         );
-        // Intact at the anchor stays unchanged, whatever the rest says.
         assert_eq!(
             at(
                 base,
@@ -903,66 +949,90 @@ mod tests {
             at(base, "send it to Kip", "Hello A. send it to Kip"),
             Alignment::Unchanged
         );
+        // Two changes in one read (before it and inside it) cross no edge a
+        // diff can place: the region is lost and nothing is reported.
         assert_eq!(
-            edited_at(base, "send it to Kip", "Hello there A. send it to Kit"),
+            at(base, "send it to Kip", "Hello there A. send it to Kit"),
+            Alignment::NotFound
+        );
+        // One read at a time, both are followed.
+        assert_eq!(
+            edited_in_steps(
+                base,
+                "send it to Kip",
+                &[
+                    "Hello there A. send it to Kip",
+                    "Hello there A. send it to Kit"
+                ]
+            ),
             "send it to Kit"
         );
-        // Text removed before it.
         let base = "Dear Bob, send it to Kip";
         assert_eq!(
             at(base, "send it to Kip", "Bob, send it to Kip"),
             Alignment::Unchanged
         );
         assert_eq!(
-            edited_at(base, "send it to Kip", "Bob, send it to Kit"),
+            edited_in_steps(
+                base,
+                "send it to Kip",
+                &["Bob, send it to Kip", "Bob, send it to Kit"]
+            ),
             "send it to Kit"
+        );
+    }
+
+    #[test]
+    fn a_paste_wholly_replaced_by_unrelated_words_is_not_an_edit() {
+        // Two words or fewer: position is evidence. Longer: it must resemble.
+        assert_eq!(
+            edited_at("ok. Hanks Smith", "Hanks Smith", "ok. it rains"),
+            "it rains"
+        );
+        assert_eq!(
+            at(
+                "ok. send it to Kip tomorrow",
+                "send it to Kip tomorrow",
+                "ok. the weather is nice"
+            ),
+            Alignment::NotFound
         );
     }
 
     #[test]
     fn an_anchor_that_is_not_where_the_paste_is_does_not_land() {
-        // Offsets in other units (or a paste that went elsewhere) never validate.
-        let anchor = Anchor {
-            start: 0,
-            len: 14,
-            total: 40,
-        };
+        let anchor = Anchor { start: 0, len: 14 };
         let field = "some other words first then send it to Kip";
         assert_eq!(
-            landing(&view(field), "send it to Kip", &anchor),
+            landing(field, "send it to Kip", &anchor),
             Landing::Elsewhere
         );
         assert_eq!(
-            landing(&view("nothing like it"), "send it to Kip", &anchor),
+            landing("nothing like it", "send it to Kip", &anchor),
             Landing::Absent
         );
     }
 
     #[test]
-    fn offsets_count_utf16_units() {
+    fn offsets_count_utf16_units_and_attachments_keep_their_place() {
         let base = "caf\u{e9} \u{1F600} send it to Kip";
         assert_eq!(
             edited_at(base, "send it to Kip", "caf\u{e9} \u{1F600} send it to Kit"),
             "send it to Kit"
         );
-    }
-
-    #[test]
-    fn a_window_that_misses_the_region_judges_nothing() {
-        let anchor = Anchor {
-            start: 9_000,
-            len: 14,
-            total: 10_000,
-        };
-        let view = View {
-            text: "words in a window far from it",
-            offset: 100,
-            total: 10_000,
-            windowed: true,
-        };
+        let base = "see \u{FFFC} attached. send it to Kip";
         assert_eq!(
-            align_at(&view, "send it to Kip", &anchor),
-            Alignment::NotFound
+            edited_at(
+                base,
+                "send it to Kip",
+                "see \u{FFFC} attached. send it to Kit"
+            ),
+            "send it to Kit"
+        );
+        let base = "\u{FFFC}\u{FFFC}send it to Kip";
+        assert_eq!(
+            edited_at(base, "send it to Kip", "\u{FFFC}\u{FFFC}send it to Kit"),
+            "send it to Kit"
         );
     }
 
@@ -1006,8 +1076,9 @@ mod tests {
     ];
 
     /// Unrelated chat sentences, every ordered pair: one in the field, the
-    /// other the paste. The fallback's false-edit count (the strict rules,
-    /// with no anchor) must not rise past what it was; anchored it is none.
+    /// other the paste. The strict rules' false-edit count (no anchor) must
+    /// not rise past what it was; anchored it is none, and an edit at the
+    /// anchor never carries the neighbouring text.
     #[test]
     fn the_unrelated_pair_corpus() {
         let (mut pairs, mut strict) = (0, 0);
@@ -1018,27 +1089,24 @@ mod tests {
                 }
                 pairs += 1;
                 strict += usize::from(matches!(align(field, pasted, false), Alignment::Edited(_)));
-                // Anchored: the paste landed at the end of the field, beside
-                // the unrelated text, and that text is never part of an edit.
                 let base = format!("{field} {pasted}");
                 let anchor = anchor_of(&base, pasted);
-                assert_eq!(landing(&view(&base), pasted, &anchor), Landing::Landed);
-                assert_eq!(
-                    align_at(&view(&base), pasted, &anchor),
-                    Alignment::Unchanged
-                );
+                let Landing::Landed(region) = landing(&base, pasted, &anchor) else {
+                    panic!("{field:?} / {pasted:?} did not land");
+                };
+                assert_eq!(judge(&base, pasted, region), Alignment::Unchanged);
                 let words: Vec<&str> = pasted.split(' ').collect();
                 let edited = format!("{field} {} Hex", words[..words.len() - 1].join(" "));
-                match align_at(&view(&edited), pasted, &anchor) {
+                let region = follow(&base, &edited, region).unwrap();
+                match judge(&edited, pasted, region) {
                     Alignment::Edited(span) => assert!(
                         !span.contains(field) && span.ends_with("Hex"),
                         "{field:?} leaked into {span:?}"
                     ),
                     other => panic!("{field:?} / {pasted:?}: {other:?}"),
                 }
-                // Never validated: a field that does not hold the paste at
-                // all (the unrelated sentence alone) is not a landing.
-                assert_ne!(landing(&view(field), pasted, &anchor), Landing::Landed);
+                // A field without the paste is no landing at all.
+                assert_ne!(landing(field, pasted, &anchor), Landing::Landed(region));
             }
         }
         assert_eq!(pairs, 1260);
@@ -1047,4 +1115,11 @@ mod tests {
     }
 
     const STRICT_FALSE_EDITS: usize = 14;
+
+    #[test]
+    fn a_huge_paste_is_not_aligned() {
+        let field = "word ".repeat(3_000);
+        let pasted = "other ".repeat(40_000);
+        assert_eq!(align(&field, &pasted, false), Alignment::NotFound);
+    }
 }

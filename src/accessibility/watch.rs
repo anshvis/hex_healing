@@ -36,31 +36,18 @@ pub struct FieldText {
     pub text: String,
     /// Only a window around the caret: the field held more than a read takes.
     pub windowed: bool,
-    /// UTF-16 units of the field before `text`.
-    pub offset: usize,
-    /// UTF-16 units in the whole field.
-    pub total: usize,
 }
 
-/// Where the caret is, in UTF-16 units: its location, how much is selected
-/// (a paste replaces it), and how long the field is.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Caret {
-    pub location: usize,
-    pub selected: usize,
-    pub characters: usize,
+/// Where the caret is: the location of `AXSelectedTextRange`, in UTF-16
+/// units, which is where a paste starts (it replaces any selection).
+fn caret_of(element: &CfObject) -> Option<usize> {
+    usize::try_from(copy_range(element, c"AXSelectedTextRange")?.location).ok()
 }
 
-/// The caret of `element`, or `None` when the app reports no selection
-/// range or no character count (then nothing is known of where text goes).
-pub fn caret(element: &RetainedElement) -> Option<Caret> {
-    let range = copy_range(&element.0, c"AXSelectedTextRange")?;
-    let characters = copy_number(&element.0, c"AXNumberOfCharacters")?;
-    Some(Caret {
-        location: usize::try_from(range.location).ok()?,
-        selected: usize::try_from(range.length).ok()?,
-        characters: usize::try_from(characters).ok()?,
-    })
+/// The caret of `element`, or `None` when the app reports no selection range
+/// (then nothing is known of where text goes).
+pub fn caret(element: &RetainedElement) -> Option<usize> {
+    caret_of(&element.0)
 }
 
 const AX_ERROR_INVALID_UI_ELEMENT: i32 = -25202;
@@ -90,8 +77,8 @@ fn read_around_caret(
     characters: i64,
     max_chars: usize,
 ) -> Result<FieldText, ReadError> {
-    let caret = copy_range(element, c"AXSelectedTextRange").ok_or(ReadError::TooLarge)?;
-    let start = (caret.location - (max_chars / 2) as isize).max(0);
+    let caret = caret_of(element).ok_or(ReadError::TooLarge)?;
+    let start = (caret as isize - (max_chars / 2) as isize).max(0);
     let length = (characters as isize - start).min(max_chars as isize);
     copy_text_for_range(
         element,
@@ -104,8 +91,6 @@ fn read_around_caret(
     .map(|text| FieldText {
         text,
         windowed: true,
-        offset: start.max(0) as usize,
-        total: characters.max(0) as usize,
     })
     .ok_or(ReadError::Failed)
 }
@@ -148,8 +133,6 @@ pub fn read_value_bounded(
         .map(|text| FieldText {
             text,
             windowed: false,
-            offset: 0,
-            total: length as usize,
         })
         .ok_or(ReadError::Failed)
 }
