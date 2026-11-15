@@ -401,7 +401,7 @@ fn the_browser_labs_toggle_turns_on_and_asks_for_system_audio() {
 
 #[test]
 fn contributed_options_are_labs_toggles_off_by_default() {
-    let mut rt = runtime("mac-settings", true, (980.0, 2400.0));
+    let mut rt = runtime("mac-settings", true, (980.0, 2800.0));
     open_labs(&mut rt);
     for row in [
         "lab-mouse-shortcuts",
@@ -2402,7 +2402,7 @@ fn browser_access_keeps_its_typing_through_its_own_save() {
 #[test]
 fn a_labs_card_shows_its_description_and_its_switch_turns_it_on() {
     use crate::labs::Feature;
-    let mut rt = runtime("mac-labs", true, (980.0, 2000.0));
+    let mut rt = runtime("mac-labs", true, (980.0, 2400.0));
     unfold_labs(&mut rt);
     let feature = Feature::SubtitleExport;
     assert!(rt.find("lab-card-subtitle-export").is_some());

@@ -1115,6 +1115,7 @@ fn cursor_context_enabled(settings: &LabsSettings) -> bool {
 /// word has no bit for it.
 fn learn_from_corrections_enabled(settings: &LabsSettings) -> bool {
     settings.learn_from_corrections
+        && Feature::LearnFromCorrections.on_this_os()
         && Feature::LearnFromCorrections.shipped()
         && Feature::LearnFromCorrections.managed().is_none()
 }
