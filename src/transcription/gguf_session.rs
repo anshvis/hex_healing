@@ -157,6 +157,7 @@ impl VocabularySlot {
 }
 
 /// A vocabulary bias as `dictation::vocabulary::bias_for` builds it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) type RunBias = (Vec<String>, transcribe_cpp::ParakeetVocabularyOptions);
 
 /// A run this recent leaves the weights resident (ggml keeps them so for three
@@ -204,6 +205,7 @@ impl OfflineGgufSession {
     /// unless dictation would bias this model the same way
     /// ([`VocabularySlot::Bias`]): Whisper and Qwen3-ASR take the vocabulary
     /// as a prompt, which a bias would not measure.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn fix_run_bias(
         &self,
         (terms, bias): RunBias,
