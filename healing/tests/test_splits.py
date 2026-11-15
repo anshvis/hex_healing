@@ -846,16 +846,15 @@ def test_a_snapshot_overlap_check_over_thousands_of_texts_builds_its_index_once(
 
 def test_every_parents_registered_sets_close_a_clip_to_training(store):
     build_world(store)
+    x = add_clip(store, 975, raw="measure the width of the doorway before ordering the frame", ts=CUTOFF - 20 * DAY)
+    verify_random(store, [x])  # a random-verified clip: old for the current window, inside v2's
     build_at(store)
     splits.build(store, parent="v2", cutoff_ms=CUTOFF - 40 * DAY, now=CUTOFF + 30 * DAY)
     v2 = {r[0] for r in store.db.execute(
-        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.parent_version = 'v2' AND s.kind IN ('rolling', 'edited')")}
-    current = {r[0] for r in store.db.execute(
-        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.parent_version = 'current' AND s.kind IN ('rolling', 'edited')")}
-    only_v2 = v2 - current
-    assert only_v2 & {r["clip_id"] for r in labels.trainable(store)}  # raw trainable would hand some out
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.parent_version = 'v2' AND s.kind = 'rolling'")}
+    assert x in v2 and x in {r["clip_id"] for r in labels.trainable(store)}  # raw trainable would hand it out
     handed = set(splits.snapshot_train(store, parent="current", cutoff_ms=CUTOFF))
-    assert not handed & v2  # the other parent's test clips are still test clips
+    assert x not in handed and not handed & v2  # the other parent's test clip is still a test clip
     assert splits.verify(store) == []
 
 
