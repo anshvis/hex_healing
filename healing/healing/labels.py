@@ -9,7 +9,9 @@
 Labels derive from the `edits` table (T2.4's classifier; no second one) and the `reviews` table,
 so `label all` is a pure function of its evidence and running it twice changes nothing. This is
 the one writer of `label`: `corrections.label_corrections` stores edits, `reference_text` and
-`edited_positions` only. A `verified` clip is never downgraded, except by rejecting it in a review.
+`edited_positions` only, and `collect` leaves labels to `refresh` too. A clip's reference follows its
+label: strong keeps `reference_text`, verified takes your review, weak is what Hex heard, and
+unlabelled has none.
 
 Weak references are the model's own output, and so are a strong clip's untouched words, so they
 never gate (AC-7): gating sets take `verified` references only.
@@ -31,6 +33,9 @@ HAS_AUDIO = (
     "c.audio_sha256 IS NOT NULL AND EXISTS (SELECT 1 FROM audio a WHERE a.sha256 = c.audio_sha256"
     " AND a.evicted_at_ms IS NULL AND a.missing = 0 AND a.corrupt = 0)"
 )
+# The one filter for a clip any set, review or training run may use: audio on disk, a dictation,
+# and not in the golden set (golden clips are tested on, never reviewed or trained again).
+USABLE = f"{HAS_AUDIO} AND c.kind = 'dictation' AND c.golden = 0"
 
 
 def latest_reviews(db: sqlite3.Connection, clip_ids: list[str] | None = None) -> dict[str, sqlite3.Row]:
@@ -43,7 +48,7 @@ def latest_reviews(db: sqlite3.Connection, clip_ids: list[str] | None = None) ->
 
 
 def derive(row: sqlite3.Row, kinds: set[str], review: sqlite3.Row | None) -> tuple[str, str | None, str | None]:
-    """(label, reference_text or None to leave it alone, review strategy) from a clip's evidence."""
+    """(label, reference_text or None for no reference, review strategy) from a clip's evidence."""
     if review is not None:
         if review["action"] == "reject":
             return "unlabelled", None, review["strategy"]
@@ -79,17 +84,11 @@ def refresh(store: Store, clip_ids: list[str] | None = None) -> Counter:
     for row in db.execute(f"SELECT * FROM clips{where}", parameters).fetchall():
         review = reviews.get(row["clip_id"])
         label, reference, strategy = derive(row, kinds.get(row["clip_id"], set()), review)
-        rejected = review is not None and review["action"] == "reject"
-        current = row["label"]
-        if not rejected and current == "verified" and label != "verified":
-            label, reference = current, row["reference_text"]  # a confirmed clip is never downgraded
-        weight = WEIGHTS[label]
-        reference = None if rejected else (reference if reference is not None else row["reference_text"])
         positions = row["edited_positions"] if label == "strong" else None
         db.execute(
             "UPDATE clips SET label = ?, weight = ?, reference_text = ?, edited_positions = ?,"
             " review_strategy = ? WHERE clip_id = ?",
-            (label, weight, reference, positions, strategy, row["clip_id"]),
+            (label, WEIGHTS[label], reference, positions, strategy, row["clip_id"]),
         )
         counts[label] += 1
     db.commit()
@@ -98,7 +97,7 @@ def refresh(store: Store, clip_ids: list[str] | None = None) -> Counter:
 
 def label_all(store: Store) -> Counter:
     """Classify any unclassified correction (T2.4), then recompute every clip's label."""
-    corrections.label_corrections(store)
+    corrections.label_corrections(store, backfill=True)
     return refresh(store)
 
 
@@ -110,10 +109,13 @@ def trainable(
     All of: audio present; kind `dictation`; not golden; labelled with weight above zero (weak only
     with `include_weak`); and either from `model_id` or a human reference (strong or verified),
     which is model-independent. `model_id=None` skips the model condition.
+
+    Not leak-free: it still holds the clips of the test sets and of the 14-day window. Train with
+    `splits.train_ids`.
     """
     labels = ["strong", "verified"] + (["weak"] if include_weak else [])
     rows = store.db.execute(
-        f"SELECT c.* FROM clips c WHERE {HAS_AUDIO} AND c.kind = 'dictation' AND c.golden = 0"
+        f"SELECT c.* FROM clips c WHERE {USABLE}"
         f" AND c.weight > 0 AND c.label IN ({','.join('?' * len(labels))}) ORDER BY c.timestamp_ms, c.clip_id",
         labels,
     ).fetchall()

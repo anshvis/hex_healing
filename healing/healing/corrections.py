@@ -144,11 +144,6 @@ def find_edits(raw_text: str, final_text: str, edited_text: str) -> list[Edit]:
     return edits
 
 
-def label_reset(label: str) -> str:
-    """The label once a clip's classification is thrown away: `strong` no longer holds."""
-    return "unlabelled" if label == "strong" else label
-
-
 def reference_with_spans(raw_text: str, edits: list[Edit]) -> tuple[str | None, list[tuple[int, int]]]:
     """`raw_text` with only the acoustic edits applied, or None when no edit is acoustic.
 
@@ -178,8 +173,13 @@ def reference_text(raw_text: str, edits: list[Edit]) -> str | None:
     return reference_with_spans(raw_text, edits)[0]
 
 
-def label_corrections(store: Store, since_ms: int | None = None, recompute: bool = False) -> Counter:
+def label_corrections(
+    store: Store, since_ms: int | None = None, recompute: bool = False, backfill: bool = False
+) -> Counter:
     """Classify every edited, un-rewritten clip not yet classified. Counts by kind.
+
+    `backfill` also classifies again a clip classified before `edited_positions` existed (it has a
+    reference and no positions), so a migrated dataset's strong clips reach the edited set.
 
 Writes the edits, `reference_text` and `edited_positions` only; `labels.refresh` is the one
 writer of `label`.
@@ -187,7 +187,8 @@ writer of `label`.
     where = "correction_outcome = 'edited' AND edited_text IS NOT NULL AND rewritten = 0"
     parameters: list = []
     if not recompute:
-        where += " AND classified_at_ms IS NULL"
+        missing = " OR (reference_text IS NOT NULL AND edited_positions IS NULL)" if backfill else ""
+        where += f" AND (classified_at_ms IS NULL{missing})"
     if since_ms is not None:
         where += " AND timestamp_ms >= ?"
         parameters.append(since_ms)

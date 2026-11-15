@@ -264,3 +264,19 @@ def test_datasets_at_each_earlier_version_migrate_to_current(tmp_path, monkeypat
     assert "sidecar_sha256" in {r[1] for r in store.db.execute("PRAGMA table_info(splits)")}
     assert store.db.execute("SELECT raw_text FROM clips").fetchone()[0] == "a b c"
     store.close()
+
+
+def test_label_all_backfills_positions_for_clips_classified_before_they_existed(store):
+    from healing import corrections
+
+    cid = add_clip(store, 1, outcome="edited")
+    store.db.execute("UPDATE clips SET edited_text = 'Send it to Kit.' WHERE clip_id = ?", (cid,))
+    corrections.label_corrections(store)
+    labels.refresh(store)
+    # a dataset migrated from v5/v6: classified (reference set), but no edited_positions column value
+    store.db.execute("UPDATE clips SET edited_positions = NULL WHERE clip_id = ?", (cid,))
+    labels.label_all(store)
+    assert row(store, cid)["edited_positions"] == "[[3, 4]]" and label_of(store, cid) == ("strong", 1.0)
+    before = row(store, cid)["classified_at_ms"]
+    labels.label_all(store)  # settled: nothing is classified again
+    assert row(store, cid)["classified_at_ms"] == before

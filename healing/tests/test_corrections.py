@@ -3,7 +3,7 @@ from pathlib import Path
 
 from healing import corrections
 from healing.cli import main
-from healing.corrections import find_edits, label_reset, label_corrections, observation_report, reference_text
+from healing.corrections import find_edits, label_corrections, observation_report, reference_text
 from healing.store import Store, clip_id
 
 from test_collect import world  # noqa: F401  (the fake-hex fixture)
@@ -61,11 +61,6 @@ def test_reference_keeps_what_the_person_typed():
     assert [e.kind for e in edits] == ["acoustic"]
     assert reference_text("meet at fife", edits) == "meet at five"
     assert reference_text(raw, []) is None
-
-
-def test_invalidation_drops_only_strong():
-    assert label_reset("strong") == "unlabelled"
-    assert [label_reset(x) for x in ("verified", "weak", "unlabelled")] == ["verified", "weak", "unlabelled"]
 
 
 def _entry(i, **extra):

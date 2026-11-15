@@ -115,6 +115,10 @@ def test_replace_updates_raw_text_and_model_id_and_marks_labels_stale(world):
     store = Store()
     store.db.execute("UPDATE clips SET label = 'strong', cluster_id = 'c1', golden = 1 WHERE hex_id = 1")
     store.db.execute("UPDATE clips SET label = 'verified' WHERE hex_id = 2")
+    store.db.execute(  # a verified label is a review: collect leaves it to `labels.refresh`
+        "INSERT INTO reviews (clip_id, reviewed_at_ms, action, text, strategy)"
+        " SELECT clip_id, 1, 'accept', raw_text, 'random' FROM clips WHERE hex_id = 2"
+    )
     store.db.commit()
     store.close()
     world.doc["entries"][0].update(raw_text="hello their", model_id="whisper-large")

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from healing.corrections import label_reset
+from healing import labels
 from healing.eval.bench import BenchError, history_hex
 from healing.store import Store, StoreError, process_lock, clip_id, now_ms, read_wav
 
@@ -249,21 +249,18 @@ def _store_entry(
         changed["audio_sha256"] = audio_sha
     if not changed:
         return
-    if "raw_text" in changed and existing["label"] != "verified":
-        changed["label"] = "unlabelled"  # M3 recomputes labels from the new raw text
     if any(name in changed for name in CLASSIFICATION_INPUTS):
         # Hex added or changed the correction: `label corrections` classifies it again.
         store.db.execute("DELETE FROM edits WHERE clip_id = ?", (existing["clip_id"],))
         changed["reference_text"] = None
         changed["edited_positions"] = None
         changed["classified_at_ms"] = None
-        if (label := label_reset(existing["label"])) != existing["label"]:
-            changed["label"] = label
     assignments = ", ".join(f"{name} = ?" for name in changed)
     store.db.execute(
         f"UPDATE clips SET {assignments} WHERE hex_epoch_ms = ? AND hex_id = ?",
         (*changed.values(), epoch, hex_id),
     )
+    labels.refresh(store, [existing["clip_id"]])  # the label follows the changed evidence
 
 
 def _correction_changes(existing, correction: dict | None, observed: dict, changed: dict) -> dict:
