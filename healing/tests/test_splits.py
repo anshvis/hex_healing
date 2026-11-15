@@ -752,3 +752,20 @@ def test_the_general_set_is_pinned_once(store, home):
     write("a different reference entirely")
     with pytest.raises(splits.SplitError, match="never changes"):
         build_at(store)
+
+
+def test_a_trainable_clip_in_a_golden_or_general_cluster_is_never_handed_out(store, home, small_golden):
+    freeze_golden(store)
+    gold = splits.golden_members(store.db)[0]
+    gold_text = store.db.execute("SELECT reference_text FROM clips WHERE clip_id = ?", (gold,)).fetchone()[0]
+    general_text = "pack the tools into the grey case and lock it before you go"
+    manifest.write_set(home / "sets" / "general", [{"id": "g1", "expected": general_text, "terms": []}],
+                       lambda clip: np.zeros(8000, dtype="int16"))
+    golden_twin = old_trainable(store, 970, gold_text, days=20)
+    general_twin = old_trainable(store, 971, general_text, days=20)
+    lone = old_trainable(store, 972, "fold the dust sheets and stack them by the door", days=20)
+    build_at(store)
+    trainable = {r["clip_id"] for r in labels.trainable(store)}
+    assert {golden_twin, general_twin, lone} <= trainable
+    handed = set(splits.snapshot_train(store, cutoff_ms=CUTOFF))
+    assert lone in handed and golden_twin not in handed and general_twin not in handed

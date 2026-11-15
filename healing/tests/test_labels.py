@@ -433,15 +433,24 @@ def test_a_failed_backup_stops_the_migration_with_a_store_error(tmp_path, monkey
 
 
 def test_concurrent_first_opens_migrate_once(tmp_path, monkeypatch):
+    import os
     import subprocess
     import sys
+    import time
 
     root = _v5_dataset(tmp_path, monkeypatch)
-    code = "from healing.store import Store; s = Store(); print(s.db.execute('PRAGMA user_version').fetchone()[0]); s.close()"
-    env = {**__import__("os").environ, "HEALING_HOME": str(tmp_path / "home")}
+    go = tmp_path / "go"
+    code = (
+        "import os, time\nfrom healing.store import Store\n"
+        f"while not os.path.exists({str(go)!r}): time.sleep(0.0005)\n"
+        "s = Store(); print(s.db.execute('PRAGMA user_version').fetchone()[0]); s.close()"
+    )
+    env = {**os.environ, "HEALING_HOME": str(tmp_path / "home")}
     procs = [subprocess.Popen([sys.executable, "-c", code], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-             for _ in range(12)]
+             for _ in range(24)]
+    time.sleep(2.5)  # every process has imported and is waiting at the gate
+    go.write_text("go")
     results = [(p.communicate(), p.returncode) for p in procs]
-    assert all(rc == 0 for _, rc in results), [r[0][1] for r in results if r[1]]
+    assert all(rc == 0 for _, rc in results), [r[0][1][-200:] for r in results if r[1]][:2]
     assert {out.strip() for (out, _), _ in results} == {str(store_module.SCHEMA_VERSION)}
     assert sorted(p.name for p in root.glob("dataset.sqlite.pre-*")) == ["dataset.sqlite.pre-v5"]

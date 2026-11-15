@@ -227,8 +227,9 @@ class Zones:
         return not (apart_from_registered and held)
 
     def may_train(self, clip: str) -> bool:
+        # `window` holds the cluster of every in-window clip, so it also keeps those clips themselves out.
         root = self.clusters[clip]
-        return not self.in_window(clip) and root not in self.window and root not in self.owners
+        return root not in self.window and root not in self.owners
 
 
 def _trainable(store: Store, zones: Zones, model: str | None, include_weak: bool) -> list[sqlite3.Row]:
@@ -589,14 +590,13 @@ def verify_report(store: Store) -> Report:
 
 
 def _cluster_conflicts(zones: Zones, row: sqlite3.Row, clip: str) -> list[str]:
-    """A rolling or edited member may not share a cluster with golden or the general set, and a
-    golden member with no other set."""
-    others = zones.held_by(clip, apart_from=row["split_id"])
+    """A rolling or edited member may not share a cluster with golden or the general set. (A golden
+    member sharing one with a rolling or edited set is the same pair, found from that side.)"""
     if row["kind"] == "golden":
-        return [f"{row['split_id']}: clip {clip} shares a split-cluster with {other}" for other in others]
+        return []
     return [
         f"{row['split_id']}: clip {clip} shares a split-cluster with {'the golden set' if kind == 'golden' else other}"
-        for other, kind in others.items() if kind in ("golden", "general")
+        for other, kind in zones.held_by(clip, apart_from=row["split_id"]).items() if kind in ("golden", "general")
     ]
 
 

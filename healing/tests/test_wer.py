@@ -56,3 +56,10 @@ def test_a_repeated_word_is_matched_when_any_optimal_alignment_matches_it():
     assert matched_positions(["a", "a"], ["a"]) == [True, True]
     assert matched_positions(["x", "a", "y"], ["x", "y"]) == [True, False, True]
     assert matched_positions(["a", "b"], ["b", "a"]) == [True, True]  # a swap costs 2 whichever word is kept
+
+
+def test_a_later_tied_match_counts_when_the_first_cannot_be_optimal():
+    from healing.wer import matched_positions
+
+    # the second "a" matches the last hypothesis "a"; pairing it with the first one would cost more
+    assert matched_positions(["b", "a"], ["a", "a"]) == [False, True]
