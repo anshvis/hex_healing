@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     review.add_argument("--cutoff", help="with --since-cutoff: 14d, a date or RFC 3339 (default: the last 14 days, sliding; D-40)")
 
     split = commands.add_parser("split").add_subparsers(dest="command", required=True)
-    build = split.add_parser("build", help="rolling, edited-span and train splits; registers general and golden")
+    build = split.add_parser("build", help="rolling and edited-span sets; registers general and golden (builds are not training)")
     build.add_argument("--parent", default="current", help="the version the rolling set is fresh for")
     build.add_argument("--cutoff", help="the window's start: 14d, a date or RFC 3339 (default: the last 14 days, sliding; D-40)")
     split.add_parser("verify", help="exit 1 on any leak, stale pin or non-verified gating reference")
