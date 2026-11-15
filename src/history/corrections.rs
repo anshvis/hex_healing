@@ -46,8 +46,9 @@ impl HistoryEntry {
 #[cfg(target_os = "macos")]
 impl HistoryStore {
     /// Keep `correction` on entry `id`, its text cut to the per-entry cap and
-    /// the store pruned to its hard caps. Returns false when the entry is gone
-    /// or already has one. A failed save keeps the entry as it was.
+    /// the store pruned to its hard caps, in one save. Returns false when the
+    /// entry is gone or already has one. A failed save keeps the entry as it
+    /// was.
     pub fn observe_correction(
         &mut self,
         id: u64,
@@ -56,19 +57,24 @@ impl HistoryStore {
         correction.edited_text = correction
             .edited_text
             .map(|text| truncated(&text, MAX_TEXT_BYTES));
-        let kept = self.change(id, |entry| {
-            if entry.correction.is_some() {
-                return false;
-            }
-            entry.correction = Some(correction);
-            true
-        })?;
-        // `change` saves without pruning: the added text may have taken the
-        // store past its byte cap.
-        if kept && self.prune(now_ms()) {
-            self.persist()?;
+        let Some(index) = self.entries.iter().position(|entry| entry.id == id) else {
+            return Ok(false);
+        };
+        if self.entries[index].correction.is_some() {
+            return Ok(false);
         }
-        Ok(kept)
+        let previous = self.entries[index].clone();
+        self.entries[index].correction = Some(correction);
+        // The added text may take the store past its byte cap: prune, then
+        // save once.
+        self.prune(now_ms());
+        if let Err(error) = self.persist() {
+            if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+                *entry = previous;
+            }
+            return Err(error);
+        }
+        Ok(true)
     }
 }
 
@@ -218,5 +224,31 @@ mod tests {
         let kept = store.entry(id).unwrap().correction.clone().unwrap();
         assert_eq!(kept.reason.as_deref(), Some("secure"));
         assert_eq!(kept.edited_text, None);
+    }
+
+    #[test]
+    fn replace_and_restore_drop_a_correction_seen_against_other_text() {
+        use crate::history::Transcript;
+        let (_, mut store) = store("replace");
+        let id = store
+            .record(draft("send it to kip"), now_ms())
+            .unwrap()
+            .unwrap();
+        store
+            .observe_correction(id, edited("send it to Kit"))
+            .unwrap();
+        assert!(store.entry(id).unwrap().correction.is_some());
+        let again = Transcript {
+            text: "send it to Kip".into(),
+            model: None,
+            model_id: None,
+            language: None,
+        };
+        assert!(store.replace_text(id, again, now_ms()).unwrap());
+        assert_eq!(store.entry(id).unwrap().correction, None);
+        // A new observation may come for the new text, and a restore drops it too.
+        assert!(store.observe_correction(id, edited("x")).unwrap());
+        assert!(store.restore_version(id, 0).unwrap());
+        assert_eq!(store.entry(id).unwrap().correction, None);
     }
 }

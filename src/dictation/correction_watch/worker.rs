@@ -10,13 +10,16 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::session::{CorrectionObservation, Event, Field, Outcome, Session, Step};
-use super::{PasteTarget, QUEUE, returns};
+use super::{PasteTarget, QUEUE};
 use crate::accessibility::{self, Notification, Observer, RetainedElement};
+use crate::dictation::key_counts;
 use crate::history::History;
 
 /// Targets watched at once; the rest wait in the queue.
 pub const MAX_ACTIVE: usize = 4;
 const TICK: Duration = Duration::from_millis(50);
+/// How often a field that reports no value changes is read anyway.
+const POLL: Duration = Duration::from_millis(400);
 
 static THREAD: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
@@ -51,6 +54,8 @@ struct Active {
     observer: Option<Observer>,
     /// The listener's Return count when this watch last looked.
     returns: u64,
+    /// When to read next, for a field whose changes are not reported.
+    poll_at: Option<Instant>,
 }
 
 impl Active {
@@ -60,25 +65,33 @@ impl Active {
             history: target.history,
             entry_id: target.entry_id,
             session: Session::new(target.element, target.inserted, target.pasted_at),
+            returns: target.returns,
+            poll_at: observer
+                .as_ref()
+                .is_none_or(|observer| !observer.watches_value())
+                .then(|| Instant::now() + POLL),
             observer,
-            returns: returns(),
         }
     }
 
     /// What happened since the last tick, ending with the tick.
-    fn events(&mut self) -> Vec<Event> {
-        let mut events: Vec<Event> = self
-            .observer
-            .iter()
-            .flat_map(Observer::drain)
-            .map(|notification| match notification {
+    fn events(&mut self, now: Instant) -> Vec<Event> {
+        let mut events: Vec<Event> = Vec::new();
+        for notification in self.observer.iter().flat_map(Observer::drain) {
+            events.push(match notification {
                 Notification::ValueChanged => Event::ValueChanged,
                 Notification::FocusChanged => Event::FocusOut,
-            })
-            .collect();
-        let now = returns();
-        if now != self.returns {
-            self.returns = now;
+            });
+        }
+        if self.poll_at.is_some_and(|at| at <= now) {
+            self.poll_at = Some(now + POLL);
+            events.push(Event::ValueChanged);
+        }
+        // A burst inside one tick is one read of where the field ended.
+        events.dedup_by(|a, b| *a == Event::ValueChanged && *b == Event::ValueChanged);
+        let count = key_counts::returns();
+        if count != self.returns {
+            self.returns = count;
             events.push(Event::Return);
         }
         events.push(Event::Tick);
@@ -95,8 +108,9 @@ fn run() {
         }
         while active.len() < MAX_ACTIVE {
             let Some(target) = QUEUE.take() else { break };
-            // Never watch Hex's own field. The gate is asked at each read.
-            if target.pid != std::process::id() as i32 {
+            // Never watch Hex's own field, nor start one the lab has since
+            // turned off (it drops the element unread).
+            if target.pid != std::process::id() as i32 && crate::labs::learn_from_corrections() {
                 active.push(Active::start(target));
             }
         }
@@ -109,8 +123,13 @@ fn run() {
         }
         let now = Instant::now();
         active.retain_mut(|watched| {
-            let events = watched.events();
-            match advance(&mut watched.session, events, now, &gate) {
+            let events = watched.events(now);
+            match advance(
+                &mut watched.session,
+                events,
+                now,
+                &crate::labs::learn_from_corrections,
+            ) {
                 Advance::Watching => true,
                 Advance::Dropped => false,
                 Advance::Observed(seen) => {
@@ -120,11 +139,6 @@ fn run() {
             }
         });
     }
-}
-
-/// The one gate: the lab is on and no managed lock holds it off.
-fn gate() -> bool {
-    crate::labs::learn_from_corrections()
 }
 
 enum Advance {

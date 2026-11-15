@@ -17,9 +17,14 @@ use crate::dictation::{BOTH_SIDES_WINDOW, DOUBLE_TAP_WINDOW, MINIMUM_HOLD_DURATI
 
 mod hotkey;
 pub(crate) mod physical_keys;
+pub(crate) mod run_loop;
 pub(crate) mod secure_input;
 mod tap;
 pub use hotkey::{DictationHotkey, HotkeyAction};
+use run_loop::{
+    CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRemoveSource, CFRunLoopStop,
+    kCFRunLoopCommonModes,
+};
 use tap::*;
 
 const ESCAPE_KEY_CODE: u16 = 53;
@@ -126,19 +131,7 @@ unsafe extern "C" {
         port: *mut c_void,
         order: isize,
     ) -> *mut c_void;
-    pub(crate) fn CFRunLoopAddSource(
-        run_loop: *mut c_void,
-        source: *mut c_void,
-        mode: *const c_void,
-    );
-    pub(crate) fn CFRunLoopRemoveSource(
-        run_loop: *mut c_void,
-        source: *mut c_void,
-        mode: *const c_void,
-    );
-    pub(crate) fn CFRunLoopGetCurrent() -> *mut c_void;
     fn CFRunLoopRun();
-    fn CFRunLoopStop(run_loop: *mut c_void);
     fn CFRunLoopTimerCreate(
         allocator: *const c_void,
         fire_date: f64,
@@ -153,7 +146,6 @@ unsafe extern "C" {
     fn CFAbsoluteTimeGetCurrent() -> f64;
     fn CFMachPortIsValid(port: *mut c_void) -> u8;
     fn CFRelease(value: *const c_void);
-    static kCFRunLoopCommonModes: *const c_void;
 }
 
 #[repr(C)]

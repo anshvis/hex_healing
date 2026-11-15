@@ -79,7 +79,7 @@ impl Lock {
             Self::LoopbackTransforms => {
                 "Transformations may only reach this computer, by your organization's policy"
             }
-            Self::Corrections => "Your organisation turned off Learn from corrections.",
+            Self::Corrections => "Learn from corrections is managed by your organization",
         }
     }
 }
@@ -316,7 +316,7 @@ mod tests {
         assert!(!policy.locks(Lock::Labs));
         assert_eq!(
             Lock::Corrections.refusal(),
-            "Your organisation turned off Learn from corrections."
+            "Learn from corrections is managed by your organization"
         );
         let feature = crate::labs::Feature::LearnFromCorrections;
         assert_eq!(policy.labs_lock(feature), Some(Lock::Corrections));

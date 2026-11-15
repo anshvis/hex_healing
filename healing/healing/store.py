@@ -21,7 +21,7 @@ import soundfile
 from healing.paths import healing_home
 
 SAMPLE_RATE = 16_000
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE audio (
@@ -117,11 +117,11 @@ CREATE TABLE edits (
 );
 """
 
-# Added to schema 5 after datasets existed at 5 (so no new version number): `_migrate` adds them
-# to any dataset that lacks them. A fresh dataset gets them the same way.
-LATE_V5_COLUMNS = {"classified_at_ms": "INTEGER"}
+SCHEMA_V6 = """
+ALTER TABLE clips ADD COLUMN classified_at_ms INTEGER;
+"""
 
-MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5]
+MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6]
 
 
 class StoreError(Exception):
@@ -203,15 +203,7 @@ class Store:
         for step in range(version, SCHEMA_VERSION):
             self.db.executescript(MIGRATIONS[step])
             self.db.execute(f"PRAGMA user_version = {step + 1}")
-        self._add_missing_columns()
         self.db.commit()
-
-    def _add_missing_columns(self) -> None:
-        """Columns added to schema 5 after datasets were already collected at 5."""
-        have = {row["name"] for row in self.db.execute("PRAGMA table_info(clips)")}
-        for name, definition in LATE_V5_COLUMNS.items():
-            if name not in have:
-                self.db.execute(f"ALTER TABLE clips ADD COLUMN {name} {definition}")
 
     def close(self) -> None:
         self.db.close()

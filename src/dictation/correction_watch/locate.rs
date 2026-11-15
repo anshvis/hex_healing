@@ -8,9 +8,10 @@
 //! one-word edit at the start, end, or alone still aligns; any other pair
 //! -1; a gap -1. A field with no near or exact token never aligns, except a
 //! lone word replaced by a lone word. An edited first or last word scores
-//! below zero, so it falls outside the aligned core: the span extends over
-//! one field token for each inserted token left unaligned at either end,
-//! never across sentence punctuation.
+//! below zero, so it falls outside the aligned core: once the core alone
+//! covers half the inserted tokens (all of them below three), the span
+//! extends over at most one field token at each end that has an inserted
+//! token left over, never across sentence punctuation.
 
 /// How the inserted text sits in the field.
 #[derive(Debug, Eq, PartialEq)]
@@ -187,30 +188,25 @@ pub fn align(field: &str, inserted: &str) -> Alignment {
     let (Some(mut first), Some(mut last)) = (first, last) else {
         return Alignment::NotFound;
     };
+    // The aligned core must cover the inserted text by itself (T2.2's 50% rule):
+    // an extended edge never makes up the difference, or an unrelated field
+    // that shares one common word would be stored as an edit.
+    if aligned < needed {
+        return Alignment::NotFound;
+    }
     if exact == want.len() && aligned == want.len() && !gaps {
         return Alignment::Unchanged;
     }
-    // Each inserted token left over at an end stands for the field token the
+    // One inserted token left over at an end stands for the field token the
     // person typed over it.
-    let mut taken = 0;
-    for _ in 0..i {
-        let sentence_start =
-            first > 0 && ends_sentence(&field, &have[first - 1], Some(&have[first]));
-        if first == 0 || sentence_start {
-            break;
-        }
+    if i > 0 && first > 0 && !ends_sentence(&field, &have[first - 1], Some(&have[first])) {
         first -= 1;
-        taken += 1;
     }
-    for _ in 0..trailing {
-        if last + 1 >= have.len() || ends_sentence(&field, &have[last], Some(&have[last + 1])) {
-            break;
-        }
+    if trailing > 0
+        && last + 1 < have.len()
+        && !ends_sentence(&field, &have[last], Some(&have[last + 1]))
+    {
         last += 1;
-        taken += 1;
-    }
-    if aligned + taken < needed {
-        return Alignment::NotFound;
     }
     let span: String = field[have[first].start..have[last].end]
         .chars()
@@ -343,7 +339,6 @@ mod tests {
     #[test]
     fn a_replaced_first_word_stays_in_the_span() {
         assert_eq!(edited("Hex said hi", "Hanks said hi"), "Hex said hi");
-        assert_eq!(edited("Hex said", "Hanks said"), "Hex said");
     }
 
     #[test]
@@ -417,5 +412,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn unrelated_fields_sharing_a_common_word_are_not_found() {
+        for (field, inserted) in [
+            ("go to bed", "send to Kip"),
+            ("please talk to me", "send it to Kip"),
+            ("I like Kip", "send it to Kip"),
+            ("the cat sat on the mat", "put the Kip on it"),
+            ("we went to the shops", "we should ask Kip"),
+            ("see you at noon", "send it to noon"),
+            ("Hex", "send it to Kip"),
+            ("hi Hex", "hi Kip"),
+        ] {
+            assert_eq!(
+                align(field, inserted),
+                Alignment::NotFound,
+                "{field:?} vs {inserted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_edge_extends_by_one_token_at_most() {
+        // Two replaced words at the end: the core stays honest, one is kept.
+        assert_eq!(
+            edited("send it to Hex Rune", "send it to Hanks Kip"),
+            "send it to Hex"
+        );
     }
 }

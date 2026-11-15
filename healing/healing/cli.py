@@ -79,7 +79,9 @@ def main(argv: list[str] | None = None) -> int:
     seeded.add_argument("--dir", type=Path, default=None, help="protocol folder (default: $HEALING_HOME/protocol)")
     seeded.add_argument("--hex", type=Path, default=None, help="path to the hex binary (run, score)")
     seeded.add_argument("--seed", type=int, default=13)
-    seeded.add_argument("--settle", type=float, default=33.0, help="seconds to wait for Hex's 30 s watch (run)")
+    from healing.protocol import SETTLE_S
+
+    seeded.add_argument("--settle", type=float, default=SETTLE_S, help="seconds to wait for Hex's 30 s watch (run)")
     seeded.add_argument("--apps", help="comma list to run a subset (run)")
 
     args = parser.parse_args(argv)
@@ -195,7 +197,7 @@ def _schedule(args) -> int:
 def _status(args) -> int:
     from healing import status as status_module
     from healing.budget import parse_size
-    from healing.eval.bench import BenchError, hex_binary
+    from healing.eval.bench import BenchError, history_hex
     from healing.store import Store, StoreError
 
     if args.list:
@@ -205,7 +207,7 @@ def _status(args) -> int:
     try:
         budget = parse_size(args.budget)
         min_free = parse_size(args.min_free)
-        binary = Path(args.hex or hex_binary(prefer_installed=True))
+        binary = Path(args.hex or history_hex())
     except (ValueError, BenchError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

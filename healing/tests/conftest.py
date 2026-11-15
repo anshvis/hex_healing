@@ -15,3 +15,11 @@ def no_network(monkeypatch):
 
     monkeypatch.setattr(socket.socket, "connect", guarded)
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: (_ for _ in ()).throw(AssertionError("DNS lookup attempted")))
+
+
+@pytest.fixture(autouse=True)
+def plenty_of_disk(monkeypatch):
+    """Tests do not depend on the free space of the machine running them: the floor tests set
+    `healing.clean.free_bytes` themselves."""
+    for name in ("healing.clean.free_bytes", "healing.status.free_bytes"):
+        monkeypatch.setattr(name, lambda *_: 1 << 50)

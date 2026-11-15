@@ -145,7 +145,7 @@ def test_ten_thousand_rows_fast(world):  # noqa: F811
     assert counts["acoustic"] == 10_000 and time.time() - started < 10
 
 
-def test_v4_dataset_with_rows_migrates_to_v5(tmp_path):
+def test_v4_dataset_with_rows_migrates_to_the_current_schema(tmp_path):
     import sqlite3
 
     from healing import store as store_module
@@ -164,7 +164,7 @@ def test_v4_dataset_with_rows_migrates_to_v5(tmp_path):
     db.close()
 
     store = Store(root)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION == 5
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION == 6
     row = store.db.execute("SELECT * FROM clips").fetchone()
     assert (row["clip_id"], row["raw_text"], row["label"], row["collected_at_ms"]) == (
         "a", "send it to kip", "verified", 5
@@ -182,7 +182,7 @@ def test_v4_dataset_with_rows_migrates_to_v5(tmp_path):
     assert (row["label"], row["reference_text"]) == ("verified", "send it to kit")
 
 
-def test_v5_dataset_made_before_the_classified_marker_gains_the_column(tmp_path):
+def test_v5_dataset_made_before_the_classified_marker_migrates_to_v6(tmp_path):
     import sqlite3
 
     from healing import store as store_module
@@ -192,7 +192,7 @@ def test_v5_dataset_made_before_the_classified_marker_gains_the_column(tmp_path)
     db = sqlite3.connect(root / "dataset.sqlite")
     for step in range(5):
         db.executescript(store_module.MIGRATIONS[step])
-    assert "classified_at_ms" not in {r[1] for r in db.execute("PRAGMA table_info(clips)")}  # the old v5
+    assert "classified_at_ms" not in {r[1] for r in db.execute("PRAGMA table_info(clips)")}  # a v5 dataset
     db.execute("PRAGMA user_version = 5")
     db.execute(
         "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text,"
@@ -204,9 +204,46 @@ def test_v5_dataset_made_before_the_classified_marker_gains_the_column(tmp_path)
     db.close()
 
     store = Store(root)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 6
     row = store.db.execute("SELECT * FROM clips").fetchone()
     assert row["classified_at_ms"] is None and row["reference_text"] == "send it to kit"
     Store(root).close()  # opening again is a no-op
     assert label_corrections(store)["acoustic"] == 1  # the unmarked row classifies once
     assert label_corrections(store)["clips"] == 0
+
+
+def test_an_entry_without_a_correction_keeps_the_stored_one(world):  # noqa: F811
+    world.doc["entries"] = [
+        _entry(1, correction={"outcome": "edited", "observed_at_ms": 4200, "edited_text": "Send it to Kit."}),
+    ]
+    world.save()
+    assert world.run() == 0
+    assert main(["label", "corrections"]) == 0
+    # An older Hex saved the History file and dropped the field.
+    del world.doc["entries"][0]["correction"]
+    world.save()
+    assert world.run() == 0
+    row = dict(world.db().execute("SELECT * FROM clips").fetchone())
+    assert (row["correction_outcome"], row["edited_text"]) == ("edited", "Send it to Kit.")
+    assert row["label"] == "strong" and row["classified_at_ms"] is not None
+    assert world.db().execute("SELECT COUNT(*) FROM edits").fetchone()[0] == 1
+
+
+def test_a_replace_in_hex_drops_the_stored_correction(world):  # noqa: F811
+    world.doc["entries"] = [
+        _entry(1, correction={"outcome": "edited", "observed_at_ms": 1, "edited_text": "Send it to Kit."}),
+    ]
+    world.save()
+    world.run()
+    main(["label", "corrections"])
+    # Hex replaced the text (and cleared its correction): the old edit is not this text's.
+    entry = world.doc["entries"][0]
+    entry.pop("correction")
+    entry["raw_text"], entry["final_text"] = "send it to kit", "Send it to Kit."
+    world.save()
+    world.run()
+    row = dict(world.db().execute("SELECT * FROM clips").fetchone())
+    assert row["correction_outcome"] is None and row["edited_text"] is None
+    assert row["label"] == "unlabelled" and row["classified_at_ms"] is None
+    assert main(["label", "corrections"]) == 0
+    assert world.db().execute("SELECT COUNT(*) FROM edits").fetchone()[0] == 0

@@ -25,24 +25,6 @@ pub const SETTLE: Duration = Duration::from_millis(100);
 #[cfg(target_os = "macos")]
 pub const ESCAPE_WINDOW: Duration = Duration::from_millis(500);
 
-/// Escape presses the listener has seen. A send compares the count with its
-/// submission's to tell whether one came after its release.
-#[cfg(target_os = "macos")]
-static ESCAPES: AtomicU64 = AtomicU64::new(0);
-
-/// Counts the Escape and Return presses the shortcut listener sees: Escape
-/// can skip a dictation's Return, and a Return may be a chat send that
-/// Labs › Learn from corrections tells from a newline.
-#[cfg(target_os = "macos")]
-pub fn note_input(event: crate::suppression::InputEvent) {
-    if event.is_escape_down() {
-        ESCAPES.fetch_add(1, Ordering::AcqRel);
-    }
-    if event.is_return_down() {
-        super::correction_watch::note_return();
-    }
-}
-
 /// Whether a submitted dictation may still press Return: no Escape since it
 /// was submitted.
 #[derive(Clone, Copy, Debug)]
@@ -57,7 +39,7 @@ pub struct SendGate {
 impl SendGate {
     /// The gate of a dictation submitted now.
     pub fn open() -> Self {
-        Self::on(&ESCAPES, Instant::now())
+        Self::on(&super::key_counts::ESCAPES, Instant::now())
     }
 
     pub(crate) fn on(escapes: &'static AtomicU64, submitted_at: Instant) -> Self {

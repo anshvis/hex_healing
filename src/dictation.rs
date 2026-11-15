@@ -16,6 +16,8 @@ pub(crate) mod correction_watch;
 pub(crate) mod diagnostics;
 pub(crate) mod filler_words;
 pub(crate) mod indicator;
+#[cfg(target_os = "macos")]
+pub(crate) mod key_counts;
 pub(crate) mod live_text;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) mod modes;

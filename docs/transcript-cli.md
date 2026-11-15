@@ -41,7 +41,7 @@ never without `--raw`, because it holds text):
 type Correction = { // history row, --json --raw only
   outcome: "unchanged" | "edited" | "lost"
   reason?: "element_gone" | "secure" | "too_large" | "span_not_found"
-         | "read_timeout" | "cleared_before_read"  // only when outcome is "lost"
+         | "read_timeout" | "read_failed" | "cleared_before_read"  // only when outcome is "lost"
   observed_at_ms: number   // from the paste to the read it comes from
   edited_text?: string     // only when "edited": the aligned span, at most 16 KiB
 }

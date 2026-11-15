@@ -62,17 +62,9 @@ def parse_jsonl(text: str) -> BenchRun:
     return BenchRun(model, clips, summary)
 
 
-def hex_binary(prefer_installed: bool = False) -> Path:
-    """`$HEX_BIN`, else this checkout's release build, else the installed app.
-
-    `prefer_installed` swaps the last two: reading History needs the Hex that writes it, and a
-    checkout's build may be from another branch that doesn't know its newer fields.
-    """
+def _find_hex(builds: list[Path]) -> Path:
     named = os.environ.get("HEX_BIN")
-    candidates = [Path(named)] if named else []
-    builds = [repo_root() / "target" / "release" / "hex", INSTALLED_HEX]
-    candidates += builds[::-1] if prefer_installed else builds
-    for candidate in candidates:
+    for candidate in ([Path(named)] if named else []) + builds:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
     on_path = shutil.which("hex")
@@ -81,6 +73,20 @@ def hex_binary(prefer_installed: bool = False) -> Path:
     raise BenchError(
         "no hex binary: build one with `cargo build --release` or set HEX_BIN"
     )
+
+
+def hex_binary() -> Path:
+    """`$HEX_BIN`, else this checkout's release build, else the installed app."""
+    return _find_hex([repo_root() / "target" / "release" / "hex", INSTALLED_HEX])
+
+
+def history_hex() -> Path:
+    """The `hex` to read History with: `$HEX_BIN`, else the installed app, else this checkout's build.
+
+    Reading History needs the Hex that writes it; a checkout's build may be from another branch
+    that doesn't know its newer fields.
+    """
+    return _find_hex([INSTALLED_HEX, repo_root() / "target" / "release" / "hex"])
 
 
 def isolated_env() -> dict[str, str]:

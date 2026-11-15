@@ -66,6 +66,8 @@ impl HistoryEntry {
         self.model = version.model;
         self.model_id = version.model_id;
         self.language = version.language;
+        // A correction was seen against the text it replaces, not this one.
+        self.correction = None;
         self.text_ms = (version.timestamp_ms != self.timestamp_ms).then_some(version.timestamp_ms);
     }
 

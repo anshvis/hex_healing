@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from healing.corrections import label_after
-from healing.eval.bench import BenchError, hex_binary
+from healing.corrections import label_reset
+from healing.eval.bench import BenchError, history_hex
 from healing.store import Store, StoreError, process_lock, clip_id, now_ms, read_wav
 
 PAGE_LIMIT = 10_000
@@ -210,10 +210,14 @@ def _store_entry(
         "raw_text": entry["raw_text"],
         "final_text": entry["final_text"],
     }
-    correction = entry.get("correction") or {}
-    fields["correction_outcome"] = correction.get("outcome")
-    fields["correction_reason"] = correction.get("reason")
-    fields["edited_text"] = correction.get("edited_text")
+    # An entry without `correction` says nothing: an older Hex drops the field when it saves.
+    correction = entry.get("correction")
+    observed = {
+        "correction_outcome": (correction or {}).get("outcome"),
+        "correction_reason": (correction or {}).get("reason"),
+        "edited_text": (correction or {}).get("edited_text"),
+    }
+    fields.update(observed)
     existing = store.db.execute(
         "SELECT * FROM clips WHERE hex_epoch_ms = ? AND hex_id = ?", (epoch, hex_id)
     ).fetchone()
@@ -240,6 +244,13 @@ def _store_entry(
         )
         return
     changed = {k: v for k, v in fields.items() if existing[k] != v}
+    if correction is None:
+        for name in observed:
+            changed.pop(name, None)
+        if "raw_text" in changed or "final_text" in changed:
+            # The text moved on (a Replace in Hex): the stored correction was seen against the
+            # old text, so it goes rather than label the new text.
+            changed.update({name: None for name in observed if existing[name] is not None})
     if audio_sha != existing["audio_sha256"]:
         changed["audio_sha256"] = audio_sha
     if not changed:
@@ -251,7 +262,7 @@ def _store_entry(
         store.db.execute("DELETE FROM edits WHERE clip_id = ?", (existing["clip_id"],))
         changed["reference_text"] = None
         changed["classified_at_ms"] = None
-        if (label := label_after(existing["label"], False)) != existing["label"]:
+        if (label := label_reset(existing["label"])) != existing["label"]:
             changed["label"] = label
     assignments = ", ".join(f"{name} = ?" for name in changed)
     store.db.execute(
@@ -281,7 +292,7 @@ def main_collect(since: str | None, hex_path: Path | None, min_free: int | None 
         if since is not None:
             check_since(since)
         try:
-            binary = Path(hex_path or hex_binary(prefer_installed=True)).resolve()
+            binary = Path(hex_path or history_hex()).resolve()
         except BenchError as error:
             raise CollectError(str(error), 2) from error
         if not Path(binary).is_file():

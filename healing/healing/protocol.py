@@ -42,6 +42,7 @@ REPLACEMENTS = ["Kit", "Rune", "Friday", "Hex", "Sarah", "Monday", "banana"]
 MIN_RECALL = 0.5
 MAX_FALSE_EDIT = 0.05
 PHRASE = "send it to kip tomorrow"
+SETTLE_S = 33.0  # Hex's 30 s watch, plus a margin
 
 
 def protocol_dir(given: Path | None) -> Path:
@@ -105,7 +106,7 @@ def write_plan(directory: Path, seed: int) -> Path:
     (directory / "RUNBOOK.md").write_text(
         RUNBOOK.format(
             minutes=len(APPS) * 8, phrase=PHRASE, seeded=SEEDED_PER_APP, sends=SEND_PER_APP,
-            send_within=SEND_WITHIN_S, settle=33, min_recall=MIN_RECALL, max_false=MAX_FALSE_EDIT,
+            send_within=SEND_WITHIN_S, settle=SETTLE_S, min_recall=MIN_RECALL, max_false=MAX_FALSE_EDIT,
             targets="\n".join(f"- {app}: {about}" for app, about in APPS.items()),
         )
     )
@@ -128,7 +129,7 @@ class Driver:
     """Everything that touches the outside world, so tests can substitute it."""
 
     hex: Path
-    settle: float = 33.0
+    settle: float = SETTLE_S
     dictate_seconds: float = 4.0
     paste_seconds: float = 3.0
     sleep = staticmethod(time.sleep)
@@ -267,7 +268,7 @@ def format_score(result: dict) -> str:
 
 def main(args) -> int:
     from healing.collect import CollectError, rfc3339, run_history
-    from healing.eval.bench import BenchError, hex_binary
+    from healing.eval.bench import BenchError, history_hex
 
     directory = protocol_dir(args.dir)
     if args.step == "plan":
@@ -280,7 +281,7 @@ def main(args) -> int:
         return 2
     results_path = directory / "results.json"
     try:
-        binary = Path(args.hex or hex_binary(prefer_installed=True))
+        binary = Path(args.hex or history_hex())
     except BenchError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

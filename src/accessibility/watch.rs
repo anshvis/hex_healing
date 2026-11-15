@@ -3,14 +3,17 @@
 //! Nothing here logs or keeps text.
 
 use std::ffi::c_void;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use super::{
     AxUiElementRef, CFGetTypeID, CFStringGetLength, CFStringGetTypeID, CfObject, CfRange,
     CfStringRef, CfTypeRef, Keep, RetainedElement, cf_string, cf_string_literal, copy_number,
     copy_range, copy_text_for_range, fetch_attribute, foreign_application, is_secure_text_field,
 };
-use crate::suppression::{CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRemoveSource};
+use crate::suppression::run_loop::{
+    CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRemoveSource, CFRunLoopRunInMode,
+    kCFRunLoopDefaultMode,
+};
 
 /// Why a bounded read of the field gave no text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,9 +26,12 @@ pub enum ReadError {
     TooLarge,
     /// The app did not answer within the messaging timeout.
     Timeout,
+    /// Any other Accessibility failure.
+    Failed,
 }
 
 const AX_ERROR_INVALID_UI_ELEMENT: i32 = -25202;
+const AX_ERROR_CANNOT_COMPLETE: i32 = -25204;
 const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25205;
 const AX_ERROR_NO_VALUE: i32 = -25212;
 
@@ -34,12 +40,13 @@ fn read_attribute(
     element: &CfObject,
     name: &std::ffi::CStr,
 ) -> Result<Option<CfObject>, ReadError> {
-    let (status, value) = fetch_attribute(element, name).ok_or(ReadError::Timeout)?;
+    let (status, value) = fetch_attribute(element, name).ok_or(ReadError::Failed)?;
     match status {
         0 => Ok(value),
         AX_ERROR_NO_VALUE | AX_ERROR_ATTRIBUTE_UNSUPPORTED => Ok(None),
         AX_ERROR_INVALID_UI_ELEMENT => Err(ReadError::ElementGone),
-        _ => Err(ReadError::Timeout),
+        AX_ERROR_CANNOT_COMPLETE => Err(ReadError::Timeout),
+        _ => Err(ReadError::Failed),
     }
 }
 
@@ -61,7 +68,7 @@ fn read_around_caret(
         },
         Keep::Head,
     )
-    .ok_or(ReadError::Timeout)
+    .ok_or(ReadError::Failed)
 }
 
 /// The field's text: the whole `AXValue` when it has at most `max_chars`
@@ -129,12 +136,6 @@ unsafe extern "C" {
     fn AXObserverGetRunLoopSource(observer: AxObserverRef) -> CfTypeRef;
 }
 
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    static kCFRunLoopDefaultMode: CfStringRef;
-    fn CFRunLoopRunInMode(mode: CfStringRef, seconds: f64, return_after_source: u8) -> i32;
-}
-
 type Inbox = Mutex<Vec<Notification>>;
 
 unsafe extern "C" fn deliver(
@@ -168,6 +169,7 @@ pub struct Observer {
     application: CfObject,
     element: CfObject,
     inbox: *const Inbox,
+    value_registered: bool,
 }
 
 impl Observer {
@@ -180,7 +182,7 @@ impl Observer {
             return None;
         }
         let observer = CfObject(observer);
-        let inbox = Arc::into_raw(Arc::new(Inbox::default()));
+        let inbox = Box::into_raw(Box::new(Inbox::default()));
         // SAFETY: the element is retained here so it outlives the observer.
         let element = CfObject(unsafe { super::CFRetain(field.0.0) });
         let mut this = Self {
@@ -190,18 +192,23 @@ impl Observer {
             application,
             element,
             inbox,
+            value_registered: false,
         };
         // The value registration is best effort: a field that refuses it is
-        // still read on focus out, Return and the deadline.
+        // polled by the watcher ([`Observer::watches_value`]).
         let mut registered = 0;
+        let mut value_registered = false;
         for (target, name) in this.registrations() {
+            let name_is_value = name == c"AXValueChanged";
             let name = CfObject(cf_string_literal(name)?);
             // SAFETY: the refcon outlives every registration (see `Drop`).
             let status = unsafe {
                 AXObserverAddNotification(this.observer.0, target.0, name.0, inbox as *mut _)
             };
             registered += usize::from(status == 0);
+            value_registered |= name_is_value && status == 0;
         }
+        this.value_registered = value_registered;
         if registered == 0 {
             return None;
         }
@@ -215,6 +222,12 @@ impl Observer {
         this.source = source;
         this.run_loop = run_loop;
         Some(this)
+    }
+
+    /// Whether the element accepted the value-change registration. If not,
+    /// the watcher polls instead.
+    pub fn watches_value(&self) -> bool {
+        self.value_registered
     }
 
     /// Each notification and the object it is registered on.
@@ -248,8 +261,8 @@ impl Drop for Observer {
                 unsafe { AXObserverRemoveNotification(self.observer.0, target.0, name.0) };
             }
         }
-        // SAFETY: balances `Arc::into_raw`; no callback can run any more.
-        drop(unsafe { Arc::from_raw(self.inbox) });
+        // SAFETY: balances `Box::into_raw`; no callback can run any more.
+        drop(unsafe { Box::from_raw(self.inbox.cast_mut()) });
     }
 }
 

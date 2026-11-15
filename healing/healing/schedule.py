@@ -16,7 +16,7 @@ from pathlib import Path
 from string import Template
 from xml.sax.saxutils import escape
 
-from healing.eval.bench import BenchError, hex_binary
+from healing.eval.bench import BenchError, history_hex
 from healing.paths import healing_home
 
 LABEL = "com.hex-healing.collect"
@@ -76,7 +76,7 @@ def render(command: list[str], hex_path: Path, home: Path, log: Path) -> str:
 
 def install(hex_path: Path | None = None, directory: Path | None = None) -> Path:
     try:
-        binary = Path(hex_path or hex_binary(prefer_installed=True)).resolve()
+        binary = Path(hex_path or history_hex()).resolve()
     except BenchError as error:
         raise ScheduleError(str(error)) from error
     if not binary.is_file():

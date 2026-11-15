@@ -14,10 +14,10 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::accessibility::{self, RetainedElement};
+use crate::dictation::key_counts;
 use crate::history::History;
 
 mod locate;
@@ -41,6 +41,9 @@ pub struct PasteTarget {
     pub inserted: String,
     /// When the paste completed, before History's write.
     pub pasted_at: Instant,
+    /// The listener's Return count at the paste: a Return after it may be a
+    /// send.
+    pub returns: u64,
 }
 
 /// The element a paste is about to land in, read before the paste.
@@ -49,6 +52,7 @@ pub struct Pending {
     element: RetainedElement,
     inserted: String,
     pasted_at: Instant,
+    returns: u64,
 }
 
 impl Pending {
@@ -58,6 +62,7 @@ impl Pending {
             element,
             inserted: String::new(),
             pasted_at: Instant::now(),
+            returns: key_counts::returns(),
         }
     }
 
@@ -69,6 +74,7 @@ impl Pending {
             entry_id,
             inserted: self.inserted,
             pasted_at: self.pasted_at,
+            returns: self.returns,
         }
     }
 }
@@ -130,6 +136,7 @@ impl Watch {
     pub fn pasted(&mut self, handoff: &impl Handoff) {
         if let Some(pending) = &mut self.0 {
             pending.pasted_at = Instant::now();
+            pending.returns = key_counts::returns();
             pending.inserted = handoff.inserted();
             if pending.inserted.is_empty() {
                 self.0 = None;
@@ -148,19 +155,6 @@ impl Watch {
             handoff.submit(pending.into_target(history.clone(), entry_id));
         }
     }
-}
-
-/// Return presses the listener has seen. A watch compares the count with the
-/// one at its start to tell that one came since.
-static RETURNS: AtomicU64 = AtomicU64::new(0);
-
-/// Counts one Return or Enter press seen by the shortcut listener.
-pub fn note_return() {
-    RETURNS.fetch_add(1, Ordering::AcqRel);
-}
-
-fn returns() -> u64 {
-    RETURNS.load(Ordering::Acquire)
 }
 
 /// Bounded, oldest-dropped queue of targets.
@@ -214,7 +208,7 @@ fn history_for_test() -> History {
     let directory = std::env::temp_dir().join(format!(
         "hex-correction-watch-{}-{}",
         std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();

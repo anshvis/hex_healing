@@ -156,6 +156,11 @@ def label_after(label: str, acoustic: bool) -> str:
     return label
 
 
+def label_reset(label: str) -> str:
+    """The label once a clip's classification is thrown away: `strong` no longer holds."""
+    return label_after(label, False)
+
+
 def reference_text(raw_text: str, edits: list[Edit]) -> str | None:
     """`raw_text` with only the acoustic edits applied, or None when no edit is acoustic.
 

@@ -47,6 +47,6 @@ def test_history_readers_prefer_the_installed_hex(tmp_path, monkeypatch):
     monkeypatch.setattr(bench, "repo_root", lambda: tmp_path / "repo")
     monkeypatch.setattr(bench, "INSTALLED_HEX", installed)
     assert bench.hex_binary() == build
-    assert bench.hex_binary(prefer_installed=True) == installed
+    assert bench.history_hex() == installed
     monkeypatch.setenv("HEX_BIN", str(build))
-    assert bench.hex_binary(prefer_installed=True) == build
+    assert bench.history_hex() == build
