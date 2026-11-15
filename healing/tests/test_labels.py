@@ -458,11 +458,19 @@ def test_concurrent_first_opens_migrate_once(tmp_path, monkeypatch):
 
 def test_a_v7_dataset_missing_columns_is_repaired_on_open(tmp_path, monkeypatch):
     """An intermediate build stamped v7 before `acoustic_reference`, the sidecar pin and the snapshot
-    detail existed: opening it repairs the file (and does not classify anything again)."""
+    detail existed: opening it repairs the file, and a strong clip it classified comes back with a
+    reference instead of being left strong without one."""
     monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))
     Store().close()
     path = tmp_path / "home" / "dataset" / "dataset.sqlite"
     db = sqlite3.connect(path)
+    db.execute(
+        "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text, collected_at_ms,"
+        " correction_outcome, edited_text, classified_at_ms, rewritten, label, weight, reference_text)"
+        " VALUES ('c1', 1, 1, 1, 'dictation', 'send it to kip', 'Send it to kip.', 1, 'edited', 'Send it to Kit.', 5, 0,"
+        " 'strong', 1.0, 'send it to kit')"
+    )
+    db.execute("INSERT INTO edits (clip_id, idx, raw_from, final_from, to_text, kind) VALUES ('c1', 0, 'kip', 'kip', 'Kit', 'acoustic')")
     db.execute("ALTER TABLE clips DROP COLUMN acoustic_reference")
     db.execute("ALTER TABLE splits DROP COLUMN detail")
     db.execute("ALTER TABLE splits DROP COLUMN sidecar_sha256")
@@ -473,7 +481,21 @@ def test_a_v7_dataset_missing_columns_is_repaired_on_open(tmp_path, monkeypatch)
     assert "acoustic_reference" in {r[1] for r in store.db.execute("PRAGMA table_info(clips)")}
     assert {"detail", "sidecar_sha256"} <= {r[1] for r in store.db.execute("PRAGMA table_info(splits)")}
     assert store_module.ensure_m3_schema(store.db) is False  # nothing left to repair
+    assert row(store, "c1")["classified_at_ms"] is None  # reset: it will be classified again
+    labels.refresh(store)  # even before that, no strong clip without its own reference
+    assert row(store, "c1")["label"] == "unlabelled" and row(store, "c1")["reference_text"] is None
+    labels.label_all(store)
+    r = row(store, "c1")
+    assert (r["label"], r["acoustic_reference"], r["edited_positions"]) == ("strong", "send it to kit", "[[3, 4]]")
     store.close()
+
+
+def test_a_strong_looking_clip_without_a_reference_is_never_strong(store):
+    cid = add_clip(store, 1, outcome="edited")
+    store.db.execute("UPDATE clips SET edited_text = 'Send it to Kit.', classified_at_ms = 5 WHERE clip_id = ?", (cid,))
+    store.db.execute("INSERT INTO edits (clip_id, idx, raw_from, final_from, to_text, kind) VALUES (?, 0, 'kip', 'kip', 'Kit', 'acoustic')", (cid,))
+    labels.refresh(store)
+    assert label_of(store, cid) == ("unlabelled", 0)
 
 
 def test_the_process_lock_and_the_lock_probe_share_one_flock(tmp_path):

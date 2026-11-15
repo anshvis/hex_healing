@@ -148,11 +148,9 @@ CREATE TABLE IF NOT EXISTS splits (
     created_at_ms INTEGER NOT NULL,
     manifest_path TEXT,
     manifest_sha256 TEXT,
-    sidecar_sha256 TEXT,
     frozen INTEGER NOT NULL DEFAULT 0,
     n_clips INTEGER NOT NULL DEFAULT 0,
-    n_words INTEGER NOT NULL DEFAULT 0,
-    detail TEXT  -- a train snapshot's record: model, note, and each member's texts (verified against test sets)
+    n_words INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS split_members (
     split_id TEXT NOT NULL REFERENCES splits(split_id),
@@ -179,6 +177,8 @@ BEGIN SELECT RAISE(ABORT, 'a frozen split never changes'); END;
 """
 
 
+# `splits` columns beyond the table's base layout, defined once and always added by the guarded loop below:
+# the pin of the sidecar, and a train snapshot's record (model, note, each member's texts).
 M3_SPLIT_COLUMNS = {"sidecar_sha256": "TEXT", "detail": "TEXT"}
 
 
@@ -204,15 +204,25 @@ def ensure_m3_schema(db: sqlite3.Connection) -> bool:
     return True
 
 
-def _migrate_m3(db: sqlite3.Connection) -> None:
-    ensure_m3_schema(db)
-    # One time: before `acoustic_reference` the classifier wrote `reference_text`, which labels later
-    # overwrote, and `edited_positions` did not exist. Classify those clips again (the next `label all`
-    # does), so their strong references and edited words come back. Nothing re-runs this.
-    db.execute(
-        "UPDATE clips SET classified_at_ms = NULL WHERE classified_at_ms IS NOT NULL AND acoustic_reference IS NULL"
+def reset_stale_classifications(db: sqlite3.Connection) -> None:
+    """Classify again (the next `label all` does) every clip classified before `acoustic_reference`
+    existed: it has an acoustic edit, a classification time and no reference of its own. Before that
+    column the classifier wrote `reference_text`, which labels later overwrote, and `edited_positions`
+    did not exist. Safe to repeat and cheap when there is nothing to do: once reclassified, such a clip
+    has its reference and is never selected again."""
+    stale = (
+        "classified_at_ms IS NOT NULL AND acoustic_reference IS NULL"
         " AND clip_id IN (SELECT clip_id FROM edits WHERE kind = 'acoustic')"
     )
+    if db.execute(f"SELECT 1 FROM clips WHERE {stale} LIMIT 1").fetchone():
+        db.execute(f"UPDATE clips SET classified_at_ms = NULL WHERE {stale}")
+
+
+def _migrate_m3(db: sqlite3.Connection) -> None:
+    """The M3 step: the schema, then the reset. Both are safe to repeat, so this runs on every open and
+    a file stamped v7 by an earlier build of this schema is repaired and its strong clips come back."""
+    ensure_m3_schema(db)
+    reset_stale_classifications(db)
 
 
 MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, _migrate_m3]
@@ -351,8 +361,8 @@ class Store:
                 else:
                     self.db.executescript(migration)
                 self.db.execute(f"PRAGMA user_version = {step + 1}")
-            if version == SCHEMA_VERSION:
-                ensure_m3_schema(self.db)
+            if version == SCHEMA_VERSION:  # no step ran: still check the M3 schema and its reset
+                _migrate_m3(self.db)
             self.db.commit()
 
     @contextlib.contextmanager

@@ -62,6 +62,8 @@ def derive(row: sqlite3.Row, kinds: set[str], review: sqlite3.Row | None) -> tup
         if "unmapped" in kinds:
             return "unlabelled", None, None  # an edit we can't place: the reference may be wrong
         if "acoustic" in kinds:
+            if not row["acoustic_reference"]:
+                return "unlabelled", None, None  # an acoustic edit with no classifier output: never a reference-less strong clip
             return "strong", row["acoustic_reference"], None
         # Only rewrites: you changed your mind, but the speech was heard right.
         return "weak", row["raw_text"], None
