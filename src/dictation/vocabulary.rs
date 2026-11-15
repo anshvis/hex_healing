@@ -81,10 +81,12 @@ pub(crate) fn serialize_saved<S: serde::Serializer>(
 /// How readily transcription swaps heard words for a vocabulary term that
 /// sounds like them. Measured on real recordings in
 /// `docs/research/vocabulary-boost-results.md`.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum VocabularyBoost {
-    /// Transcripts are left as the model heard them.
+    /// Transcripts are left as the model heard them. Not a CLI choice: with
+    /// no vocabulary a command line simply omits it.
+    #[value(skip)]
     Off,
     Light,
     #[default]
@@ -283,7 +285,7 @@ pub(crate) fn transcription_bias()
     bias_for(&transcription_entries(), boost)
 }
 
-fn bias_for(
+pub(crate) fn bias_for(
     entries: &[VocabularyEntry],
     boost: VocabularyBoost,
 ) -> Option<(Vec<String>, transcribe_cpp::ParakeetVocabularyOptions)> {
@@ -542,6 +544,18 @@ pub fn remove(list: &mut Vec<VocabularyEntry>, term: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_boost_is_normal_and_off_is_no_command_line_choice() {
+        use clap::ValueEnum as _;
+        assert_eq!(VocabularyBoost::default(), VocabularyBoost::Normal);
+        let names: Vec<_> = VocabularyBoost::value_variants()
+            .iter()
+            .filter_map(|boost| boost.to_possible_value())
+            .map(|value| value.get_name().to_string())
+            .collect();
+        assert_eq!(names, ["light", "normal", "strong"]);
+    }
 
     fn entry(term: &str, sounds_like: &[&str]) -> VocabularyEntry {
         VocabularyEntry {

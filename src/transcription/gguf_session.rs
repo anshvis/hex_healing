@@ -156,6 +156,10 @@ impl VocabularySlot {
     }
 }
 
+/// A vocabulary bias as `dictation::vocabulary::bias_for` builds it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) type RunBias = (Vec<String>, transcribe_cpp::ParakeetVocabularyOptions);
+
 /// A run this recent leaves the weights resident (ggml keeps them so for three
 /// minutes), so a prewarm after it would only repeat work.
 const RECENT_RUN: Duration = Duration::from_secs(60);
@@ -195,6 +199,27 @@ impl OfflineGgufSession {
             vocabulary,
             architecture,
         })
+    }
+
+    /// Sets `bias` on `options` for every run, as the benchmark does. Refused
+    /// unless dictation would bias this model the same way
+    /// ([`VocabularySlot::Bias`]): Whisper and Qwen3-ASR take the vocabulary
+    /// as a prompt, which a bias would not measure.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn fix_run_bias(
+        &self,
+        (terms, bias): RunBias,
+        options: &mut transcribe_cpp::RunOptions,
+    ) -> color_eyre::eyre::Result<()> {
+        if !matches!(self.vocabulary, VocabularySlot::Bias) {
+            color_eyre::eyre::bail!(
+                "a {} model does not take a vocabulary bias; only Parakeet models do",
+                self.architecture
+            );
+        }
+        options.vocabulary = terms;
+        options.family = Some(transcribe_cpp::RunExtension::ParakeetVocabulary(bias));
+        Ok(())
     }
 
     /// `options` with the vocabulary added, read now so a settings change

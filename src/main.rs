@@ -179,6 +179,13 @@ enum Command {
         /// Full-corpus measured passes.
         #[arg(long, default_value_t = 7)]
         runs: usize,
+        /// Bias every clip with this vocabulary (a settings.json-shaped JSON
+        /// list), as dictation does.
+        #[arg(long)]
+        vocabulary: Option<PathBuf>,
+        /// How strongly `--vocabulary` biases; Hex's own default when omitted.
+        #[arg(long, value_enum, requires = "vocabulary")]
+        boost: Option<dictation::vocabulary::VocabularyBoost>,
     },
 }
 
@@ -582,18 +589,30 @@ fn main() -> Result<()> {
             model,
             warmups,
             runs,
+            vocabulary,
+            boost,
         } => {
             let backend = match backend {
-                TranscriptionBenchmarkBackend::Onnx => transcription::benchmark::Backend::Onnx,
-                TranscriptionBenchmarkBackend::TranscribeCpp => {
-                    transcription::benchmark::Backend::TranscribeCpp {
-                        model: match model {
-                            Some(model) => model,
-                            None => parakeet::default_model_path()?,
-                        },
-                    }
+                TranscriptionBenchmarkBackend::Onnx if vocabulary.is_some() => {
+                    Err("--vocabulary needs the transcribe-cpp backend".to_string())
                 }
-            };
+                TranscriptionBenchmarkBackend::Onnx => Ok(transcription::benchmark::Backend::Onnx),
+                TranscriptionBenchmarkBackend::TranscribeCpp => {
+                    let model = match model {
+                        Some(model) => model,
+                        None => parakeet::default_model_path()?,
+                    };
+                    transcription::benchmark::Backend::transcribe_cpp(
+                        model,
+                        vocabulary.as_deref(),
+                        boost,
+                    )
+                }
+            }
+            .unwrap_or_else(|message| {
+                eprintln!("error: {message}");
+                std::process::exit(2);
+            });
             transcription::benchmark::run(&manifest, warmups, runs, backend)
         }
     }

@@ -64,8 +64,12 @@ Build a representative dictation corpus of at least 12 clips covering:
 - corrections, hesitations, and repeated words
 - clip durations from roughly 1 to 20 seconds
 
-The production runtime pads clips shorter than 1.5 seconds. The harness applies
-the same padding but uses the original spoken duration when calculating RTF.
+The production runtime pads clips shorter than 1.5 seconds. The harness prepares
+each clip as dictation does (`pad_gguf_samples`: that minimum, then the model's
+trailing silence, 400 ms for Parakeet Unified English; the model is recognised
+from the `--model` file's name and size) but uses the original spoken duration when
+calculating RTF. Before this, the harness skipped the trailing silence, so a
+Unified English WER measured earlier is not comparable to one measured now.
 
 ## Command
 
@@ -86,6 +90,47 @@ cargo run --release --features onnx-benchmark -- \
   --backend onnx \
   > perf/transcription-corpus/transcribe-rs-onnx-int8.jsonl
 ```
+
+### Biasing with a vocabulary
+
+The manifest's `vocabulary` only scores the run. To bias the model the way
+dictation does, pass a vocabulary file in `settings.json`'s shape:
+
+```sh
+echo '[{"term":"Qorvyx","sounds_like":["corvix"]}]' > vocabulary.json
+hex benchmark-transcription manifest.json --vocabulary vocabulary.json [--boost light|normal|strong]
+```
+
+Each item is a term string or `{"term", "sounds_like": []}`, read into the
+same entries `settings.json` holds and then added the way the Vocabulary pane
+adds them: whitespace cleaned, duplicates merged, terms and spellings at most 64
+characters, at most 16 spellings per term. `sounds_like: null`, an empty term
+and an empty list are errors. The terms and options come from the same
+`bias_for` dictation uses, so the first 64 terms apply (the `model` record's
+`bias_vocabulary.terms` counts those, `input_terms` the entries read) and
+`--boost` defaults to Hex's own default (`normal`).
+
+The bias is set once, when the model loads, on that run's options. Because the
+options then carry it, the global vocabulary, Labs gate and boost are not read
+for a biased run. Without the flag the benchmark reads no vocabulary either way
+(it never loads Hex's settings). With the flag the `model` record gains
+`bias_vocabulary` (`terms`, `input_terms`, `boost`). An unreadable or invalid
+file exits 2 and names the item (`at [1]: ...`).
+
+Only Parakeet models take it, as in dictation, where Whisper and Qwen3-ASR read
+the vocabulary as a prompt that this flag does not set. A catalog model of
+another family, or ONNX, is refused with exit 2 before anything loads. A file
+the catalog does not name is checked once it loads, and one whose architecture
+does not take the bias fails the run (exit 1).
+
+The benchmark is whole-clip: no streaming, and none of the mode or screen
+terms dictation adds, only the list in the file.
+
+Clip padding follows the model file. A transcribe-cpp file is matched to the
+catalog by name and size; one that is not (a renamed copy, an imported
+fine-tune) gets no trailing silence, says so on stderr, and the `model` record
+shows `trailing_silence_samples`. Dictation gives an imported Unified model the
+same zero (decisions D-39).
 
 ## Provisional M2 Max Comparison
 
