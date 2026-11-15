@@ -222,22 +222,27 @@ impl Paster {
         }
     }
 
-    /// Returns the text that reached the field: `text` after the
-    /// continuation join and smart spacing. Copy only and Return insert
-    /// nothing; copy only returns the text it copied, Return an empty string.
-    pub fn paste(&mut self, text: &str, mode: PasteMode) -> Result<String> {
+    /// What the last continuing paste put in the field: its text after the
+    /// continuation join and smart spacing. Empty after a copy only or a
+    /// Standalone paste.
+    pub fn inserted(&self) -> String {
+        self.continuation
+            .as_ref()
+            .map(|continuation| continuation.inserted.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn paste(&mut self, text: &str, mode: PasteMode) -> Result<()> {
         if matches!(mode, PasteMode::CopyOnly) {
-            self.copy_only(text)?;
-            return Ok(text.to_string());
+            return self.copy_only(text);
         }
         if matches!(mode, PasteMode::Send) {
-            let inserted = self.paste(text, PasteMode::Continue)?;
+            self.paste(text, PasteMode::Continue)?;
             self.continuation = None;
-            return Ok(inserted);
+            return Ok(());
         }
         if matches!(mode, PasteMode::Return) {
-            keyboard::post_return()?;
-            return Ok(String::new());
+            return keyboard::post_return();
         }
         let revision = self.activity.revision();
         let continuation = self.continuation.as_ref().filter(|continuation| {
@@ -269,11 +274,11 @@ impl Paster {
         } else {
             self.paste_through_clipboard(&text, mode)?;
         }
-        self.continuation = (!matches!(mode, PasteMode::Standalone)).then(|| Continuation {
+        self.continuation = (!matches!(mode, PasteMode::Standalone)).then_some(Continuation {
             revision,
-            inserted: text.clone(),
+            inserted: text,
         });
-        Ok(text)
+        Ok(())
     }
 
     /// Leaves `text` on the clipboard for the user to paste: no ⌘V, no typed

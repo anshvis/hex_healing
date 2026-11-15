@@ -407,6 +407,12 @@ impl HistoryStore {
         self.revision
     }
 
+    /// Whether a dictation would be recorded: retention is not Off.
+    #[cfg(target_os = "macos")]
+    pub fn records(&self) -> bool {
+        !self.retention.is_off()
+    }
+
     /// Record one successful result. Returns the stable entry ID, or `None`
     /// while retention is off.
     pub fn record(&mut self, draft: HistoryDraft, now_ms: u64) -> io::Result<Option<u64>> {
@@ -787,12 +793,14 @@ impl History {
 
     /// Keep a correction observation on entry `id` ([`corrections`]).
     #[cfg(target_os = "macos")]
-    pub fn observe_correction(
-        &self,
-        id: u64,
-        observation: crate::dictation::correction_watch::CorrectionObservation,
-    ) -> io::Result<bool> {
-        self.synced().observe_correction(id, observation)
+    pub fn observe_correction(&self, id: u64, correction: HistoryCorrection) -> io::Result<bool> {
+        self.synced().observe_correction(id, correction)
+    }
+
+    /// Whether a dictation would be recorded: retention is not Off.
+    #[cfg(target_os = "macos")]
+    pub fn records(&self) -> bool {
+        self.synced().records()
     }
 
     pub fn replace_text(&self, id: u64, transcript: Transcript) -> io::Result<bool> {

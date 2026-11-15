@@ -30,10 +30,17 @@ pub const ESCAPE_WINDOW: Duration = Duration::from_millis(500);
 #[cfg(target_os = "macos")]
 static ESCAPES: AtomicU64 = AtomicU64::new(0);
 
-/// Counts one Escape press seen by the shortcut listener.
+/// Counts the Escape and Return presses the shortcut listener sees: Escape
+/// can skip a dictation's Return, and a Return may be a chat send that
+/// Labs › Learn from corrections tells from a newline.
 #[cfg(target_os = "macos")]
-pub fn note_escape() {
-    ESCAPES.fetch_add(1, Ordering::AcqRel);
+pub fn note_input(event: crate::suppression::InputEvent) {
+    if event.is_escape_down() {
+        ESCAPES.fetch_add(1, Ordering::AcqRel);
+    }
+    if event.is_return_down() {
+        super::correction_watch::note_return();
+    }
 }
 
 /// Whether a submitted dictation may still press Return: no Escape since it

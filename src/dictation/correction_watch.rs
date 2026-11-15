@@ -2,29 +2,27 @@
 //! correction watcher (macOS).
 //!
 //! With the lab on, the paste worker reads the focused element of the app it
-//! is about to paste into ([`Handoff::read`]), and once the paste and its
+//! is about to paste into ([`Watch::before`]), and once the paste and its
 //! History record both succeed it submits a [`PasteTarget`]. The queue here
 //! holds at most [`QUEUE_CAPACITY`] targets and drops the oldest; the timer
-//! and the re-read of the field belong to the watcher that drains it. Nothing
-//! is read, retained or queued while the lab is off or locked, and nothing
-//! here logs or serializes text: a [`PasteTarget`] lives in memory only.
-//! See `docs/features/corrections.md` for the privacy contract.
+//! and the re-read of the field belong to the watcher that drains it, which
+//! stores what it saw on the target's History entry. Nothing is read,
+//! retained or queued while the lab is off or locked (one gate,
+//! [`crate::labs::learn_from_corrections`], which includes the managed lock),
+//! and nothing here logs or serializes text: a [`PasteTarget`] lives in
+//! memory only. See `docs/features/corrections.md` for the privacy contract.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::accessibility::{self, RetainedElement};
-use crate::policy::{Lock, Policy};
+use crate::history::History;
 
 mod locate;
 mod session;
 mod worker;
-
-pub use session::{CorrectionObservation, Outcome};
-#[cfg(test)]
-pub use session::{Lost, Trigger};
-pub use worker::set_sink;
 
 /// Targets waiting for the watcher. A full queue drops the oldest.
 pub const QUEUE_CAPACITY: usize = 8;
@@ -35,11 +33,13 @@ pub struct PasteTarget {
     pub pid: i32,
     /// The focused element read before the paste.
     pub element: RetainedElement,
-    /// The History entry recording the dictation.
+    /// The History that kept the dictation, and the entry that did.
+    pub history: History,
     pub entry_id: u64,
     /// The text that reached the field after the continuation join and smart
     /// spacing, not the dictation's final text.
     pub inserted: String,
+    /// When the paste completed, before History's write.
     pub pasted_at: Instant,
 }
 
@@ -47,21 +47,28 @@ pub struct PasteTarget {
 pub struct Pending {
     pid: i32,
     element: RetainedElement,
+    inserted: String,
+    pasted_at: Instant,
 }
 
 impl Pending {
     pub fn new(pid: i32, element: RetainedElement) -> Self {
-        Self { pid, element }
+        Self {
+            pid,
+            element,
+            inserted: String::new(),
+            pasted_at: Instant::now(),
+        }
     }
 
-    /// The target once the paste inserted `inserted` and History kept `entry_id`.
-    pub fn into_target(self, entry_id: u64, inserted: String) -> PasteTarget {
+    fn into_target(self, history: History, entry_id: u64) -> PasteTarget {
         PasteTarget {
             pid: self.pid,
             element: self.element,
+            history,
             entry_id,
-            inserted,
-            pasted_at: Instant::now(),
+            inserted: self.inserted,
+            pasted_at: self.pasted_at,
         }
     }
 }
@@ -71,33 +78,89 @@ pub trait Handoff {
     /// The element about to be pasted into. `None` when the lab is off or
     /// locked, or when no readable, non-secure field has focus.
     fn read(&mut self) -> Option<Pending>;
+    /// What the paste just inserted into the field.
+    fn inserted(&self) -> String;
     fn submit(&mut self, target: PasteTarget);
 }
 
 /// The real handoff: reads through Accessibility and queues in [`QUEUE`].
-pub struct Live;
+/// `inserted` is the paster's last insertion.
+pub struct Live<'a>(pub &'a dyn Fn() -> String);
 
-impl Handoff for Live {
+impl Handoff for Live<'_> {
     fn read(&mut self) -> Option<Pending> {
-        if !enabled() {
+        if !crate::labs::learn_from_corrections() {
             return None;
         }
         let pid = crate::dictation::context::frontmost_pid()?;
         accessibility::focused_element(pid).map(|element| Pending::new(pid, element))
     }
 
+    fn inserted(&self) -> String {
+        (self.0)()
+    }
+
     fn submit(&mut self, target: PasteTarget) {
-        submit(target);
+        let dropped = QUEUE.push(target);
+        if dropped > 0 {
+            tracing::debug!(dropped, "correction watch dropped");
+        }
+        worker::wake();
     }
 }
 
-/// Whether the lab is on and no managed lock holds it off.
-fn enabled() -> bool {
-    allowed(crate::labs::learn_from_corrections(), Policy::current())
+/// One paste's watch, around the paste: [`Watch::before`] reads the field,
+/// [`Watch::pasted`] notes what landed and when, [`Watch::recorded`] submits
+/// it once History kept the dictation. Empty when there is nothing to watch.
+#[derive(Default)]
+pub struct Watch(Option<Pending>);
+
+impl Watch {
+    /// Reads the field the paste goes into, before it: focus may move
+    /// because of the paste. Nothing is read without a History that records.
+    pub fn before(handoff: &mut impl Handoff, history: Option<&History>) -> Self {
+        Self(
+            history
+                .filter(|history| history.records())
+                .and_then(|_| handoff.read()),
+        )
+    }
+
+    /// The paste completed now with `handoff.inserted()`.
+    pub fn pasted(&mut self, handoff: &impl Handoff) {
+        if let Some(pending) = &mut self.0 {
+            pending.pasted_at = Instant::now();
+            pending.inserted = handoff.inserted();
+            if pending.inserted.is_empty() {
+                self.0 = None;
+            }
+        }
+    }
+
+    /// Submits the target if History kept the dictation as `entry_id`.
+    pub fn recorded(
+        self,
+        handoff: &mut impl Handoff,
+        history: Option<&History>,
+        entry_id: Option<u64>,
+    ) {
+        if let (Some(pending), Some(history), Some(entry_id)) = (self.0, history, entry_id) {
+            handoff.submit(pending.into_target(history.clone(), entry_id));
+        }
+    }
 }
 
-fn allowed(lab_on: bool, policy: Policy) -> bool {
-    lab_on && !policy.locks(Lock::Corrections)
+/// Return presses the listener has seen. A watch compares the count with the
+/// one at its start to tell that one came since.
+static RETURNS: AtomicU64 = AtomicU64::new(0);
+
+/// Counts one Return or Enter press seen by the shortcut listener.
+pub fn note_return() {
+    RETURNS.fetch_add(1, Ordering::AcqRel);
+}
+
+fn returns() -> u64 {
+    RETURNS.load(Ordering::Acquire)
 }
 
 /// Bounded, oldest-dropped queue of targets.
@@ -144,56 +207,120 @@ impl Queue {
 
 static QUEUE: Queue = Queue(Mutex::new(VecDeque::new()));
 
-/// Queues `target` for the watcher while the lab is on and not locked. Off,
-/// it is dropped, which releases its element.
-pub fn submit(target: PasteTarget) {
-    submit_to(enabled(), &QUEUE, target);
-}
-
-fn submit_to(allowed: bool, queue: &Queue, target: PasteTarget) {
-    if !allowed {
-        return;
-    }
-    let dropped = queue.push(target);
-    if dropped > 0 {
-        tracing::debug!(dropped, "correction watch dropped");
-    }
-    worker::wake();
+/// A History over a throwaway file, for tests.
+#[cfg(test)]
+fn history_for_test() -> History {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let directory = std::env::temp_dir().join(format!(
+        "hex-correction-watch-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    History::new(crate::history::HistoryStore::open(
+        directory.join("history.json"),
+        crate::history::HistoryRetention::Week,
+        crate::history::now_ms(),
+    ))
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::policy::{Lock, Policy};
 
     fn target(entry_id: u64) -> PasteTarget {
-        Pending::new(1, RetainedElement::for_test()).into_target(entry_id, "pasted".into())
+        Pending::new(1, RetainedElement::for_test()).into_target(history_for_test(), entry_id)
+    }
+
+    fn off() -> String {
+        String::new()
     }
 
     #[test]
-    fn lab_off_submits_nothing() {
-        let queue = Queue::default();
-        submit_to(allowed(false, Policy::default()), &queue, target(1));
-        assert_eq!(queue.len(), 0);
-        // The real gate reads the lab. Set it off here rather than read the
-        // saved settings, which are the machine's own (nextest gives each test
-        // its own process, so this can't leak into another test).
+    fn lab_off_reads_nothing() {
+        // Set it off here rather than read the saved settings, which are the
+        // machine's own (nextest gives each test its own process, so this
+        // can't leak into another test).
         crate::labs::apply(&crate::app_settings::LabsSettings::default());
-        let before = QUEUE.len();
-        submit(target(2));
-        assert_eq!(QUEUE.len(), before);
-        assert!(Live.read().is_none(), "no Accessibility read while off");
+        assert!(
+            Live(&off).read().is_none(),
+            "no Accessibility read while off"
+        );
+        let history = history_for_test();
+        let watch = Watch::before(&mut Live(&off), Some(&history));
+        assert!(watch.0.is_none());
     }
 
     #[test]
-    fn policy_lock_submits_nothing() {
-        let locked = Policy::default().with(Lock::Corrections);
-        assert!(!allowed(true, locked));
-        let queue = Queue::default();
-        submit_to(allowed(true, locked), &queue, target(1));
-        assert_eq!(queue.len(), 0);
-        assert!(allowed(true, Policy::default()));
-        submit_to(allowed(true, Policy::default()), &queue, target(2));
-        assert_eq!(queue.len(), 1);
+    fn policy_lock_reads_nothing_through_live() {
+        let on = crate::app_settings::LabsSettings {
+            learn_from_corrections: true,
+            ..Default::default()
+        };
+        {
+            let _forced = Policy::forced_for_test(Policy::default().with(Lock::Corrections));
+            crate::labs::apply(&on);
+            assert!(!crate::labs::learn_from_corrections());
+            assert!(Live(&off).read().is_none());
+        }
+        // The same settings without the lock turn the gate on.
+        let _free = Policy::forced_for_test(Policy::default());
+        crate::labs::apply(&on);
+        assert!(crate::labs::learn_from_corrections());
+    }
+
+    #[test]
+    fn no_history_or_history_off_reads_nothing() {
+        struct Panics;
+        impl Handoff for Panics {
+            fn read(&mut self) -> Option<Pending> {
+                panic!("the field was read");
+            }
+            fn inserted(&self) -> String {
+                String::new()
+            }
+            fn submit(&mut self, _: PasteTarget) {}
+        }
+        assert!(Watch::before(&mut Panics, None).0.is_none());
+        let history = history_for_test();
+        history
+            .set_retention(crate::history::HistoryRetention::Off)
+            .unwrap();
+        assert!(Watch::before(&mut Panics, Some(&history)).0.is_none());
+    }
+
+    #[test]
+    fn the_paste_time_and_inserted_text_come_from_the_paste() {
+        struct Fake(Vec<u64>);
+        impl Handoff for Fake {
+            fn read(&mut self) -> Option<Pending> {
+                Some(Pending::new(1, RetainedElement::for_test()))
+            }
+            fn inserted(&self) -> String {
+                " hello".into()
+            }
+            fn submit(&mut self, target: PasteTarget) {
+                assert_eq!(target.inserted, " hello");
+                self.0.push(target.entry_id);
+            }
+        }
+        let history = history_for_test();
+        let mut fake = Fake(Vec::new());
+        let mut watch = Watch::before(&mut fake, Some(&history));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        watch.pasted(&fake);
+        let pasted_at = watch.0.as_ref().unwrap().pasted_at;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut again = Watch::before(&mut fake, Some(&history));
+        again.pasted(&fake);
+        assert!(again.0.as_ref().unwrap().pasted_at > pasted_at);
+        watch.recorded(&mut fake, Some(&history), None);
+        assert!(fake.0.is_empty(), "no entry, no target");
+        again.recorded(&mut fake, Some(&history), Some(7));
+        assert_eq!(fake.0, [7]);
     }
 
     #[test]
