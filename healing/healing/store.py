@@ -21,7 +21,7 @@ import soundfile
 from healing.paths import healing_home
 
 SAMPLE_RATE = 16_000
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 CREATE TABLE audio (
@@ -121,7 +121,67 @@ SCHEMA_V6 = """
 ALTER TABLE clips ADD COLUMN classified_at_ms INTEGER;
 """
 
-MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6]
+# v7 (M3): weights, review provenance and the split registry. Every statement is guarded, so a run
+# that stopped between two of them (executescript commits per statement) finishes on the next open.
+M3_COLUMNS = {
+    "weight": "REAL NOT NULL DEFAULT 0",
+    "edited_positions": "TEXT",
+    "review_strategy": "TEXT",
+    "split_cluster": "TEXT",
+}
+
+SCHEMA_M3 = """
+CREATE TABLE IF NOT EXISTS reviews (
+    review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    clip_id TEXT NOT NULL REFERENCES clips(clip_id),
+    reviewed_at_ms INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('accept', 'fix', 'reject')),
+    text TEXT,
+    strategy TEXT NOT NULL CHECK (strategy IN ('random', 'uncertain'))
+);
+CREATE INDEX IF NOT EXISTS reviews_clip ON reviews(clip_id);
+CREATE TABLE IF NOT EXISTS splits (
+    split_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('rolling', 'golden', 'general', 'edited', 'train')),
+    parent_version TEXT,
+    cutoff_ms INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    manifest_path TEXT,
+    manifest_sha256 TEXT,
+    frozen INTEGER NOT NULL DEFAULT 0,
+    n_clips INTEGER NOT NULL DEFAULT 0,
+    n_words INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS split_members (
+    split_id TEXT NOT NULL REFERENCES splits(split_id),
+    clip_id TEXT NOT NULL REFERENCES clips(clip_id),
+    PRIMARY KEY (split_id, clip_id)
+);
+CREATE INDEX IF NOT EXISTS split_members_clip ON split_members(clip_id);
+-- G-10 in the schema: exactly one golden row is ever frozen, and a frozen split never changes.
+CREATE UNIQUE INDEX IF NOT EXISTS one_frozen_golden ON splits(kind) WHERE frozen = 1 AND kind = 'golden';
+CREATE TRIGGER IF NOT EXISTS frozen_split_update BEFORE UPDATE ON splits WHEN OLD.frozen = 1
+BEGIN SELECT RAISE(ABORT, 'a frozen split never changes'); END;
+CREATE TRIGGER IF NOT EXISTS frozen_split_delete BEFORE DELETE ON splits WHEN OLD.frozen = 1
+BEGIN SELECT RAISE(ABORT, 'a frozen split never changes'); END;
+CREATE TRIGGER IF NOT EXISTS frozen_members_insert BEFORE INSERT ON split_members
+WHEN (SELECT frozen FROM splits WHERE split_id = NEW.split_id) = 1
+BEGIN SELECT RAISE(ABORT, 'a frozen split never changes'); END;
+CREATE TRIGGER IF NOT EXISTS frozen_members_delete BEFORE DELETE ON split_members
+WHEN (SELECT frozen FROM splits WHERE split_id = OLD.split_id) = 1
+BEGIN SELECT RAISE(ABORT, 'a frozen split never changes'); END;
+"""
+
+
+def _migrate_m3(db: sqlite3.Connection) -> None:
+    have = {row[1] for row in db.execute("PRAGMA table_info(clips)")}
+    for name, definition in M3_COLUMNS.items():
+        if name not in have:
+            db.execute(f"ALTER TABLE clips ADD COLUMN {name} {definition}")
+    db.executescript(SCHEMA_M3)
+
+
+MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, _migrate_m3]
 
 
 class StoreError(Exception):
@@ -201,7 +261,11 @@ class Store:
         if version > SCHEMA_VERSION:
             raise StoreError(f"dataset is schema {version}; this healing knows {SCHEMA_VERSION}")
         for step in range(version, SCHEMA_VERSION):
-            self.db.executescript(MIGRATIONS[step])
+            migration = MIGRATIONS[step]
+            if callable(migration):
+                migration(self.db)
+            else:
+                self.db.executescript(migration)
             self.db.execute(f"PRAGMA user_version = {step + 1}")
         self.db.commit()
 

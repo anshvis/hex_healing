@@ -138,9 +138,10 @@ def compute(
         "SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM audio WHERE evicted_at_ms IS NULL"
     ).fetchone()
     status.audio_bytes = kept[1]
-    status.labels = {
-        row[0]: row[1] for row in db.execute("SELECT label, COUNT(*) FROM clips GROUP BY label")
-    }
+    status.labels = {label: 0 for label in ("strong", "verified", "weak", "unlabelled")}
+    status.labels.update(
+        {row[0]: row[1] for row in db.execute("SELECT label, COUNT(*) FROM clips GROUP BY label")}
+    )
     status.clusters = db.execute("SELECT COUNT(*) FROM clusters").fetchone()[0]
     run = db.execute("SELECT * FROM runs ORDER BY run_id DESC LIMIT 1").fetchone()
     if run:

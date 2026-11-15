@@ -161,20 +161,33 @@ def label_reset(label: str) -> str:
     return label_after(label, False)
 
 
-def reference_text(raw_text: str, edits: list[Edit]) -> str | None:
+def reference_with_spans(raw_text: str, edits: list[Edit]) -> tuple[str | None, list[tuple[int, int]]]:
     """`raw_text` with only the acoustic edits applied, or None when no edit is acoustic.
 
     The person's own span replaces each one, as they typed it ("can't", "five"); only its case
-    follows the raw text, which the speech model writes in lower case.
+    follows the raw text, which the speech model writes in lower case. Also the character span
+    each replacement occupies in the result, in reading order.
     """
-    acoustic = sorted((e for e in edits if e.kind == "acoustic"), key=lambda e: e.raw_span[0], reverse=True)
+    acoustic = sorted((e for e in edits if e.kind == "acoustic"), key=lambda e: e.raw_span[0])
     if not acoustic:
-        return None
-    result = raw_text
+        return None, []
+    pieces: list[str] = []
+    spans: list[tuple[int, int]] = []
+    cursor, length = 0, 0
     for edit in acoustic:
         replacement = edit.to_text.lower() if edit.raw_from == edit.raw_from.lower() else edit.to_text
-        result = result[: edit.raw_span[0]] + replacement + result[edit.raw_span[1] :]
-    return result
+        before = raw_text[cursor : edit.raw_span[0]]
+        pieces += [before, replacement]
+        length += len(before)
+        spans.append((length, length + len(replacement)))
+        length += len(replacement)
+        cursor = edit.raw_span[1]
+    pieces.append(raw_text[cursor:])
+    return "".join(pieces), spans
+
+
+def reference_text(raw_text: str, edits: list[Edit]) -> str | None:
+    return reference_with_spans(raw_text, edits)[0]
 
 
 def label_corrections(store: Store, since_ms: int | None = None, recompute: bool = False) -> Counter:

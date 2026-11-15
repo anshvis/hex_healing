@@ -70,6 +70,9 @@ def main(argv: list[str] | None = None) -> int:
     corrected.add_argument("--since", help="3d, a date or RFC 3339")
     corrected.add_argument("--recompute", action="store_true", help="classify every edited clip again")
 
+    label_all = label.add_parser("all", help="recompute every clip's label and weight from corrections and reviews")
+    label_all.add_argument("--json", action="store_true")
+
     report = commands.add_parser("report").add_subparsers(dest="command", required=True)
     observation = report.add_parser("observation", help="per app: pastes observed and edited")
     observation.add_argument("--json", action="store_true")
@@ -85,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.group == "label":
-        return _label(args)
+        return _label_all(args) if args.command == "all" else _label(args)
     if args.group == "report":
         return _report(args)
     if args.group == "protocol":
@@ -142,6 +145,27 @@ def _label(args) -> int:
     kinds = " ".join(f"{k} {counts[k]}" for k in ("acoustic", "rewrite", "unmapped"))
     print(f"clips {counts['clips']}, {kinds}, strong {counts['strong']}, "
           f"strong_without_audio {counts['strong_without_audio']}")
+    return 0
+
+
+def _label_all(args) -> int:
+    from healing.labels import LABELS, label_all
+    from healing.store import Store, StoreError, process_lock
+
+    try:
+        with process_lock():
+            store = Store()
+            try:
+                counts = label_all(store)
+            finally:
+                store.close()
+    except StoreError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({label: counts[label] for label in LABELS}))
+    else:
+        print(", ".join(f"{label} {counts[label]}" for label in LABELS))
     return 0
 
 
