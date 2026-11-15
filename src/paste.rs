@@ -1101,6 +1101,8 @@ mod tests {
 
         // Returns without posting ⌘V or typing: only the clipboard changes.
         paster.paste("dictated text", PasteMode::CopyOnly).unwrap();
+        // Nothing was inserted into a field, so there is nothing to watch.
+        assert_eq!(paster.inserted(), "");
 
         assert_eq!(
             clipboard
