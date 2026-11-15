@@ -1337,6 +1337,26 @@ mod tests {
     }
 
     #[test]
+    fn a_first_word_retyped_as_the_word_before_the_paste_is_still_followed() {
+        // "I" backspaced and "Friday" typed where it was, right after the
+        // "Friday" that sits before the paste: as many words in as out is one
+        // change however the words line up.
+        let base = "ok. Friday I will be there in ten minutes";
+        let tail = " will be there in ten minutes";
+        let mut reads = vec![format!("ok. Friday {}", tail.trim_start())];
+        reads.extend(
+            typing("ok. Friday ", "Friday")
+                .into_iter()
+                .map(|r| format!("{r}{tail}")),
+        );
+        let reads: Vec<&str> = reads.iter().map(String::as_str).collect();
+        assert_eq!(
+            edited(base, "I will be there in ten minutes", &reads),
+            "Friday will be there in ten minutes"
+        );
+    }
+
+    #[test]
     fn a_long_paste_whose_words_are_all_near_but_none_exact_is_not_it() {
         // Every word one letter off: half the words, but not two exact.
         assert_eq!(
