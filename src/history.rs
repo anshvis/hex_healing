@@ -526,7 +526,7 @@ impl HistoryStore {
     }
 
     /// Changes entry `id` and saves; a failed save keeps it as it was.
-    pub(super) fn change(
+    fn change(
         &mut self,
         id: u64,
         change: impl FnOnce(&mut HistoryEntry) -> bool,

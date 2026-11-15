@@ -16,11 +16,12 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::accessibility::{self, RetainedElement};
+use crate::accessibility::{self, Caret, RetainedElement};
 use crate::dictation::key_counts;
 use crate::history::History;
 
 mod locate;
+use locate::Anchor;
 mod session;
 mod worker;
 
@@ -39,6 +40,8 @@ pub struct PasteTarget {
     /// The text that reached the field after the continuation join and smart
     /// spacing, not the dictation's final text.
     pub inserted: String,
+    /// Where in the field it went, if the app says where the caret was.
+    pub anchor: Option<Anchor>,
     /// When the paste completed, before History's write.
     pub pasted_at: Instant,
     /// The listener's Return count at the paste: a Return after it may be a
@@ -46,35 +49,20 @@ pub struct PasteTarget {
     pub returns: u64,
 }
 
-/// The element a paste is about to land in, read before the paste.
+/// The element a paste is about to land in, and where its caret is, read
+/// before the paste.
 pub struct Pending {
     pid: i32,
     element: RetainedElement,
-    inserted: String,
-    pasted_at: Instant,
-    returns: u64,
+    caret: Option<Caret>,
 }
 
 impl Pending {
-    pub fn new(pid: i32, element: RetainedElement) -> Self {
+    pub fn new(pid: i32, element: RetainedElement, caret: Option<Caret>) -> Self {
         Self {
             pid,
             element,
-            inserted: String::new(),
-            pasted_at: Instant::now(),
-            returns: key_counts::returns(),
-        }
-    }
-
-    fn into_target(self, history: History, entry_id: u64) -> PasteTarget {
-        PasteTarget {
-            pid: self.pid,
-            element: self.element,
-            history,
-            entry_id,
-            inserted: self.inserted,
-            pasted_at: self.pasted_at,
-            returns: self.returns,
+            caret,
         }
     }
 }
@@ -84,26 +72,21 @@ pub trait Handoff {
     /// The element about to be pasted into. `None` when the lab is off or
     /// locked, or when no readable, non-secure field has focus.
     fn read(&mut self) -> Option<Pending>;
-    /// What the paste just inserted into the field.
-    fn inserted(&self) -> String;
     fn submit(&mut self, target: PasteTarget);
 }
 
 /// The real handoff: reads through Accessibility and queues in [`QUEUE`].
-/// `inserted` is the paster's last insertion.
-pub struct Live<'a>(pub &'a dyn Fn() -> String);
+pub struct Live;
 
-impl Handoff for Live<'_> {
+impl Handoff for Live {
     fn read(&mut self) -> Option<Pending> {
         if !crate::labs::learn_from_corrections() {
             return None;
         }
         let pid = crate::dictation::context::frontmost_pid()?;
-        accessibility::focused_element(pid).map(|element| Pending::new(pid, element))
-    }
-
-    fn inserted(&self) -> String {
-        (self.0)()
+        let element = accessibility::focused_element(pid)?;
+        let caret = accessibility::caret(&element);
+        Some(Pending::new(pid, element, caret))
     }
 
     fn submit(&mut self, target: PasteTarget) {
@@ -115,33 +98,64 @@ impl Handoff for Live<'_> {
     }
 }
 
+/// What the paste put in the field, and when.
+struct Landed {
+    inserted: String,
+    anchor: Option<Anchor>,
+    at: Instant,
+    returns: u64,
+}
+
+enum State {
+    Off,
+    Before(Pending),
+    Pasted(Pending, Landed),
+}
+
 /// One paste's watch, around the paste: [`Watch::before`] reads the field,
 /// [`Watch::pasted`] notes what landed and when, [`Watch::recorded`] submits
-/// it once History kept the dictation. Empty when there is nothing to watch.
-#[derive(Default)]
-pub struct Watch(Option<Pending>);
+/// it once History kept the dictation. Off when there is nothing to watch.
+pub struct Watch(State);
+
+impl Default for Watch {
+    fn default() -> Self {
+        Self(State::Off)
+    }
+}
 
 impl Watch {
     /// Reads the field the paste goes into, before it: focus may move
     /// because of the paste. Nothing is read without a History that records.
     pub fn before(handoff: &mut impl Handoff, history: Option<&History>) -> Self {
-        Self(
-            history
-                .filter(|history| history.records())
-                .and_then(|_| handoff.read()),
-        )
+        let pending = history
+            .filter(|history| history.records())
+            .and_then(|_| handoff.read());
+        Self(pending.map_or(State::Off, State::Before))
     }
 
-    /// The paste completed now with `handoff.inserted()`.
-    pub fn pasted(&mut self, handoff: &impl Handoff) {
-        if let Some(pending) = &mut self.0 {
-            pending.pasted_at = Instant::now();
-            pending.returns = key_counts::returns();
-            pending.inserted = handoff.inserted();
-            if pending.inserted.is_empty() {
-                self.0 = None;
-            }
+    /// The paste completed now, having put `inserted` in the field. The
+    /// caret read before it says where that is: the paste's offset, and how
+    /// long the field is with it in.
+    pub fn pasted(&mut self, inserted: String) {
+        let State::Before(pending) = std::mem::replace(&mut self.0, State::Off) else {
+            return;
+        };
+        if inserted.is_empty() {
+            return;
         }
+        let len = inserted.encode_utf16().count();
+        let anchor = pending.caret.map(|caret| Anchor {
+            start: caret.location,
+            len,
+            total: (caret.characters + len).saturating_sub(caret.selected),
+        });
+        let landed = Landed {
+            inserted,
+            anchor,
+            at: Instant::now(),
+            returns: key_counts::returns(),
+        };
+        self.0 = State::Pasted(pending, landed);
     }
 
     /// Submits the target if History kept the dictation as `entry_id`.
@@ -151,8 +165,19 @@ impl Watch {
         history: Option<&History>,
         entry_id: Option<u64>,
     ) {
-        if let (Some(pending), Some(history), Some(entry_id)) = (self.0, history, entry_id) {
-            handoff.submit(pending.into_target(history.clone(), entry_id));
+        if let (State::Pasted(pending, landed), Some(history), Some(entry_id)) =
+            (self.0, history, entry_id)
+        {
+            handoff.submit(PasteTarget {
+                pid: pending.pid,
+                element: pending.element,
+                history: history.clone(),
+                entry_id,
+                inserted: landed.inserted,
+                anchor: landed.anchor,
+                pasted_at: landed.at,
+                returns: landed.returns,
+            });
         }
     }
 }
@@ -219,18 +244,29 @@ fn history_for_test() -> History {
     ))
 }
 
+/// A target over a retained element that names no field, for tests.
+#[cfg(test)]
+fn target_for_test(history: &History, entry_id: u64) -> PasteTarget {
+    PasteTarget {
+        pid: 1,
+        element: RetainedElement::for_test(),
+        history: history.clone(),
+        entry_id,
+        inserted: "pasted".into(),
+        anchor: None,
+        pasted_at: Instant::now(),
+        returns: 0,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::policy::{Lock, Policy};
 
-    fn target(entry_id: u64) -> PasteTarget {
-        Pending::new(1, RetainedElement::for_test()).into_target(history_for_test(), entry_id)
-    }
-
-    fn off() -> String {
-        String::new()
+    fn is_off(watch: &Watch) -> bool {
+        matches!(watch.0, State::Off)
     }
 
     #[test]
@@ -239,13 +275,9 @@ mod tests {
         // machine's own (nextest gives each test its own process, so this
         // can't leak into another test).
         crate::labs::apply(&crate::app_settings::LabsSettings::default());
-        assert!(
-            Live(&off).read().is_none(),
-            "no Accessibility read while off"
-        );
+        assert!(Live.read().is_none(), "no Accessibility read while off");
         let history = history_for_test();
-        let watch = Watch::before(&mut Live(&off), Some(&history));
-        assert!(watch.0.is_none());
+        assert!(is_off(&Watch::before(&mut Live, Some(&history))));
     }
 
     #[test]
@@ -258,12 +290,26 @@ mod tests {
             let _forced = Policy::forced_for_test(Policy::default().with(Lock::Corrections));
             crate::labs::apply(&on);
             assert!(!crate::labs::learn_from_corrections());
-            assert!(Live(&off).read().is_none());
+            assert!(Live.read().is_none());
         }
         // The same settings without the lock turn the gate on.
         let _free = Policy::forced_for_test(Policy::default());
         crate::labs::apply(&on);
         assert!(crate::labs::learn_from_corrections());
+    }
+
+    struct Fake {
+        caret: Option<Caret>,
+        submitted: Vec<PasteTarget>,
+    }
+
+    impl Handoff for Fake {
+        fn read(&mut self) -> Option<Pending> {
+            Some(Pending::new(1, RetainedElement::for_test(), self.caret))
+        }
+        fn submit(&mut self, target: PasteTarget) {
+            self.submitted.push(target);
+        }
     }
 
     #[test]
@@ -273,58 +319,84 @@ mod tests {
             fn read(&mut self) -> Option<Pending> {
                 panic!("the field was read");
             }
-            fn inserted(&self) -> String {
-                String::new()
-            }
             fn submit(&mut self, _: PasteTarget) {}
         }
-        assert!(Watch::before(&mut Panics, None).0.is_none());
+        assert!(is_off(&Watch::before(&mut Panics, None)));
         let history = history_for_test();
         history
             .set_retention(crate::history::HistoryRetention::Off)
             .unwrap();
-        assert!(Watch::before(&mut Panics, Some(&history)).0.is_none());
+        assert!(is_off(&Watch::before(&mut Panics, Some(&history))));
     }
 
     #[test]
-    fn the_paste_time_and_inserted_text_come_from_the_paste() {
-        struct Fake(Vec<u64>);
-        impl Handoff for Fake {
-            fn read(&mut self) -> Option<Pending> {
-                Some(Pending::new(1, RetainedElement::for_test()))
-            }
-            fn inserted(&self) -> String {
-                " hello".into()
-            }
-            fn submit(&mut self, target: PasteTarget) {
-                assert_eq!(target.inserted, " hello");
-                self.0.push(target.entry_id);
-            }
-        }
+    fn the_target_carries_what_was_pasted_when_and_where() {
         let history = history_for_test();
-        let mut fake = Fake(Vec::new());
+        let caret = Caret {
+            location: 10,
+            selected: 3,
+            characters: 40,
+        };
+        let mut fake = Fake {
+            caret: Some(caret),
+            submitted: Vec::new(),
+        };
         let mut watch = Watch::before(&mut fake, Some(&history));
         std::thread::sleep(std::time::Duration::from_millis(20));
-        watch.pasted(&fake);
-        let pasted_at = watch.0.as_ref().unwrap().pasted_at;
+        // A three-character selection is replaced by a six-character paste.
+        watch.pasted(" hello".into());
+        let State::Pasted(_, landed) = &watch.0 else {
+            panic!("the paste is noted");
+        };
+        let pasted_at = landed.at;
+        assert_eq!(
+            landed.anchor,
+            Some(Anchor {
+                start: 10,
+                len: 6,
+                total: 43
+            })
+        );
         std::thread::sleep(std::time::Duration::from_millis(20));
         let mut again = Watch::before(&mut fake, Some(&history));
-        again.pasted(&fake);
-        assert!(again.0.as_ref().unwrap().pasted_at > pasted_at);
+        again.pasted(" hello".into());
+        let State::Pasted(_, landed) = &again.0 else {
+            panic!("the paste is noted");
+        };
+        assert!(landed.at > pasted_at, "the time is taken at each paste");
         watch.recorded(&mut fake, Some(&history), None);
-        assert!(fake.0.is_empty(), "no entry, no target");
+        assert!(fake.submitted.is_empty(), "no entry, no target");
         again.recorded(&mut fake, Some(&history), Some(7));
-        assert_eq!(fake.0, [7]);
+        assert_eq!(fake.submitted.len(), 1);
+        assert_eq!(fake.submitted[0].entry_id, 7);
+        assert_eq!(fake.submitted[0].inserted, " hello");
+    }
+
+    #[test]
+    fn a_field_with_no_caret_range_has_no_anchor_and_an_empty_paste_no_watch() {
+        let history = history_for_test();
+        let mut fake = Fake {
+            caret: None,
+            submitted: Vec::new(),
+        };
+        let mut watch = Watch::before(&mut fake, Some(&history));
+        watch.pasted("hi".into());
+        watch.recorded(&mut fake, Some(&history), Some(1));
+        assert_eq!(fake.submitted[0].anchor, None);
+        let mut empty = Watch::before(&mut fake, Some(&history));
+        empty.pasted(String::new());
+        assert!(is_off(&empty));
     }
 
     #[test]
     fn queue_bounded_drops_oldest() {
+        let history = history_for_test();
         let queue = Queue::default();
         for id in 0..QUEUE_CAPACITY as u64 {
-            assert_eq!(queue.push(target(id)), 0);
+            assert_eq!(queue.push(target_for_test(&history, id)), 0);
         }
-        assert_eq!(queue.push(target(100)), 1);
-        assert_eq!(queue.push(target(101)), 1);
+        assert_eq!(queue.push(target_for_test(&history, 100)), 1);
+        assert_eq!(queue.push(target_for_test(&history, 101)), 1);
         assert_eq!(queue.len(), QUEUE_CAPACITY);
         let ids: Vec<u64> = queue
             .0

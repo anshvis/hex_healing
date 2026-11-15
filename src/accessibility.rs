@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use crate::dictation::caret_text::{Keep, bounded_units};
 
 mod watch;
-pub use watch::{FieldText, Notification, Observer, ReadError, read_value_bounded, run_loop_once};
+pub use watch::{
+    Caret, FieldText, Notification, Observer, ReadError, caret, read_value_bounded, run_loop_once,
+};
 
 type CfTypeRef = *const c_void;
 type CfStringRef = *const c_void;

@@ -64,7 +64,12 @@ impl Active {
         Self {
             history: target.history,
             entry_id: target.entry_id,
-            session: Session::new(target.element, target.inserted, target.pasted_at),
+            session: Session::new(
+                target.element,
+                target.inserted,
+                target.pasted_at,
+                target.anchor,
+            ),
             returns: target.returns,
             poll_at: observer
                 .as_ref()
@@ -196,13 +201,11 @@ mod tests {
 
     use super::*;
     use crate::accessibility::{FieldText, ReadError};
+    use crate::dictation::correction_watch::history_for_test;
     use crate::dictation::correction_watch::session::{Lost, Trigger};
-    use crate::dictation::correction_watch::{Pending, history_for_test};
     use crate::history::{HistoryDraft, HistoryKind};
 
-    fn target(history: &History, entry_id: u64) -> PasteTarget {
-        Pending::new(1, RetainedElement::for_test()).into_target(history.clone(), entry_id)
-    }
+    use crate::dictation::correction_watch::target_for_test as target;
 
     /// A field that reads as `text` until it is cleared.
     struct Fake<'a>(&'a Cell<&'static str>);
@@ -212,6 +215,8 @@ mod tests {
             Ok(FieldText {
                 text: self.0.get().to_string(),
                 windowed: false,
+                offset: 0,
+                total: self.0.get().encode_utf16().count(),
             })
         }
     }
@@ -235,7 +240,7 @@ mod tests {
     fn a_send_ends_the_watch_with_the_last_edited_read() {
         let field = Cell::new("send it to Kit");
         let t0 = now();
-        let mut session = Session::new(Fake(&field), "send it to Kip".into(), t0);
+        let mut session = Session::new(Fake(&field), "send it to Kip".into(), t0, None);
         let gate: &dyn Fn() -> bool = &|| true;
         let step = |session: &mut Session<Fake>, events: &[Event], ms| {
             advance(
@@ -262,7 +267,7 @@ mod tests {
     fn a_closed_gate_drops_the_watch_unread() {
         let field = Cell::new("send it");
         let t0 = now();
-        let mut session = Session::new(Fake(&field), "send it".into(), t0);
+        let mut session = Session::new(Fake(&field), "send it".into(), t0, None);
         let closed: &dyn Fn() -> bool = &|| false;
         let result = advance(&mut session, [Event::ValueChanged], t0, closed);
         assert!(matches!(result, Advance::Dropped));
@@ -273,7 +278,7 @@ mod tests {
     fn events_after_a_finish_are_not_fed() {
         let field = Cell::new("");
         let t0 = now();
-        let mut session = Session::new(Fake(&field), "send it".into(), t0);
+        let mut session = Session::new(Fake(&field), "send it".into(), t0, None);
         let gate: &dyn Fn() -> bool = &|| true;
         let result = advance(&mut session, [Event::Return, Event::ValueChanged], t0, gate);
         let Advance::Observed(seen) = result else {

@@ -36,6 +36,31 @@ pub struct FieldText {
     pub text: String,
     /// Only a window around the caret: the field held more than a read takes.
     pub windowed: bool,
+    /// UTF-16 units of the field before `text`.
+    pub offset: usize,
+    /// UTF-16 units in the whole field.
+    pub total: usize,
+}
+
+/// Where the caret is, in UTF-16 units: its location, how much is selected
+/// (a paste replaces it), and how long the field is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Caret {
+    pub location: usize,
+    pub selected: usize,
+    pub characters: usize,
+}
+
+/// The caret of `element`, or `None` when the app reports no selection
+/// range or no character count (then nothing is known of where text goes).
+pub fn caret(element: &RetainedElement) -> Option<Caret> {
+    let range = copy_range(&element.0, c"AXSelectedTextRange")?;
+    let characters = copy_number(&element.0, c"AXNumberOfCharacters")?;
+    Some(Caret {
+        location: usize::try_from(range.location).ok()?,
+        selected: usize::try_from(range.length).ok()?,
+        characters: usize::try_from(characters).ok()?,
+    })
 }
 
 const AX_ERROR_INVALID_UI_ELEMENT: i32 = -25202;
@@ -79,6 +104,8 @@ fn read_around_caret(
     .map(|text| FieldText {
         text,
         windowed: true,
+        offset: start.max(0) as usize,
+        total: characters.max(0) as usize,
     })
     .ok_or(ReadError::Failed)
 }
@@ -92,6 +119,8 @@ pub fn read_value_bounded(
     max_chars: usize,
 ) -> Result<FieldText, ReadError> {
     let element = &element.0;
+    // A cheap liveness probe: a gone element answers "invalid" here, before
+    // anything larger is asked of it.
     read_attribute(element, c"AXRole")?;
     if is_secure_text_field(element) {
         return Err(ReadError::Secure);
@@ -119,6 +148,8 @@ pub fn read_value_bounded(
         .map(|text| FieldText {
             text,
             windowed: false,
+            offset: 0,
+            total: length as usize,
         })
         .ok_or(ReadError::Failed)
 }
@@ -187,7 +218,9 @@ pub struct Observer {
     run_loop: *mut c_void,
     application: CfObject,
     element: CfObject,
-    inbox: *const Inbox,
+    /// What the callbacks push to; its address is the refcon, so it lives
+    /// until `Drop` has removed every registration.
+    inbox: Box<Inbox>,
     value_registered: bool,
 }
 
@@ -201,7 +234,10 @@ impl Observer {
             return None;
         }
         let observer = CfObject(observer);
-        let inbox = Box::into_raw(Box::new(Inbox::default()));
+        let inbox = Box::<Inbox>::default();
+        let refcon = std::ptr::from_ref::<Inbox>(&inbox)
+            .cast_mut()
+            .cast::<c_void>();
         // SAFETY: the element is retained here so it outlives the observer.
         let element = CfObject(unsafe { super::CFRetain(field.0.0) });
         let mut this = Self {
@@ -221,9 +257,8 @@ impl Observer {
             let name_is_value = name == c"AXValueChanged";
             let name = CfObject(cf_string_literal(name)?);
             // SAFETY: the refcon outlives every registration (see `Drop`).
-            let status = unsafe {
-                AXObserverAddNotification(this.observer.0, target.0, name.0, inbox as *mut _)
-            };
+            let status =
+                unsafe { AXObserverAddNotification(this.observer.0, target.0, name.0, refcon) };
             registered += usize::from(status == 0);
             value_registered |= name_is_value && status == 0;
         }
@@ -260,9 +295,7 @@ impl Observer {
 
     /// Everything reported since the last call.
     pub fn drain(&self) -> Vec<Notification> {
-        // SAFETY: `inbox` lives until `Drop`.
-        let inbox = unsafe { &*self.inbox };
-        std::mem::take(&mut *inbox.lock().unwrap_or_else(|e| e.into_inner()))
+        std::mem::take(&mut *self.inbox.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 
@@ -280,8 +313,6 @@ impl Drop for Observer {
                 unsafe { AXObserverRemoveNotification(self.observer.0, target.0, name.0) };
             }
         }
-        // SAFETY: balances `Box::into_raw`; no callback can run any more.
-        drop(unsafe { Box::from_raw(self.inbox.cast_mut()) });
     }
 }
 

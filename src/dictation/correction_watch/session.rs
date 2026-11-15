@@ -1,10 +1,31 @@
 //! One watched paste: when to read the field, which read to keep, and what
 //! to report. Pure over a [`Field`], so the rules are tested without
 //! Accessibility.
+//!
+//! The model. A watch is `Watching` or, after a Return, `Sending`; it ends
+//! with the observation it holds. Every read becomes a [`Reading`] (is the
+//! field blank, did it shrink, what does it hold of the paste) and
+//! [`advance`], one pure function of the phase, what is held and the input,
+//! says what to do with it: record it, ignore it, or finish. `step` applies
+//! that and is the only writer of the phase.
+//!
+//! - `Watching`: a read that holds the paste is kept; one that holds other
+//!   text drops what was kept. A blank read after something was kept is the
+//!   field cleared with no Return: a send button or delete-all, which cannot
+//!   be told apart, so it is `cleared_before_read` (training-safe: a send
+//!   button without a Return loses the observation). A blank read before
+//!   anything was kept is only noted (the paste may not have landed).
+//! - `Sending { kept, until }`: a Return enters it, with what was kept at
+//!   that moment, before its read. The tap counts the Return before the app
+//!   handles it, so the app may clear the field a tick later. For
+//!   [`SEND_WINDOW`], a read that shows the field blank, shorter or holding
+//!   other text than `kept` is that clear: the watch ends with `kept`. A read
+//!   that still shows what was kept (a notes app's newline) changes nothing,
+//!   and after the window the watch is `Watching` again.
 
 use std::time::{Duration, Instant};
 
-use super::locate::{self, Alignment};
+use super::locate::{self, Alignment, Anchor, Landing};
 use crate::accessibility::{FieldText, ReadError};
 use crate::history::HistoryCorrection;
 
@@ -17,7 +38,8 @@ pub const WATCH: Duration = Duration::from_secs(30);
 /// keystroke behind it. A burst inside one tick is one read of the end state.
 pub const READ_GAP: Duration = Duration::from_millis(40);
 /// Reads per target that found the field changed; a read that finds it as
-/// before, and the closing read, are not counted.
+/// before, and the closing read, are not counted. A watch that sent a
+/// Return is read regardless, so the clear after it is always seen.
 pub const MAX_READS: usize = 200;
 /// How long after a Return the field changing means it was sent.
 pub const SEND_WINDOW: Duration = Duration::from_secs(1);
@@ -53,11 +75,9 @@ impl Trigger {
 /// Why no read held the pasted text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Lost {
-    ElementGone,
-    Secure,
-    TooLarge,
-    ReadTimeout,
-    ReadFailed,
+    /// A read failed (the field is gone, secure, too large, slow, or gave no
+    /// value).
+    Read(ReadError),
     SpanNotFound,
     ClearedBeforeRead,
 }
@@ -65,12 +85,12 @@ pub enum Lost {
 impl Lost {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::ElementGone => "element_gone",
-            Self::Secure => "secure",
-            Self::TooLarge => "too_large",
+            Self::Read(ReadError::ElementGone) => "element_gone",
+            Self::Read(ReadError::Secure) => "secure",
+            Self::Read(ReadError::TooLarge) => "too_large",
+            Self::Read(ReadError::Timeout) => "read_timeout",
+            Self::Read(ReadError::Failed) => "read_failed",
             Self::SpanNotFound => "span_not_found",
-            Self::ReadTimeout => "read_timeout",
-            Self::ReadFailed => "read_failed",
             Self::ClearedBeforeRead => "cleared_before_read",
         }
     }
@@ -81,23 +101,7 @@ impl Lost {
         match self {
             Self::ClearedBeforeRead => 2,
             Self::SpanNotFound => 1,
-            Self::ElementGone
-            | Self::Secure
-            | Self::TooLarge
-            | Self::ReadTimeout
-            | Self::ReadFailed => 0,
-        }
-    }
-}
-
-impl From<ReadError> for Lost {
-    fn from(error: ReadError) -> Self {
-        match error {
-            ReadError::ElementGone => Self::ElementGone,
-            ReadError::Secure => Self::Secure,
-            ReadError::TooLarge => Self::TooLarge,
-            ReadError::Timeout => Self::ReadTimeout,
-            ReadError::Failed => Self::ReadFailed,
+            Self::Read(_) => 0,
         }
     }
 }
@@ -160,25 +164,6 @@ impl Field for crate::accessibility::RetainedElement {
     }
 }
 
-/// What one read found of the field.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Read {
-    /// The gate was closed: nothing was read.
-    Closed,
-    /// The field was sent: emptied after a text was kept, gone, or (after a
-    /// Return) shorter or holding other text.
-    Sent,
-    Stayed,
-}
-
-/// A Return was seen with a text kept: for [`SEND_WINDOW`] the first read
-/// that shows the field emptied, shorter, or holding other text than `kept`
-/// is the app clearing it after the send, and `kept` is the edit.
-struct Sending {
-    until: Instant,
-    kept: CorrectionObservation,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Event {
     ValueChanged,
@@ -195,36 +180,131 @@ pub enum Step {
     Done(CorrectionObservation),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Phase {
+    Watching,
+    /// A Return was seen, with `kept` held at that moment.
+    Sending {
+        until: Instant,
+        kept: Option<CorrectionObservation>,
+    },
+}
+
+/// What one read showed of the field.
+struct Reading {
+    blank: bool,
+    /// Shorter than the read before.
+    shrank: bool,
+    /// What it holds of the paste, `None` for other text.
+    outcome: Option<Outcome>,
+}
+
+enum Input<'a> {
+    Return,
+    Read(&'a Reading),
+}
+
+/// What to do with an input.
+#[derive(Debug, Eq, PartialEq)]
+enum Verdict {
+    Hold,
+    /// Keep this read as the paste (`Some`), or drop what was kept because
+    /// the field holds other text (`None`).
+    Record(Option<Outcome>),
+    /// Blank before anything was kept: noted, and the watch goes on.
+    Blank,
+    Finish(Finish),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Finish {
+    Kept(CorrectionObservation),
+    Lost(Lost),
+}
+
+/// The whole model: the next phase and the verdict, from the phase, what is
+/// held, and the input. Pure.
+fn advance(
+    phase: Phase,
+    best: Option<&CorrectionObservation>,
+    input: Input,
+    now: Instant,
+) -> (Phase, Verdict) {
+    let phase = match phase {
+        Phase::Sending { until, .. } if now > until => Phase::Watching,
+        phase => phase,
+    };
+    let reading = match input {
+        Input::Return => {
+            let phase = Phase::Sending {
+                until: now + SEND_WINDOW,
+                kept: best.cloned(),
+            };
+            return (phase, Verdict::Hold);
+        }
+        Input::Read(reading) => reading,
+    };
+    let verdict = match &phase {
+        Phase::Watching if reading.blank => match best {
+            Some(_) => Verdict::Finish(Finish::Lost(Lost::ClearedBeforeRead)),
+            None => Verdict::Blank,
+        },
+        Phase::Sending { kept, .. } if reading.blank => Verdict::Finish(
+            kept.clone()
+                .map_or(Finish::Lost(Lost::ClearedBeforeRead), Finish::Kept),
+        ),
+        Phase::Sending {
+            kept: Some(kept), ..
+        } if reading.shrank || reading.outcome.as_ref() != Some(&kept.outcome) => {
+            Verdict::Finish(Finish::Kept(kept.clone()))
+        }
+        _ => Verdict::Record(reading.outcome.clone()),
+    };
+    (phase, verdict)
+}
+
+/// Where the paste is expected to sit in the field.
+enum Anchoring {
+    /// No anchor, or one that did not hold: the whole field is searched,
+    /// under the strict rules.
+    Whole,
+    /// The paste has not yet been seen where it was put.
+    Pending(Anchor),
+    /// It has: only the region at the anchor is judged.
+    Landed(Anchor),
+}
+
 pub struct Session<F: Field> {
     field: F,
     inserted: String,
     started: Instant,
+    anchoring: Anchoring,
     /// Reads that found the field changed (see [`MAX_READS`]).
     reads: usize,
+    return_reads: usize,
     last_read: Option<Instant>,
     last_text: Option<String>,
     due: Option<Instant>,
-    return_reads: usize,
-    sending: Option<Sending>,
-    /// The last read that still held the text.
-    best: Option<CorrectionObservation>,
-    lost: Option<Lost>,
+    phase: Phase,
+    /// What the watch holds: the last read that still held the paste, or
+    /// why none did. `None` only before the first read.
+    held: Option<Result<CorrectionObservation, Lost>>,
 }
 
 impl<F: Field> Session<F> {
-    pub fn new(field: F, inserted: String, started: Instant) -> Self {
+    pub fn new(field: F, inserted: String, started: Instant, anchor: Option<Anchor>) -> Self {
         Self {
             field,
             inserted,
             started,
+            anchoring: anchor.map_or(Anchoring::Whole, Anchoring::Pending),
             reads: 0,
+            return_reads: 0,
             last_read: None,
             last_text: None,
             due: None,
-            return_reads: 0,
-            sending: None,
-            best: None,
-            lost: None,
+            phase: Phase::Watching,
+            held: None,
         }
     }
 
@@ -233,11 +313,19 @@ impl<F: Field> Session<F> {
         self.reads
     }
 
+    fn best(&self) -> Option<&CorrectionObservation> {
+        self.held.as_ref().and_then(|held| held.as_ref().ok())
+    }
+
+    fn sending(&self, now: Instant) -> bool {
+        matches!(&self.phase, Phase::Sending { until, .. } if now <= *until)
+    }
+
     /// Advances on `event` at `now`. `gate` is asked before every read.
     pub fn step(&mut self, now: Instant, event: Event, gate: &dyn Fn() -> bool) -> Step {
         match event {
             Event::ValueChanged => {
-                if self.reads >= MAX_READS {
+                if self.reads >= MAX_READS && !self.sending(now) {
                     return Step::Wait;
                 }
                 let wait = self
@@ -276,22 +364,13 @@ impl<F: Field> Session<F> {
                 }
                 self.finish(now, Trigger::FocusOut, gate)
             }
-            // Return is a send if the field then empties or shrinks (a chat
-            // app, at once or a moment later); in a notes app it is a newline
-            // and the watch goes on.
             Event::Return => {
                 if self.return_reads >= MAX_RETURN_READS {
                     return Step::Wait;
                 }
                 self.return_reads += 1;
-                let step = self.watch(now, Trigger::Return, gate);
-                if step == Step::Wait {
-                    self.sending = self.best.clone().map(|kept| Sending {
-                        until: now + SEND_WINDOW,
-                        kept,
-                    });
-                }
-                step
+                self.apply(now, Input::Return, Trigger::Return);
+                self.watch(now, Trigger::Return, gate)
             }
         }
     }
@@ -299,16 +378,17 @@ impl<F: Field> Session<F> {
     /// One read, as a step: done if the field was sent.
     fn watch(&mut self, now: Instant, trigger: Trigger, gate: &dyn Fn() -> bool) -> Step {
         match self.read(now, trigger, gate) {
-            Read::Closed => Step::Drop,
-            Read::Sent => Step::Done(self.observation(now, trigger)),
-            Read::Stayed => Step::Wait,
+            None => Step::Drop,
+            Some(true) => self.observation(now, trigger),
+            Some(false) => Step::Wait,
         }
     }
 
+    /// The closing read: done whatever it shows.
     fn finish(&mut self, now: Instant, trigger: Trigger, gate: &dyn Fn() -> bool) -> Step {
         match self.read(now, trigger, gate) {
-            Read::Closed => Step::Drop,
-            _ => Step::Done(self.observation(now, trigger)),
+            None => Step::Drop,
+            Some(_) => self.observation(now, trigger),
         }
     }
 
@@ -317,91 +397,126 @@ impl<F: Field> Session<F> {
     }
 
     fn lose(&mut self, lost: Lost) {
-        if self
-            .lost
-            .is_none_or(|old| lost.priority() >= old.priority())
-        {
-            self.lost = Some(lost);
+        let outranked = match &self.held {
+            Some(Err(held)) => lost.priority() < held.priority(),
+            Some(Ok(_)) => true,
+            None => false,
+        };
+        if !outranked {
+            self.held = Some(Err(lost));
         }
     }
 
-    /// Reads the field once and keeps the read if it still holds the text; a
-    /// read that holds other text drops the one kept before it, unless that
-    /// read is the app clearing the field after a send.
-    fn read(&mut self, now: Instant, trigger: Trigger, gate: &dyn Fn() -> bool) -> Read {
+    /// The one place the phase changes, and the verdict applied.
+    fn apply(&mut self, now: Instant, input: Input, trigger: Trigger) -> bool {
+        let phase = std::mem::replace(&mut self.phase, Phase::Watching);
+        let (phase, verdict) = advance(phase, self.best(), input, now);
+        self.phase = phase;
+        let finished = matches!(verdict, Verdict::Finish(_));
+        match verdict {
+            Verdict::Hold => {}
+            Verdict::Record(Some(outcome)) => {
+                self.held = Some(Ok(CorrectionObservation {
+                    outcome,
+                    trigger,
+                    observed_at_ms: self.ms(now),
+                }));
+            }
+            Verdict::Record(None) => {
+                if self.best().is_some() {
+                    self.held = None;
+                }
+                self.lose(Lost::SpanNotFound);
+            }
+            Verdict::Blank => self.lose(Lost::ClearedBeforeRead),
+            Verdict::Finish(Finish::Kept(kept)) => self.held = Some(Ok(kept)),
+            Verdict::Finish(Finish::Lost(lost)) => self.held = Some(Err(lost)),
+        }
+        finished
+    }
+
+    /// What `view` shows of the paste, and how that moves the anchor.
+    fn outcome(&mut self, view: &locate::View) -> Option<Outcome> {
+        let align = |alignment| match alignment {
+            Alignment::Unchanged => Some(Outcome::Unchanged),
+            Alignment::Edited(span) => Some(Outcome::Edited(span)),
+            Alignment::NotFound => None,
+        };
+        match self.anchoring {
+            Anchoring::Whole => align(locate::align(view.text, &self.inserted, view.windowed)),
+            Anchoring::Pending(anchor) => match locate::landing(view, &self.inserted, &anchor) {
+                Landing::Landed => {
+                    // The reference for how far the region moves from here.
+                    let total = view.total;
+                    self.anchoring = Anchoring::Landed(Anchor { total, ..anchor });
+                    Some(Outcome::Unchanged)
+                }
+                // The offset is not this app's: search the whole field.
+                Landing::Elsewhere => {
+                    self.anchoring = Anchoring::Whole;
+                    align(locate::align(view.text, &self.inserted, view.windowed))
+                }
+                // Not there yet, or edited before it was ever seen: no
+                // position to trust, so no edit is called.
+                Landing::Absent => None,
+            },
+            Anchoring::Landed(anchor) => align(locate::align_at(view, &self.inserted, &anchor)),
+        }
+    }
+
+    /// Reads the field once and applies what it shows. `None` when the gate
+    /// is closed (nothing was read); else whether the watch is over.
+    fn read(&mut self, now: Instant, trigger: Trigger, gate: &dyn Fn() -> bool) -> Option<bool> {
         if !gate() {
-            return Read::Closed;
+            return None;
         }
         self.last_read = Some(now);
         self.due = None;
-        let observed_at_ms = self.ms(now);
-        let FieldText { text, windowed } = match self.field.read() {
+        let read = match self.field.read() {
             Ok(read) => read,
             Err(error) => {
                 self.reads += 1;
-                self.lose(error.into());
-                return if error == ReadError::ElementGone {
-                    Read::Sent
-                } else {
-                    Read::Stayed
-                };
+                // A failed read never erases what was kept.
+                if self.best().is_none() {
+                    self.lose(Lost::Read(error));
+                }
+                return Some(error == ReadError::ElementGone);
             }
         };
-        let changed = self.last_text.as_deref() != Some(text.as_str());
+        let changed = self.last_text.as_deref() != Some(read.text.as_str());
         self.reads += usize::from(changed);
-        let blank = locate::is_blank(&text);
+        let blank = locate::is_blank(&read.text);
         let shrank = self
             .last_text
             .as_ref()
-            .is_some_and(|before| text.chars().count() < before.chars().count());
-        let outcome = if blank {
-            None
-        } else {
-            match locate::align(&text, &self.inserted, windowed) {
-                Alignment::Unchanged => Some(Outcome::Unchanged),
-                Alignment::Edited(span) => Some(Outcome::Edited(span)),
-                Alignment::NotFound => None,
-            }
+            .is_some_and(|before| read.text.chars().count() < before.chars().count());
+        let view = locate::View {
+            text: &read.text,
+            offset: read.offset,
+            total: read.total,
+            windowed: read.windowed,
         };
-        let sending = self.sending.take().filter(|sending| now <= sending.until);
-        let sent = if blank {
-            // Emptied after a text was kept: a send, by Return or a button.
-            self.best.is_some() || trigger == Trigger::Return
-        } else if trigger == Trigger::Return {
-            shrank
-        } else {
-            sending
-                .as_ref()
-                .is_some_and(|sending| shrank || outcome.as_ref() != Some(&sending.kept.outcome))
+        let outcome = if blank { None } else { self.outcome(&view) };
+        self.last_text = Some(read.text);
+        let reading = Reading {
+            blank,
+            shrank,
+            outcome,
         };
-        if blank {
-            self.lose(Lost::ClearedBeforeRead);
-        } else if sent && trigger != Trigger::Return {
-            self.best = sending.as_ref().map(|sending| sending.kept.clone());
-        } else {
-            if outcome.is_none() {
-                self.lose(Lost::SpanNotFound);
-            }
-            self.best = outcome.map(|outcome| CorrectionObservation {
-                outcome,
-                trigger,
-                observed_at_ms,
-            });
-        }
-        if !sent {
-            self.sending = sending;
-        }
-        self.last_text = Some(text);
-        if sent { Read::Sent } else { Read::Stayed }
+        Some(self.apply(now, Input::Read(&reading), trigger))
     }
 
-    /// The last read that still held the text, else why none did.
-    fn observation(&mut self, now: Instant, trigger: Trigger) -> CorrectionObservation {
-        self.best.take().unwrap_or_else(|| CorrectionObservation {
-            outcome: Outcome::Lost(self.lost.unwrap_or(Lost::ReadTimeout)),
-            trigger,
-            observed_at_ms: self.ms(now),
-        })
+    /// What the watch holds. A read always came first, so it holds something.
+    fn observation(&mut self, now: Instant, trigger: Trigger) -> Step {
+        match self.held.take() {
+            Some(Ok(observation)) => Step::Done(observation),
+            Some(Err(lost)) => Step::Done(CorrectionObservation {
+                outcome: Outcome::Lost(lost),
+                trigger,
+                observed_at_ms: self.ms(now),
+            }),
+            None => Step::Drop,
+        }
     }
 }
 
@@ -441,6 +556,8 @@ mod tests {
                 reads[0].clone()
             };
             read.map(|text| FieldText {
+                offset: 0,
+                total: text.encode_utf16().count(),
                 text,
                 windowed: false,
             })
@@ -467,6 +584,7 @@ mod tests {
             Script::new(&["send it to Kit", ""]),
             "send it to Kip".into(),
             t0,
+            None,
         );
         assert_eq!(
             session.step(at(t0, 2_000), Event::ValueChanged, OPEN),
@@ -489,6 +607,7 @@ mod tests {
             Script::new(&["send it to K", "send it to Ki", "send it to Kit", ""]),
             "send it to Kip".into(),
             t0,
+            None,
         );
         for ms in [0, 80, 160] {
             session.step(at(t0, ms), Event::ValueChanged, OPEN);
@@ -505,6 +624,7 @@ mod tests {
             Script::new(&["send it to K", "send it to Kit", ""]),
             "send it to Kip".into(),
             t0,
+            None,
         );
         for ms in [0, 10, 20] {
             session.step(at(t0, ms), Event::ValueChanged, OPEN);
@@ -534,6 +654,7 @@ mod tests {
             ]),
             "send it to Kip".into(),
             t0,
+            None,
         );
         // Return is a newline here: the field did not shrink.
         assert_eq!(session.step(at(t0, 500), Event::Return, OPEN), Step::Wait);
@@ -555,31 +676,40 @@ mod tests {
             Script::new(&["send it to Kit please", "send it to Kit"]),
             "send it to Kip please".into(),
             t0,
+            None,
         );
         session.step(at(t0, 10), Event::ValueChanged, OPEN);
         let seen = done(session.step(at(t0, 900), Event::Return, OPEN));
-        assert!(matches!(seen.outcome, Outcome::Edited(_)));
-        assert_eq!(seen.trigger, Trigger::Return);
+        // The read kept before the send, not the shorter one the Return saw.
+        assert_eq!(
+            seen.outcome,
+            Outcome::Edited("send it to Kit please".into())
+        );
+        assert_eq!(seen.trigger, Trigger::ValueChanged);
     }
 
     #[test]
     fn nothing_matching_reports_why() {
         let t0 = Instant::now();
-        let mut cleared = Session::new(Script::new(&[""]), "send it".into(), t0);
+        let mut cleared = Session::new(Script::new(&[""]), "send it".into(), t0, None);
         let seen = done(cleared.step(at(t0, 5), Event::Return, OPEN));
         assert_eq!(seen.outcome, Outcome::Lost(Lost::ClearedBeforeRead));
         let mut other = Session::new(
             Script::new(&["unrelated words here", "unrelated words here"]),
             "send it".into(),
             t0,
+            None,
         );
         assert_eq!(other.step(at(t0, 5), Event::Return, OPEN), Step::Wait);
         let seen = done(other.step(at(t0, 400), Event::FocusOut, OPEN));
         assert_eq!(seen.outcome, Outcome::Lost(Lost::SpanNotFound));
         let gone = Script::of(vec![Err(ReadError::ElementGone)]);
-        let mut gone = Session::new(gone, "send it".into(), t0);
+        let mut gone = Session::new(gone, "send it".into(), t0, None);
         let seen = done(gone.step(at(t0, 5), Event::Return, OPEN));
-        assert_eq!(seen.outcome, Outcome::Lost(Lost::ElementGone));
+        assert_eq!(
+            seen.outcome,
+            Outcome::Lost(Lost::Read(ReadError::ElementGone))
+        );
     }
 
     #[test]
@@ -596,6 +726,7 @@ mod tests {
             Script::of(reads.into_iter().rev().collect()),
             "send it".into(),
             t0,
+            None,
         );
         for n in 0..4 {
             session.step(at(t0, n * 200), Event::ValueChanged, OPEN);
@@ -607,7 +738,7 @@ mod tests {
     #[test]
     fn timeout_closes_an_untouched_paste_as_unchanged() {
         let t0 = Instant::now();
-        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0);
+        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0, None);
         assert_eq!(session.step(at(t0, 29_000), Event::Tick, OPEN), Step::Wait);
         let seen = done(session.step(at(t0, 30_000), Event::Tick, OPEN));
         assert_eq!(
@@ -621,7 +752,7 @@ mod tests {
         let t0 = Instant::now();
         let open = Cell::new(true);
         let gate = || open.get();
-        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0);
+        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0, None);
         assert_eq!(
             session.step(at(t0, 10), Event::ValueChanged, &gate),
             Step::Wait
@@ -646,7 +777,7 @@ mod tests {
             .map(|n| format!("send it {n}"))
             .collect();
         let reads = texts.iter().rev().map(|t| Ok(t.clone())).collect();
-        let mut session = Session::new(Script::of(reads), "send it".into(), t0);
+        let mut session = Session::new(Script::of(reads), "send it".into(), t0, None);
         for n in 0..(MAX_READS + 100) as u64 {
             session.step(at(t0, n * 100), Event::ValueChanged, OPEN);
         }
@@ -666,7 +797,7 @@ mod tests {
     #[test]
     fn reads_that_find_the_field_as_before_spend_nothing() {
         let t0 = Instant::now();
-        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0);
+        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0, None);
         for n in 0..100 {
             session.step(at(t0, n * 1_000), Event::ValueChanged, OPEN);
         }
@@ -683,6 +814,7 @@ mod tests {
             Script::new(&["send it to Kip", ""]),
             "send it to Kip".into(),
             t0,
+            None,
         );
         assert_eq!(session.step(at(t0, 50), Event::Tick, OPEN), Step::Wait);
         let seen = done(session.step(at(t0, 3_000), Event::Return, OPEN));
@@ -697,6 +829,7 @@ mod tests {
             Script::new(&["send it to Kit", "something else entirely now"]),
             "send it to Kip".into(),
             t0,
+            None,
         );
         session.step(at(t0, 0), Event::ValueChanged, OPEN);
         session.step(at(t0, 100), Event::ValueChanged, OPEN);
@@ -714,6 +847,7 @@ mod tests {
                 Script::new(&["send it to Kip", "send it to Kit", "send it to Kit", next]),
                 "send it to Kip".into(),
                 t0,
+                None,
             );
             assert_eq!(session.step(at(t0, 50), Event::Tick, OPEN), Step::Wait);
             session.step(at(t0, 250), Event::ValueChanged, OPEN);
@@ -725,22 +859,55 @@ mod tests {
                 Outcome::Edited("send it to Kit".into()),
                 "next text {next:?}"
             );
-            assert_eq!(seen.trigger, Trigger::Return);
+            assert_eq!(seen.trigger, Trigger::ValueChanged);
+        }
+    }
+
+    /// A blank field with no Return is a send button or delete-all, which
+    /// cannot be told apart: lost, not the edit before it.
+    #[test]
+    fn a_field_emptied_without_a_return_is_lost() {
+        let t0 = Instant::now();
+        for reads in [&["send it to Kit", ""][..], &["send it to Kip", ""][..]] {
+            let mut session = Session::new(Script::new(reads), "send it to Kip".into(), t0, None);
+            session.step(at(t0, 100), Event::ValueChanged, OPEN);
+            let seen = done(session.step(at(t0, 200), Event::ValueChanged, OPEN));
+            assert_eq!(
+                seen.outcome,
+                Outcome::Lost(Lost::ClearedBeforeRead),
+                "{reads:?}"
+            );
         }
     }
 
     #[test]
-    fn send_by_button_keeps_the_edit() {
+    fn a_return_and_its_clear_are_seen_after_the_read_cap() {
         let t0 = Instant::now();
+        let texts: Vec<String> = (0..MAX_READS + 5)
+            .map(|n| format!("send it to Kit {n}"))
+            .collect();
+        let mut reads: Vec<String> = texts[..MAX_READS].to_vec();
+        reads.push("send it to Kit last".into());
+        reads.push(String::new());
         let mut session = Session::new(
-            Script::new(&["send it to Kit", ""]),
+            Script::of(reads.iter().rev().map(|t| Ok(t.clone())).collect()),
             "send it to Kip".into(),
             t0,
+            None,
         );
-        session.step(at(t0, 100), Event::ValueChanged, OPEN);
-        let seen = done(session.step(at(t0, 200), Event::ValueChanged, OPEN));
-        assert_eq!(seen.outcome, Outcome::Edited("send it to Kit".into()));
-        assert_eq!(seen.trigger, Trigger::ValueChanged);
+        for n in 0..(MAX_READS + 5) as u64 {
+            session.step(at(t0, n * 100), Event::ValueChanged, OPEN);
+        }
+        assert_eq!(session.reads(), MAX_READS);
+        let base = (MAX_READS as u64 + 5) * 100;
+        // Past the cap a change is not read, but a Return is, and the clear
+        // after it is read whatever the cap says.
+        assert_eq!(
+            session.step(at(t0, base + 100), Event::Return, OPEN),
+            Step::Wait
+        );
+        let seen = done(session.step(at(t0, base + 200), Event::ValueChanged, OPEN));
+        assert!(matches!(seen.outcome, Outcome::Edited(_)), "{seen:?}");
     }
 
     #[test]
@@ -754,6 +921,7 @@ mod tests {
             ]),
             "send it to Kip".into(),
             t0,
+            None,
         );
         assert_eq!(session.step(at(t0, 300), Event::Return, OPEN), Step::Wait);
         session.step(at(t0, 400), Event::ValueChanged, OPEN);
@@ -773,26 +941,102 @@ mod tests {
             Script::of(vec![Err(ReadError::Failed)]),
             "send it".into(),
             t0,
+            None,
         );
         assert_eq!(session.step(at(t0, 5), Event::Return, OPEN), Step::Wait);
         let seen = done(session.step(at(t0, 400), Event::FocusOut, OPEN));
-        assert_eq!(seen.outcome, Outcome::Lost(Lost::ReadFailed));
+        assert_eq!(seen.outcome, Outcome::Lost(Lost::Read(ReadError::Failed)));
     }
 
     #[test]
     fn a_held_return_key_stops_being_read() {
         let t0 = Instant::now();
-        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0);
+        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0, None);
         for n in 0..(MAX_RETURN_READS as u64 + 30) {
             session.step(at(t0, n), Event::Return, OPEN);
         }
         assert_eq!(session.field.calls.get(), MAX_RETURN_READS);
     }
 
+    fn anchor(base: &str, pasted: &str) -> Anchor {
+        let at = base.rfind(pasted).unwrap();
+        Anchor {
+            start: base[..at].encode_utf16().count(),
+            len: pasted.encode_utf16().count(),
+            total: base.encode_utf16().count(),
+        }
+    }
+
+    #[test]
+    fn an_anchored_watch_judges_the_region_at_the_anchor() {
+        let t0 = Instant::now();
+        let base = "Hi team. send it to Kip";
+        let mut session = Session::new(
+            Script::new(&[base, "Hi team. send it to Hex"]),
+            "send it to Kip".into(),
+            t0,
+            Some(anchor(base, "send it to Kip")),
+        );
+        assert_eq!(session.step(at(t0, 50), Event::Tick, OPEN), Step::Wait);
+        session.step(at(t0, 200), Event::ValueChanged, OPEN);
+        let seen = done(session.step(at(t0, 400), Event::FocusOut, OPEN));
+        assert_eq!(seen.outcome, Outcome::Edited("send it to Hex".into()));
+    }
+
+    #[test]
+    fn an_anchor_is_trusted_only_after_the_paste_is_seen_there() {
+        let t0 = Instant::now();
+        // The field at the anchor says something else from the start: nothing
+        // anchored ever calls it an edit.
+        let mut session = Session::new(
+            Script::new(&["we should go to lunch today"]),
+            "send it to Kip".into(),
+            t0,
+            Some(Anchor {
+                start: 0,
+                len: 14,
+                total: 28,
+            }),
+        );
+        session.step(at(t0, 50), Event::Tick, OPEN);
+        let seen = done(session.step(at(t0, 400), Event::FocusOut, OPEN));
+        assert_eq!(seen.outcome, Outcome::Lost(Lost::SpanNotFound));
+        // An anchor in other units (the paste is in the field, elsewhere)
+        // falls back to the strict whole-field rules.
+        let mut session = Session::new(
+            Script::new(&["send it to Kip", "send it to Kit"]),
+            "send it to Kip".into(),
+            t0,
+            Some(Anchor {
+                start: 500,
+                len: 14,
+                total: 600,
+            }),
+        );
+        session.step(at(t0, 50), Event::Tick, OPEN);
+        session.step(at(t0, 200), Event::ValueChanged, OPEN);
+        let seen = done(session.step(at(t0, 400), Event::FocusOut, OPEN));
+        assert_eq!(seen.outcome, Outcome::Edited("send it to Kit".into()));
+    }
+
+    #[test]
+    fn a_huge_paste_is_not_aligned() {
+        let t0 = Instant::now();
+        let mut session = Session::new(
+            Script::new(&["word ".repeat(3_000).as_str()]),
+            "other ".repeat(40_000),
+            t0,
+            None,
+        );
+        session.step(at(t0, 50), Event::Tick, OPEN);
+        let seen = done(session.step(at(t0, 400), Event::FocusOut, OPEN));
+        assert_eq!(seen.outcome, Outcome::Lost(Lost::SpanNotFound));
+    }
+
     #[test]
     fn the_pastes_own_focus_change_is_ignored() {
         let t0 = Instant::now();
-        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0);
+        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0, None);
         assert_eq!(session.step(at(t0, 100), Event::FocusOut, OPEN), Step::Wait);
         assert!(matches!(
             session.step(at(t0, 400), Event::FocusOut, OPEN),
@@ -816,7 +1060,7 @@ mod tests {
             ),
             ("edited", None, Some("Kit"))
         );
-        let lost = seen(Outcome::Lost(Lost::Secure)).into_history();
+        let lost = seen(Outcome::Lost(Lost::Read(ReadError::Secure))).into_history();
         assert_eq!(
             (
                 lost.outcome.as_str(),
