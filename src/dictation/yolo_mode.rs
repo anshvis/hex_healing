@@ -39,7 +39,7 @@ pub struct SendGate {
 impl SendGate {
     /// The gate of a dictation submitted now.
     pub fn open() -> Self {
-        Self::on(&super::key_counts::ESCAPES, Instant::now())
+        Self::on(super::key_counts::escapes(), Instant::now())
     }
 
     pub(crate) fn on(escapes: &'static AtomicU64, submitted_at: Instant) -> Self {

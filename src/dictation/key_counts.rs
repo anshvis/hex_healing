@@ -5,7 +5,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub static ESCAPES: AtomicU64 = AtomicU64::new(0);
+static ESCAPES: AtomicU64 = AtomicU64::new(0);
 static RETURNS: AtomicU64 = AtomicU64::new(0);
 
 /// Counts `event` if it is an Escape or Return press.
@@ -16,6 +16,11 @@ pub fn note(event: crate::suppression::InputEvent) {
     if event.is_return_down() {
         RETURNS.fetch_add(1, Ordering::AcqRel);
     }
+}
+
+/// The Escape count, for a reader that compares it with its own start.
+pub fn escapes() -> &'static AtomicU64 {
+    &ESCAPES
 }
 
 pub fn returns() -> u64 {
