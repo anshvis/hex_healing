@@ -529,3 +529,15 @@ def test_golden_stratifies_across_skewed_apps_and_months():
     apps = Counter(r["application"] for r in picked)
     assert apps == {"Notes": 3, "Slack": 3, "Mail": 3}, apps  # the 90-clip app doesn't take 90% of golden
     assert len({golden._stratum(r) for r in picked}) == 3 and datetime.now(timezone.utc)
+
+
+def test_set_folders_and_files_are_owner_only(store, home):
+    import stat
+
+    build_world(store)
+    build_at(store)
+    seen = list((home / "sets").rglob("*"))
+    assert seen
+    for path in seen:
+        mode = stat.S_IMODE(path.stat().st_mode)
+        assert mode == (0o700 if path.is_dir() else 0o600), (path, oct(mode))
