@@ -361,7 +361,8 @@ mod tests {
             ))
         }
         fn submit(&mut self, target: crate::dictation::correction_watch::PasteTarget) {
-            self.submitted.push((target.entry_id, target.inserted));
+            self.submitted
+                .push((target.entry_id, target.landed.inserted));
         }
     }
 

@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::locate::Tracker;
-use super::session::{CorrectionObservation, Event, Field, Outcome, Session, Step, WATCH};
+use super::session::{CorrectionObservation, Event, Field, Session, Step, WATCH};
 use super::{PasteTarget, QUEUE};
 use crate::accessibility::{self, Notification, Observer, RetainedElement};
 use crate::dictation::key_counts;
@@ -63,17 +63,24 @@ struct Active {
 
 impl Active {
     fn start(target: PasteTarget) -> Self {
-        let observer = Observer::new(target.pid, &target.element);
+        let PasteTarget {
+            pending,
+            landed,
+            history,
+            entry_id,
+            text,
+        } = target;
+        let observer = Observer::new(pending.pid, &pending.element);
         Self {
-            history: target.history,
-            entry_id: target.entry_id,
-            text: target.text,
+            history,
+            entry_id,
+            text,
             session: Session::new(
-                target.element,
-                target.pasted_at,
-                Tracker::new(target.inserted, target.anchor, target.before.as_deref()),
+                pending.element,
+                landed.at,
+                Tracker::new(landed.inserted, landed.anchor, pending.before.as_deref()),
             ),
-            returns: target.returns,
+            returns: landed.returns,
             poll_at: observer
                 .as_ref()
                 .is_none_or(|observer| !observer.watches_value())
@@ -102,7 +109,7 @@ impl Active {
 
 /// Whether the paste's watch window has passed.
 fn expired(target: &PasteTarget, now: Instant) -> bool {
-    now.saturating_duration_since(target.pasted_at) >= WATCH
+    now.saturating_duration_since(target.landed.at) >= WATCH
 }
 
 /// The events of one tick, in the order the session needs: a Return first
@@ -145,7 +152,7 @@ fn run() {
             // Never watch Hex's own field, nor start one the lab has since
             // turned off (it drops the element unread), nor one whose window
             // passed while it waited: no read happens after it.
-            if target.pid != std::process::id() as i32
+            if i32::try_from(std::process::id()) != Ok(target.pending.pid)
                 && crate::labs::learn_from_corrections()
                 && !expired(&target, Instant::now())
             {
@@ -198,18 +205,18 @@ fn feed<F: Field>(
 /// Stores `seen` on its History entry. Counts and outcome IDs are logged,
 /// never text.
 fn keep(history: &History, entry_id: u64, text: &str, seen: CorrectionObservation) {
-    let chars = match &seen.outcome {
-        Outcome::Edited(span) => span.chars().count(),
-        _ => 0,
-    };
-    let (outcome, trigger, ms) = (
-        seen.outcome.as_str(),
-        seen.trigger.as_str(),
-        seen.observed_at_ms,
-    );
-    match history.observe_correction(entry_id, text, seen.into_history()) {
-        Ok(kept) => tracing::info!(outcome, trigger, chars, ms, kept, "correction observed"),
-        Err(error) => tracing::warn!(%error, outcome, "could not keep a correction"),
+    let (trigger, ms) = (seen.trigger.as_str(), seen.observed_at_ms);
+    let record = seen.into_history();
+    let chars = record
+        .edited_text
+        .as_deref()
+        .map_or(0, |t| t.chars().count());
+    let (outcome, reason) = (record.outcome.clone(), record.reason.clone());
+    match history.observe_correction(entry_id, text, record) {
+        Ok(kept) => {
+            tracing::info!(%outcome, ?reason, trigger, chars, ms, kept, "correction observed")
+        }
+        Err(error) => tracing::warn!(%error, %outcome, "could not keep a correction"),
     }
 }
 
@@ -227,7 +234,7 @@ mod tests {
     use super::*;
     use crate::accessibility::{FieldText, ReadError};
     use crate::dictation::correction_watch::history_for_test;
-    use crate::dictation::correction_watch::session::{Lost, Trigger};
+    use crate::dictation::correction_watch::session::{Lost, Outcome, Trigger};
     use crate::history::{HistoryDraft, HistoryKind};
 
     use crate::dictation::correction_watch::target_for_test as target;
@@ -257,7 +264,7 @@ mod tests {
     fn a_target_whose_window_passed_while_it_waited_is_dropped() {
         let history = history_for_test();
         let mut old = target(&history, 1);
-        old.pasted_at = Instant::now() - WATCH - Duration::from_secs(1);
+        old.landed.at = Instant::now() - WATCH - Duration::from_secs(1);
         assert!(expired(&old, Instant::now()));
         assert!(!expired(&target(&history, 2), Instant::now()));
     }

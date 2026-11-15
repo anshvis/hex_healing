@@ -90,6 +90,8 @@ pub enum Lost {
     Read(ReadError),
     SpanNotFound,
     ClearedBeforeRead,
+    /// Nothing has been read yet (never what a watch ends with).
+    NotRead,
 }
 
 impl Lost {
@@ -100,6 +102,7 @@ impl Lost {
             Self::Read(ReadError::TooLarge) => "too_large",
             Self::Read(ReadError::Timeout) => "read_timeout",
             Self::Read(ReadError::Failed) => "read_failed",
+            Self::NotRead => "read_timeout",
             Self::SpanNotFound => "span_not_found",
             Self::ClearedBeforeRead => "cleared_before_read",
         }
@@ -119,7 +122,7 @@ impl Lost {
         match self {
             Self::ClearedBeforeRead => 2,
             Self::SpanNotFound => 1,
-            Self::Read(_) => 0,
+            Self::Read(_) | Self::NotRead => 0,
         }
     }
 }
@@ -131,16 +134,6 @@ pub enum Outcome {
     /// characters.
     Edited(String),
     Lost(Lost),
-}
-
-impl Outcome {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Unchanged => "unchanged",
-            Self::Edited(_) => "edited",
-            Self::Lost(lost) => lost.as_str(),
-        }
-    }
 }
 
 /// What the watcher saw of one paste.
@@ -221,8 +214,8 @@ struct Reading {
     blank: bool,
     /// Shorter than the read before.
     shrank: bool,
-    /// What it holds of the paste, `None` for other text.
-    outcome: Option<Outcome>,
+    /// What it holds of the paste.
+    outcome: Alignment,
 }
 
 enum Input {
@@ -231,8 +224,7 @@ enum Input {
     Read(Reading),
 }
 
-/// The watch's state. `held` is what the watch would end with now; before
-/// the first read it is a placeholder every first read replaces.
+/// The watch's state. `held` is what the watch would end with now.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct State {
     phase: Phase,
@@ -245,7 +237,7 @@ impl State {
     fn new() -> Self {
         Self {
             phase: Phase::Watching,
-            held: Err(Lost::Read(ReadError::Timeout)),
+            held: Err(Lost::NotRead),
             cleared_since: None,
         }
     }
@@ -289,11 +281,10 @@ impl State {
     }
 
     fn read(&mut self, reading: Reading, now: Instant) -> Option<Finished> {
-        let kept = match &self.phase {
-            Phase::Sending { kept, .. } => kept.clone(),
-            Phase::Watching => None,
+        let (sending, kept) = match &self.phase {
+            Phase::Sending { kept, .. } => (true, kept.clone()),
+            Phase::Watching => (false, None),
         };
-        let sending = matches!(self.phase, Phase::Sending { .. });
         if reading.blank {
             return match (sending, kept, self.best()) {
                 (true, kept, _) => Some(kept.ok_or(Lost::ClearedBeforeRead)),
@@ -314,14 +305,19 @@ impl State {
             };
         }
         self.cleared_since = None;
+        let outcome = match reading.outcome {
+            Alignment::Unchanged => Some(Outcome::Unchanged),
+            Alignment::Edited(span) => Some(Outcome::Edited(span)),
+            Alignment::NotFound => None,
+        };
         // After a Return, the field shorter or holding other text is the app
         // clearing it; the paste still there, changed or not, is not.
         if let Some(kept) = kept
-            && (reading.shrank || reading.outcome.is_none())
+            && (reading.shrank || outcome.is_none())
         {
             return Some(Ok(kept));
         }
-        self.held = match reading.outcome {
+        self.held = match outcome {
             Some(outcome) => Ok(CorrectionObservation {
                 outcome,
                 trigger: reading.trigger,
@@ -415,7 +411,8 @@ impl<F: Field> Session<F> {
                 }
                 self.return_reads += 1;
                 // A Return enters `Sending` before its own read.
-                self.apply(now, Input::Return, Trigger::Return);
+                let entered = self.apply(now, Input::Return, Trigger::Return);
+                debug_assert_eq!(entered, Step::Wait, "entering the send window ends nothing");
                 self.read(now, Trigger::Return, gate)
             }
         }
@@ -430,7 +427,7 @@ impl<F: Field> Session<F> {
     }
 
     fn ms(&self, now: Instant) -> u64 {
-        now.saturating_duration_since(self.started).as_millis() as u64
+        u64::try_from(now.saturating_duration_since(self.started).as_millis()).unwrap_or(u64::MAX)
     }
 
     /// Reads the field once, as an input to the model.
@@ -453,12 +450,8 @@ impl<F: Field> Session<F> {
                     .last_text
                     .as_ref()
                     .is_some_and(|before| read.text.chars().count() < before.chars().count());
-                // A blank field is read too: it retires the tracker's region.
-                let outcome = match self.tracker.read(&read) {
-                    Alignment::Unchanged => Some(Outcome::Unchanged),
-                    Alignment::Edited(span) => Some(Outcome::Edited(span)),
-                    Alignment::NotFound => None,
-                };
+                // A blank field is read too: it retires a followed region.
+                let outcome = self.tracker.read(&read);
                 self.last_text = Some(read.text);
                 Input::Read(Reading {
                     trigger,
@@ -894,16 +887,18 @@ mod tests {
     #[test]
     fn a_return_and_its_clear_are_seen_after_the_read_cap() {
         let t0 = Instant::now();
-        let texts: Vec<String> = (0..MAX_READS + 5)
-            .map(|n| format!("send it to Kit {n}"))
+        // An interior word of the paste changes with every read.
+        let paste = "alpha beta gamma delta epsilon";
+        let texts: Vec<String> = (0..MAX_READS + 100)
+            .map(|n| format!("alpha b{n} gamma delta epsilon"))
             .collect();
-        let mut reads: Vec<String> = vec!["send it to Kip".into()];
+        let mut reads: Vec<String> = vec![paste.into()];
         reads.extend_from_slice(&texts[..MAX_READS - 1]);
-        reads.push("send it to Kit last".into());
+        reads.push("alpha last gamma delta epsilon".into());
         reads.push(String::new());
         let mut session = session(
             Script::of(reads.iter().rev().map(|t| Ok(t.clone())).collect()),
-            "send it to Kip",
+            paste,
             t0,
         );
         baseline(&mut session, t0);
@@ -968,7 +963,6 @@ mod tests {
         let at = base.rfind(pasted).unwrap();
         Anchor {
             start: base[..at].encode_utf16().count(),
-            len: pasted.encode_utf16().count(),
         }
     }
 
@@ -997,7 +991,7 @@ mod tests {
             Script::new(&["we should go to lunch today"]),
             "send it to Kip",
             t0,
-            Some(Anchor { start: 0, len: 14 }),
+            Some(Anchor { start: 0 }),
         );
         session.step(at(t0, 50), Event::Tick, OPEN);
         let seen = done(session.step(at(t0, 400), Event::FocusOut, OPEN));
@@ -1008,10 +1002,7 @@ mod tests {
             Script::new(&["send it to Kip", "send it to Kip", "send it to Kit"]),
             "send it to Kip",
             t0,
-            Some(Anchor {
-                start: 500,
-                len: 14,
-            }),
+            Some(Anchor { start: 500 }),
         );
         baseline(&mut session, t0);
         session.step(at(t0, 700), Event::ValueChanged, OPEN);
@@ -1031,7 +1022,7 @@ mod tests {
             Script::new(&[before, after, "send it to Kip. ok send it to Kit"]),
             "send it to Kip",
             t0,
-            Some(Anchor { start: 19, len: 14 }),
+            Some(Anchor { start: 19 }),
         );
         baseline(&mut session, t0);
         session.step(at(t0, 150), Event::ValueChanged, OPEN);
@@ -1043,7 +1034,7 @@ mod tests {
     #[test]
     fn nothing_is_an_edit_before_the_paste_was_seen_whole() {
         let t0 = Instant::now();
-        for anchor in [None, Some(Anchor { start: 0, len: 6 })] {
+        for anchor in [None, Some(Anchor { start: 0 })] {
             let mut session = anchored(Script::new(&["secret"]), "Kip", t0, anchor);
             baseline(&mut session, t0);
             let seen = done(session.step(at(t0, 400), Event::FocusOut, OPEN));
@@ -1102,7 +1093,7 @@ mod tests {
         assert_eq!(seen.outcome, Outcome::Lost(Lost::SpanNotFound));
     }
 
-    fn reading(blank: bool, shrank: bool, outcome: Option<Outcome>) -> Input {
+    fn reading(blank: bool, shrank: bool, outcome: Alignment) -> Input {
         Input::Read(Reading {
             trigger: Trigger::ValueChanged,
             ms: 7,
@@ -1114,6 +1105,10 @@ mod tests {
 
     fn kit() -> Outcome {
         Outcome::Edited("send it to Kit".into())
+    }
+
+    fn kit_read() -> Alignment {
+        Alignment::Edited("send it to Kit".into())
     }
 
     fn kept() -> CorrectionObservation {
@@ -1130,26 +1125,32 @@ mod tests {
     fn advance_table() {
         let t0 = Instant::now();
         let ms = |n: u64| t0 + Duration::from_millis(n);
-        let edited = || reading(false, false, Some(kit()));
+        let edited = || reading(false, false, kit_read());
         /// A named row: inputs at times, what the watch ends with, what it holds.
         type Row = (&'static str, Vec<(u64, Input)>, Option<Finished>, Finished);
         let cases: Vec<Row> = vec![
             ("an edit is held", vec![(0, edited())], None, Ok(kept())),
             (
                 "other text drops it",
-                vec![(0, edited()), (50, reading(false, false, None))],
+                vec![
+                    (0, edited()),
+                    (50, reading(false, false, Alignment::NotFound)),
+                ],
                 None,
                 Err(Lost::SpanNotFound),
             ),
             (
                 "blank with nothing kept is noted and goes on",
-                vec![(0, reading(true, false, None))],
+                vec![(0, reading(true, false, Alignment::NotFound))],
                 None,
                 Err(Lost::ClearedBeforeRead),
             ),
             (
                 "blank with something kept waits the grace",
-                vec![(0, edited()), (50, reading(true, false, None))],
+                vec![
+                    (0, edited()),
+                    (50, reading(true, false, Alignment::NotFound)),
+                ],
                 None,
                 Ok(kept()),
             ),
@@ -1157,8 +1158,8 @@ mod tests {
                 "blank still, after the grace, is cleared with no Return",
                 vec![
                     (0, edited()),
-                    (50, reading(true, false, None)),
-                    (200, reading(true, false, None)),
+                    (50, reading(true, false, Alignment::NotFound)),
+                    (200, reading(true, false, Alignment::NotFound)),
                 ],
                 Some(Err(Lost::ClearedBeforeRead)),
                 Err(Lost::ClearedBeforeRead),
@@ -1167,9 +1168,9 @@ mod tests {
                 "text again inside the grace forgets the blank",
                 vec![
                     (0, edited()),
-                    (50, reading(true, false, None)),
+                    (50, reading(true, false, Alignment::NotFound)),
                     (80, edited()),
-                    (200, reading(true, false, None)),
+                    (200, reading(true, false, Alignment::NotFound)),
                 ],
                 None,
                 Ok(kept()),
@@ -1179,7 +1180,7 @@ mod tests {
                 vec![
                     (0, edited()),
                     (50, Input::Return),
-                    (60, reading(true, false, None)),
+                    (60, reading(true, false, Alignment::NotFound)),
                 ],
                 Some(Ok(kept())),
                 Ok(kept()),
@@ -1188,9 +1189,9 @@ mod tests {
                 "a Return after the blank, inside the grace, is a send too",
                 vec![
                     (0, edited()),
-                    (50, reading(true, false, None)),
+                    (50, reading(true, false, Alignment::NotFound)),
                     (70, Input::Return),
-                    (75, reading(true, false, None)),
+                    (75, reading(true, false, Alignment::NotFound)),
                 ],
                 Some(Ok(kept())),
                 Ok(kept()),
@@ -1200,7 +1201,7 @@ mod tests {
                 vec![
                     (0, edited()),
                     (50, Input::Return),
-                    (60, reading(false, true, Some(kit()))),
+                    (60, reading(false, true, kit_read())),
                 ],
                 Some(Ok(kept())),
                 Ok(kept()),
@@ -1210,7 +1211,7 @@ mod tests {
                 vec![
                     (0, edited()),
                     (50, Input::Return),
-                    (60, reading(false, false, None)),
+                    (60, reading(false, false, Alignment::NotFound)),
                 ],
                 Some(Ok(kept())),
                 Ok(kept()),
@@ -1218,7 +1219,7 @@ mod tests {
             (
                 "after a Return, the paste still there is an ordinary read",
                 vec![
-                    (0, reading(false, false, Some(Outcome::Unchanged))),
+                    (0, reading(false, false, Alignment::Unchanged)),
                     (50, Input::Return),
                     (60, edited()),
                 ],
@@ -1230,14 +1231,17 @@ mod tests {
                 vec![
                     (0, edited()),
                     (50, Input::Return),
-                    (2_000, reading(false, false, None)),
+                    (2_000, reading(false, false, Alignment::NotFound)),
                 ],
                 None,
                 Err(Lost::SpanNotFound),
             ),
             (
                 "a Return with nothing kept, then blank, is cleared",
-                vec![(0, Input::Return), (10, reading(true, false, None))],
+                vec![
+                    (0, Input::Return),
+                    (10, reading(true, false, Alignment::NotFound)),
+                ],
                 Some(Err(Lost::ClearedBeforeRead)),
                 Err(Lost::ClearedBeforeRead),
             ),
@@ -1262,7 +1266,7 @@ mod tests {
             (
                 "a cleared field outranks a failed read",
                 vec![
-                    (0, reading(true, false, None)),
+                    (0, reading(true, false, Alignment::NotFound)),
                     (50, Input::Failed(ReadError::Timeout)),
                 ],
                 None,

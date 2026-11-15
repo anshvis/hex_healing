@@ -32,40 +32,28 @@ pub const QUEUE_CAPACITY: usize = 8;
 
 /// A pasted dictation and where it landed. Dropping it releases the element.
 pub struct PasteTarget {
-    /// The process the text was pasted into.
-    pub pid: i32,
-    /// The focused element read before the paste.
-    pub element: RetainedElement,
+    /// The field it went into, read before the paste.
+    pub pending: Pending,
+    /// What reached it, and when.
+    pub landed: Landed,
     /// The History that kept the dictation, and the entry that did.
     pub history: History,
     pub entry_id: u64,
-    /// The text that reached the field after the continuation join and smart
-    /// spacing, not the dictation's final text.
-    pub inserted: String,
     /// The dictation's final text, which the History entry must still hold
     /// for the observation to be stored on it.
     pub text: String,
-    /// Where in the field it went, if the app says where the caret was.
-    pub anchor: Option<Anchor>,
-    /// The field's text before the paste, read when there was no caret.
-    pub before: Option<String>,
-    /// When the paste completed, before History's write.
-    pub pasted_at: Instant,
-    /// The listener's Return count at the paste: a Return after it may be a
-    /// send.
-    pub returns: u64,
 }
 
-/// The element a paste is about to land in, and where its caret is, read
-/// before the paste.
+/// The field a paste is about to land in, read before the paste.
 pub struct Pending {
-    pid: i32,
-    element: RetainedElement,
+    /// The process the text goes into.
+    pub pid: i32,
+    pub element: RetainedElement,
     /// Where the caret is (a paste starts there), if the app says.
-    caret: Option<usize>,
-    /// The field's text, read when the app names no caret: without one the
-    /// paste is found by what it added.
-    before: Option<String>,
+    pub caret: Option<usize>,
+    /// The field's text, when it could be read whole: the paste is found by
+    /// what it added to it.
+    pub before: Option<String>,
 }
 
 impl Pending {
@@ -103,13 +91,11 @@ impl Handoff for Live {
         let pid = crate::dictation::context::frontmost_pid()?;
         let element = accessibility::focused_element(pid)?;
         let caret = accessibility::caret(&element);
-        let before = caret.is_none().then(|| {
-            accessibility::read_value_bounded(&element, session::READ_CHARS)
-                .ok()
-                .filter(|read| !read.windowed)
-                .map(|read| read.text)
-        });
-        Some(Pending::new(pid, element, caret, before.flatten()))
+        let before = accessibility::read_value_bounded(&element, session::READ_CHARS)
+            .ok()
+            .filter(|read| !read.windowed)
+            .map(|read| read.text);
+        Some(Pending::new(pid, element, caret, before))
     }
 
     fn submit(&mut self, target: PasteTarget) {
@@ -122,11 +108,16 @@ impl Handoff for Live {
 }
 
 /// What the paste put in the field, and when.
-struct Landed {
-    inserted: String,
-    anchor: Option<Anchor>,
-    at: Instant,
-    returns: u64,
+pub struct Landed {
+    /// The text that reached the field after the continuation join and smart
+    /// spacing, not the dictation's final text.
+    pub inserted: String,
+    /// Where in the field it went, if the app says where the caret was.
+    pub anchor: Option<Anchor>,
+    /// When the paste completed, before History's write.
+    pub at: Instant,
+    /// The listener's Return count then: a Return after it may be a send.
+    pub returns: u64,
 }
 
 enum State {
@@ -165,10 +156,7 @@ impl Watch {
         if inserted.is_empty() {
             return;
         }
-        let anchor = pending.caret.map(|start| Anchor {
-            start,
-            len: inserted.encode_utf16().count(),
-        });
+        let anchor = pending.caret.map(|start| Anchor { start });
         let landed = Landed {
             inserted,
             anchor,
@@ -190,16 +178,11 @@ impl Watch {
             (self.0, history, entry_id)
         {
             handoff.submit(PasteTarget {
-                pid: pending.pid,
-                element: pending.element,
+                pending,
+                landed,
                 history: history.clone(),
                 entry_id,
-                inserted: landed.inserted,
                 text: text.to_string(),
-                anchor: landed.anchor,
-                before: pending.before,
-                pasted_at: landed.at,
-                returns: landed.returns,
             });
         }
     }
@@ -271,16 +254,16 @@ pub(crate) fn history_for_test() -> History {
 #[cfg(test)]
 fn target_for_test(history: &History, entry_id: u64) -> PasteTarget {
     PasteTarget {
-        pid: 1,
-        element: RetainedElement::for_test(),
+        pending: Pending::new(1, RetainedElement::for_test(), None, None),
+        landed: Landed {
+            inserted: "pasted".into(),
+            anchor: None,
+            at: Instant::now(),
+            returns: 0,
+        },
         history: history.clone(),
         entry_id,
-        inserted: "pasted".into(),
         text: "pasted".into(),
-        anchor: None,
-        before: None,
-        pasted_at: Instant::now(),
-        returns: 0,
     }
 }
 
@@ -374,7 +357,7 @@ mod tests {
             panic!("the paste is noted");
         };
         let pasted_at = landed.at;
-        assert_eq!(landed.anchor, Some(Anchor { start: 10, len: 6 }));
+        assert_eq!(landed.anchor, Some(Anchor { start: 10 }));
         std::thread::sleep(std::time::Duration::from_millis(20));
         let mut again = Watch::before(&mut fake, Some(&history));
         again.pasted(" hello".into());
@@ -387,7 +370,7 @@ mod tests {
         again.recorded(&mut fake, Some(&history), Some(7), "hello");
         assert_eq!(fake.submitted.len(), 1);
         assert_eq!(fake.submitted[0].entry_id, 7);
-        assert_eq!(fake.submitted[0].inserted, " hello");
+        assert_eq!(fake.submitted[0].landed.inserted, " hello");
     }
 
     #[test]
@@ -400,7 +383,7 @@ mod tests {
         let mut watch = Watch::before(&mut fake, Some(&history));
         watch.pasted("hi".into());
         watch.recorded(&mut fake, Some(&history), Some(1), "hi");
-        assert_eq!(fake.submitted[0].anchor, None);
+        assert_eq!(fake.submitted[0].landed.anchor, None);
         let mut empty = Watch::before(&mut fake, Some(&history));
         empty.pasted(String::new());
         assert!(is_off(&empty));
