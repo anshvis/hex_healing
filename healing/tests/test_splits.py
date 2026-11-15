@@ -1181,3 +1181,23 @@ def test_a_failed_build_leaves_the_registry_and_removes_the_folders_it_wrote(sto
     assert on_disk == {first.rolling.split_id, first.edited.split_id}  # and nothing half-written is left
     monkeypatch.undo()
     assert splits.verify(store) == []
+
+
+def test_a_rolling_frame_admits_a_twin_of_a_registered_member_and_golden_does_not(store):
+    build_world(store)
+    build_at(store)
+    zones = splits.Zones.load(store.db, CUTOFF)
+    member = store.db.execute(
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'rolling' LIMIT 1").fetchone()[0]
+    twins = [r["clip_id"] for r in review_module.candidates(store, "random", zones.rolling)
+             if zones.clusters[r["clip_id"]] == zones.clusters[member]]
+    assert twins  # a never-reviewed near-duplicate of a rolling member may still be reviewed for rolling
+    assert all(zones.rolling(t) and not zones.golden(t) for t in twins)  # but golden keeps clear of it
+
+
+def test_golden_refuses_a_verified_clip_with_no_words_in_its_reference(store):
+    cid = add_clip(store, 1300, raw="clip number one says hello there friend", ts=CUTOFF - 3 * DAY)
+    review(store, cid, "fix", "...")  # confirmed, but the text has no words to freeze
+    labels.refresh(store, [cid])
+    assert row(store, cid)["label"] == "verified"
+    assert golden.add(store, cid) is False and splits.golden_members(store.db) == []

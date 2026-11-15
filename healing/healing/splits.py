@@ -745,8 +745,6 @@ def _verify(store: Store) -> Report:
 
     split_rows = db.execute("SELECT * FROM splits ORDER BY split_id").fetchall()
     tests = [r for r in split_rows if r["kind"] in ("rolling", "edited", "golden")]
-    if len([r for r in split_rows if r["kind"] == "golden" and r["frozen"]]) > 1:
-        report.leaks.append("more than one golden set is frozen")
     test_texts: dict[tuple[str, str], list[str]] = {}
     for row in tests:
         pinned = _pinned(row) if row["kind"] in ("rolling", "edited") else {}

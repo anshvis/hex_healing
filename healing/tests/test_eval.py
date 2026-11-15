@@ -511,13 +511,14 @@ def test_the_edited_span_lives_in_the_set_scores(world):
 
 
 def test_the_wanted_tie_break_changes_an_edited_span_score(tmp_path):
-    """"kit" appears twice in the reference and once in the transcript, and only the second was edited:
-    scored against the alignment that matches the edited word, nothing is wrong."""
+    """"kit" appears twice in the reference and once in the transcript, and only the first was edited:
+    scored against the alignment that matches the edited word, nothing is wrong (an alignment chosen
+    without knowing the edited position would keep the later "kit" and count one error)."""
     from healing.eval.bench import BenchRun
 
     folder = tmp_path / "edited"
     manifest.write_set(
-        folder, [{"id": "c1", "expected": "kit kit", "terms": [], "edited_positions": [[1, 2]], "label": "strong"}],
+        folder, [{"id": "c1", "expected": "kit kit", "terms": [], "edited_positions": [[0, 1]], "label": "strong"}],
         lambda clip: __import__("numpy").zeros(8000, dtype="int16"),
     )
     ref = eval_run.SetRef("edited", "edited-x", folder, manifest.verify(folder), 1)
@@ -526,3 +527,9 @@ def test_the_wanted_tie_break_changes_an_edited_span_score(tmp_path):
                     "median_rtf": 0.1, "p95_clip_ms": 1.0, "load_ms": 1.0})
     scores, per_clip = eval_run.score_set(ref, [run])
     assert scores["edited_span"] == {"errors": 0, "positions": 1} and per_clip[0]["edited_errors"] == 0
+
+
+def test_an_empty_edited_set_does_not_count_strong_clips_without_audio(world):
+    add_clip(world.store, 1, raw="send it to kip", final="Send it to kip.", outcome="edited", edited="Send it to Kit.", audio=False)
+    labels.label_all(world.store)
+    assert splits.why_empty(world.store, "edited").startswith("there are no strong clips yet")

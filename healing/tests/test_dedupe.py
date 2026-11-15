@@ -87,3 +87,18 @@ def test_a_near_index_answers_directly_not_transitively():
     assert list(NearIndex([a, far]).near(a)) == [a]
     assert list(NearIndex(["hi", "ho"]).near("hi")) == ["hi"]
     assert list(index.near(b)) == [b, c]  # an indexed key reuses its bands and finds the same neighbours
+
+
+def test_an_indexed_key_is_not_signed_again_when_it_is_queried(monkeypatch):
+    from healing import dedupe
+
+    keys = [" ".join(f"w{i}x{k}" for k in range(14)) for i in range(50)]
+    index = dedupe.NearIndex(keys)
+    calls = []
+    real = dedupe.signature
+    monkeypatch.setattr(dedupe, "signature", lambda grams: (calls.append(1), real(grams))[1])
+    for key in keys:
+        list(index.near(key))
+    assert calls == []  # their bands were kept when they were indexed
+    list(index.near("a brand new text that was never indexed at all, with enough words in it"))
+    assert len(calls) == 1

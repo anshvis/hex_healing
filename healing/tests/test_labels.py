@@ -570,3 +570,13 @@ def test_forget_clears_exactly_the_classifiers_columns(store):
     corrections.forget(store.db, cid, changed)
     assert changed == {"edited_text": "x", "acoustic_reference": None, "edited_positions": None, "classified_at_ms": None}
     assert store.db.execute("SELECT COUNT(*) FROM edits WHERE clip_id = ?", (cid,)).fetchone()[0] == 0
+
+
+def test_refresh_reads_only_the_clips_it_is_given(store):
+    ids = [add_clip(store, n, raw=f"clip {n} says hello there friend", outcome="unchanged", audio=False) for n in range(1, 6)]
+    statements = []
+    store.db.set_trace_callback(statements.append)
+    labels.refresh(store, ids[:2])
+    store.db.set_trace_callback(None)
+    reads = [s for s in statements if s.lstrip().upper().startswith("SELECT")]
+    assert reads and all("WHERE clip_id IN" in s for s in reads)  # no scan of every clip, edit or review
