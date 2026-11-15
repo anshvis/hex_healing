@@ -244,7 +244,7 @@ def _store_entry(
         )
         return
     changed = {k: v for k, v in fields.items() if existing[k] != v}
-    _correction_changes(existing, correction, observed, changed)
+    changed = _correction_changes(existing, correction, observed, changed)
     if audio_sha != existing["audio_sha256"]:
         changed["audio_sha256"] = audio_sha
     if not changed:
@@ -265,19 +265,19 @@ def _store_entry(
     )
 
 
-def _correction_changes(existing, correction: dict | None, observed: dict, changed: dict) -> None:
-    """Edit `changed` so that only a correction Hex actually reports touches the stored one.
+def _correction_changes(existing, correction: dict | None, observed: dict, changed: dict) -> dict:
+    """`changed`, adjusted so that only a correction Hex actually reports touches the stored one.
 
     An entry without `correction` says nothing (an older Hex drops the field when it saves), so
     the stored correction stays, unless the entry's text changed too (a Replace in Hex): that
     correction was seen against the old text, so it goes rather than label the new one.
     """
     if correction is not None:
-        return
-    for name in observed:
-        changed.pop(name, None)
-    if "raw_text" in changed or "final_text" in changed:
-        changed.update({name: None for name in observed if existing[name] is not None})
+        return changed
+    kept = {name: value for name, value in changed.items() if name not in observed}
+    if "raw_text" in kept or "final_text" in kept:
+        kept.update({name: None for name in observed if existing[name] is not None})
+    return kept
 
 
 def _store_audio(store: Store, recording: str, summary: Summary) -> str | None:
