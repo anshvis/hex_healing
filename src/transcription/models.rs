@@ -211,6 +211,33 @@ pub struct ModelDefinition {
     pub supports_language_detection: bool,
 }
 
+/// The catalog model a GGUF file is: its blob name is the pinned SHA-256 and
+/// its size matches, or (a plain copy) its file name and size match the pin,
+/// and its repository too when the caller knows it.
+pub(crate) fn catalog_match(
+    blob_sha256: Option<&str>,
+    repository: Option<&str>,
+    file_name: &str,
+    bytes: u64,
+) -> Option<TranscriptionModelId> {
+    MODELS
+        .iter()
+        .find(|model| {
+            let ModelRuntime::Gguf(artifact) = model.runtime else {
+                return false;
+            };
+            artifact.bytes == bytes
+                && match blob_sha256 {
+                    Some(sha256) => sha256 == artifact.sha256,
+                    None => {
+                        artifact.filename == file_name
+                            && repository.is_none_or(|repository| artifact.repository == repository)
+                    }
+                }
+        })
+        .map(|model| model.id)
+}
+
 /// How a model's transcription takes the vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VocabularyUse {
