@@ -183,3 +183,16 @@ def git_sha() -> str:
 def built_here(binary: str) -> bool:
     """Whether `binary` is this checkout's own release build (so `git_sha` names its source)."""
     return Path(binary).resolve() == (repo_root() / "target" / "release" / "hex").resolve()
+
+
+def wer_by_source(run: BenchRun, sources: dict[str, str]) -> dict[str, dict]:
+    """The run's word errors summed per clip source (the general set's `librispeech` and `ami`)."""
+    totals: dict[str, list[int]] = {}
+    for clip in run.clips:
+        errors_words = totals.setdefault(sources[clip["id"]], [0, 0])
+        errors_words[0] += clip["word_errors"]
+        errors_words[1] += clip["reference_words"]
+    return {
+        source: {"wer": errors / words, "word_errors": errors, "reference_words": words}
+        for source, (errors, words) in sorted(totals.items())
+    }

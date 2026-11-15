@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from healing import labels
+from healing import labels, splits
 from healing.store import Store, now_ms
 
 Player = Callable[[Path], None]
@@ -56,12 +56,16 @@ class ReviewResult:
 
 
 def candidates(store: Store, strategy: str, only: set[str] | None = None) -> list:
-    """Unreviewed clips with audio that `strategy` may show; `only` limits them to those ids."""
+    """Unreviewed clips with audio that `strategy` may show; `only` limits them to those ids.
+
+    A random review never shows a clip in a cluster golden, the general set or a retained train split
+    holds: a clip a model trained on must not later become a test clip (D-41).
+    """
     # A random review draws from every clip not yet sampled at random (an uncertain review is not a
     # sample, so it doesn't shrink the frame) and never a clip you rejected.
     seen = "r.strategy = 'random' OR r.action = 'reject'" if strategy == "random" else "1 = 1"
     base = (
-        f"SELECT c.* FROM clips c WHERE {labels.HAS_AUDIO} AND c.kind = 'dictation' AND c.golden = 0"
+        f"SELECT c.* FROM clips c WHERE {labels.USABLE}"
         f" AND NOT EXISTS (SELECT 1 FROM reviews r WHERE r.clip_id = c.clip_id AND ({seen}))"
     )
     if strategy == "uncertain":
@@ -69,6 +73,9 @@ def candidates(store: Store, strategy: str, only: set[str] | None = None) -> lis
         rows = store.db.execute(base + " AND c.label = 'weak' ORDER BY c.timestamp_ms DESC, c.clip_id").fetchall()
     else:
         rows = store.db.execute(base + " ORDER BY c.clip_id").fetchall()
+        clusters = splits.clip_clusters(store.db)
+        reserved = splits.reserved_clusters(store.db, clusters)
+        rows = [r for r in rows if clusters[r["clip_id"]] not in reserved]
     return [r for r in rows if only is None or r["clip_id"] in only]
 
 
@@ -143,16 +150,15 @@ def run(
     out: Callable[[str], None] = print,
     seed: int | None = None,
 ) -> ReviewResult:
-    from healing import splits
-
     if strategy not in STRATEGIES:
         raise ReviewError(f"strategy is one of {', '.join(STRATEGIES)}")
     only = None
     if since_cutoff:
         if strategy != "random":
             raise ReviewError("--since-cutoff fills the rolling set, which takes random reviews only")
-        cutoff = splits.cutoff_for(cutoff_ms)
-        only = splits.rolling_eligible_ids(store, cutoff)
+        # The rule `split build` uses for rolling and edited: in the window, in no reserved cluster.
+        db = store.db
+        only = splits.eligible_ids(db, splits.clip_clusters(db), splits.sessions(db), splits.cutoff_for(cutoff_ms))
     pool = candidates(store, strategy, only)
     if not pool:
         out("nothing to review: no unreviewed clips with audio match")
@@ -167,9 +173,15 @@ def main(args) -> int:
     try:
         # No `process_lock`: a review is minutes of waiting on you, and holding the lock would stall the
         # scheduled collect. Each answer is one short transaction; the store's busy timeout covers contention.
+        from healing.collect import since_to_ms
+        from healing.store import now_ms
+
+        cutoff = since_to_ms(args.cutoff, now_ms()) if args.cutoff else None
+        if args.cutoff and cutoff is None:
+            raise ReviewError(f"cannot read --cutoff {args.cutoff!r}")
         store = Store(sweep=False)
         try:
-            result = run(store, args.n, args.strategy, args.since_cutoff)
+            result = run(store, args.n, args.strategy, args.since_cutoff, cutoff)
         finally:
             store.close()
     except (ReviewError, StoreError) as error:

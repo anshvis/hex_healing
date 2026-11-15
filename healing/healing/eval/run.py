@@ -27,11 +27,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from healing import golden
 from healing import manifest as manifest_module
-from healing.eval import baseline
+from healing import splits
 from healing.eval.bench import (
-    BenchError, BenchRun, built_here, git_sha, hex_binary, hex_version, run_benchmark, sha256,
+    BenchError, BenchRun, built_here, git_sha, hex_binary, hex_version, run_benchmark, sha256, wer_by_source,
 )
 from healing.paths import healing_home, hex_support_dir
 from healing.sets import general
@@ -96,18 +95,19 @@ def current_vocabulary(settings_path: Path | None = None) -> tuple[list[dict], s
 def resolve_set(name: str, store: Store | None) -> SetRef | Unavailable:
     """The set's folder and pin, or why it isn't available."""
     if name == "general":
-        folder = healing_home() / "sets" / "general"
+        folder = general.folder()
         if not (folder / "manifest.json").is_file():
             return Unavailable("no general set: run `healing sets build-general`")
-        digest = _verified(folder)
+        row = store.db.execute("SELECT * FROM splits WHERE split_id = ?", (general.GENERAL_ID,)).fetchone() if store else None
+        digest = _verified(row) if row is not None and row["manifest_path"] else _verified_folder(folder)
         return SetRef(name, general.GENERAL_ID, folder, digest, len(json.loads((folder / "manifest.json").read_text())["clips"]))
     if store is None:
         return Unavailable("no dataset yet: run `healing collect`")
     if name == "golden":
-        row = golden.row(store)
+        row = splits.golden_row(store.db)
         if row is None or not row["frozen"]:
             have = row["n_clips"] if row else 0
-            return Unavailable(f"golden is pending ({have} of {golden.GOLDEN_SIZE} confirmed): run `healing golden review`")
+            return Unavailable(f"golden is pending ({have} of {splits.GOLDEN_SIZE} confirmed): run `healing golden review`")
     else:
         # The newest set of the kind, even when it's empty: an older one is a different cut-off and
         # different clips, and quietly scoring it would be a different test.
@@ -117,20 +117,32 @@ def resolve_set(name: str, store: Store | None) -> SetRef | Unavailable:
         if row is None:
             return Unavailable(f"no {name} set: run `healing split build`")
         if row["manifest_path"] is None:
-            return Unavailable(f"the latest {name} set ({row['split_id']}) has no clips" + (
-                " (needs random-verified clips after the cut-off)" if name == "rolling" else
-                " (needs strong clips with edited words after the cut-off)"
-            ))
-    folder = Path(row["manifest_path"]).parent
-    digest = _verified(folder)
-    if digest != row["manifest_sha256"]:
-        raise EvalError(f"{row['split_id']}: manifest changed since it was built; run `healing split verify`")
-    if row["sidecar_sha256"] and manifest_module.sidecar_digest(folder) != row["sidecar_sha256"]:
-        raise EvalError(f"{row['split_id']}: clips.jsonl changed since it was built; run `healing split verify`")
-    return SetRef(name, row["split_id"], folder, digest, row["n_clips"])
+            return Unavailable(f"the latest {name} set ({row['split_id']}) has no clips: " + _why_empty(store, name))
+    return SetRef(name, row["split_id"], Path(row["manifest_path"]).parent, _verified(row), row["n_clips"])
 
 
-def _verified(folder: Path) -> str:
+def _why_empty(store: Store, name: str) -> str:
+    if name == "rolling":
+        return "it needs random-verified clips in the window; run `healing review --since-cutoff`"
+    strong = store.db.execute("SELECT COUNT(*) FROM clips WHERE label = 'strong'").fetchone()[0]
+    if not strong:
+        return "there are no strong clips yet (edits you made that sound like what Hex heard)"
+    unplaced = store.db.execute(
+        "SELECT COUNT(*) FROM clips WHERE label = 'strong' AND edited_positions IS NULL").fetchone()[0]
+    if unplaced:
+        return f"{unplaced} of {strong} strong clips have no edited positions; run `healing label all`"
+    return f"{strong} strong clips exist, but none is inside the window and outside the golden, general and trained clusters"
+
+
+def _verified(row) -> str:
+    """The registry's pin check, as an eval error."""
+    try:
+        return splits.verified_set(row)[1]
+    except manifest_module.ManifestError as error:
+        raise EvalError(f"{error}; run `healing split verify`") from error
+
+
+def _verified_folder(folder: Path) -> str:
     try:
         return manifest_module.verify(folder)
     except manifest_module.ManifestError as error:
@@ -157,16 +169,15 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict], dict
         terms = definition.get("expected_terms", [])
         hit = [t for t in terms if manifest_module.term_count(transcript, t) > 0]
         term_hits += [{"id": record["id"], "term": t, "hit": t in hit} for t in terms]
-        errors, words = surface_errors(definition["expected"], transcript) if formatted else (0, 0)
-        format_errors, format_words = format_errors + errors, format_words + words
+        errors, words = surface_errors(definition["expected"], transcript) if formatted else (None, None)
+        format_errors, format_words = format_errors + (errors or 0), format_words + (words or 0)
         row = {
             "id": record["id"], "terms_hit": hit, "terms_expected": terms, "transcript": transcript,
             # A strong clip's reference is the model's own words outside the edited ones, so the
             # whole-reference counts would reward agreeing with oneself: not recorded for edited.
             "word_errors": None if edited_set else record["word_errors"],
             "reference_words": None if edited_set else record["reference_words"],
-            "format_errors": None if edited_set else errors,
-            "format_words": None if edited_set else words,
+            "format_errors": errors, "format_words": words,
         }
         positions = sidecar.get(record["id"], {}).get("edited_positions")
         if edited_set and positions:
@@ -190,7 +201,7 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict], dict
     }
     sources = {r["id"]: r["source"] for r in sidecar.values() if "source" in r}
     if sources and not edited_set:
-        scores["wer_by_source"] = baseline.wer_by_source(first, sources)
+        scores["wer_by_source"] = wer_by_source(first, sources)
     span = {"errors": span_errors, "positions": span_positions} if edited_set else None
     return scores, per_clip, span
 
@@ -238,7 +249,7 @@ def evaluate(
         "hex_version": hex_version(str(hex_path)),
         "hex_binary_sha256": sha256(hex_path),
         "models": [{"gguf_path": str(m), "gguf_sha256": sha256(m)} for m in models],
-        "sets": [{"split_id": r.split_id, "manifest_sha256": r.manifest_sha256, "n": r.n} for r in refs],
+        "sets": [{"set": r.name, "split_id": r.split_id, "manifest_sha256": r.manifest_sha256, "n": r.n} for r in refs],
         "unavailable_sets": missing,
         "vocabulary": {"mode": vocabulary, "terms": len(entries), "boost": boost if entries else None},
         "scores": {str(m): {} for m in models},
@@ -302,7 +313,7 @@ def table(document: dict) -> str:
     lines = [f"{'set':<10}{'model':<34}{'clips':>6}{'WER':>8}{'format':>8}{'term err':>10}{'edited':>8}"]
     shown = {s["split_id"]: s for s in document["sets"]}
     for name in SET_NAMES:
-        ref = next((s for s in document["sets"] if _set_name(s["split_id"]) == name), None)
+        ref = next((s for s in document["sets"] if s["set"] == name), None)
         if ref is None:
             lines.append(f"{name:<10}n/a  {document['unavailable_sets'].get(name, 'not requested')}")
             continue
@@ -315,10 +326,6 @@ def table(document: dict) -> str:
                 f"{_percent(scores['format_error_rate']):>8}{_percent(scores['term_error_rate']):>10}{edited:>8}"
             )
     return "\n".join(lines)
-
-
-def _set_name(split_id: str) -> str:
-    return split_id.split("-", 1)[0]
 
 
 def main(args) -> int:
@@ -350,4 +357,7 @@ def main(args) -> int:
     path = write(document)
     print(table(document))
     print(f"\nwrote {path}")
+    if not document["sets"]:
+        print("error: none of the requested sets could be scored", file=sys.stderr)
+        return 1
     return 0

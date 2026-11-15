@@ -84,12 +84,13 @@ def main(argv: list[str] | None = None) -> int:
     review.add_argument("--n", type=int, default=20)
     review.add_argument("--strategy", choices=["random", "uncertain"], default="random")
     review.add_argument("--since-cutoff", action="store_true",
-                        help="only clips whose session began after the parent's cut-off (fills the rolling set)")
+                        help="only clips whose session began after the cut-off (fills the rolling set)")
+    review.add_argument("--cutoff", help="with --since-cutoff: 14d, a date or RFC 3339 (default: the last 14 days, sliding; D-40)")
 
     split = commands.add_parser("split").add_subparsers(dest="command", required=True)
     build = split.add_parser("build", help="rolling, edited-span and train splits; registers general and golden")
     build.add_argument("--parent", default="current", help="the version the rolling set is fresh for")
-    build.add_argument("--cutoff", help="the parent's snapshot cut-off: 14d, a date or RFC 3339 (default: kept, else 14 days ago)")
+    build.add_argument("--cutoff", help="the window's start: 14d, a date or RFC 3339 (default: the last 14 days, sliding; D-40)")
     split.add_parser("verify", help="exit 1 on any leak, stale pin or non-verified gating reference")
 
     golden = commands.add_parser("golden").add_subparsers(dest="command", required=True)
@@ -209,7 +210,7 @@ def _label_all(args) -> int:
 
 
 def _split(args) -> int:
-    from healing import splits
+    from healing import manifest, splits
     from healing.collect import since_to_ms
     from healing.store import Store, StoreError, now_ms, process_lock
 
@@ -236,7 +237,7 @@ def _split(args) -> int:
                 result = splits.build(store, args.parent, cutoff)
             finally:
                 store.close()
-    except (StoreError, splits.SplitError) as error:
+    except (StoreError, splits.SplitError, manifest.ManifestError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     print(result.text())

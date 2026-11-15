@@ -170,6 +170,8 @@ def test_no_split_cluster_is_shared_and_the_kip_kit_pair_never_straddles(store):
     # "send it to kip" (slow, corrected to kit, before the cut-off) and "send it to kit" (fast, verified, after)
     kip = add_clip(store, 900, raw="send it to kip", ts=CUTOFF - 5 * DAY, outcome="edited", edited="Send it to Kit.", audio_ms=6000)
     kit = add_clip(store, 901, raw="send it to kit", ts=CUTOFF + 6 * DAY, audio_ms=2500)
+    old = add_clip(store, 902, raw="water the roses near the porch kip", final="Water the roses near the porch kip.",
+                   edited="Water the roses near the porch kit.", ts=CUTOFF - 6 * DAY, outcome="edited")
     labels.label_all(store)
     verify_random(store, [kit])
     result = build_at(store)
@@ -181,7 +183,7 @@ def test_no_split_cluster_is_shared_and_the_kip_kit_pair_never_straddles(store):
     tests = {clusters[c] for c in rolling} | {
         clusters[r[0]] for r in store.db.execute(
             "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'edited'")}
-    assert train and not {clusters[c] for c in train} & tests
+    assert old in train and not {clusters[c] for c in train} & tests  # an old, unrepeated clip trains
     assert result.excluded_train > 0
     assert splits.verify(store) == []
 
@@ -222,7 +224,10 @@ def test_rebuild_replaces_the_previous_sets(store):
     build_at(store)
     before = store.db.execute("SELECT COUNT(*) FROM splits").fetchone()[0]
     build_at(store, 5000)
-    assert store.db.execute("SELECT COUNT(*) FROM splits").fetchone()[0] == before
+    # rolling and edited are replaced; train is history, the earlier one frozen (D-41)
+    assert store.db.execute("SELECT COUNT(*) FROM splits").fetchone()[0] == before + 1
+    trains = store.db.execute("SELECT frozen FROM splits WHERE kind = 'train' ORDER BY created_at_ms").fetchall()
+    assert [r[0] for r in trains] == [1, 0]
     kept = {p.name for p in (Path(store.root).parent / "sets").iterdir()}
     assert len([k for k in kept if k.startswith("rolling-")]) == 1
 
@@ -308,7 +313,7 @@ def test_term_count_matches_the_benchmark_rules():
 
 @pytest.fixture
 def small_golden(monkeypatch):
-    monkeypatch.setattr(golden, "GOLDEN_SIZE", 5)
+    monkeypatch.setattr(splits, "GOLDEN_SIZE", 5)
 
 
 class Accept:
@@ -503,12 +508,12 @@ def test_a_failed_freeze_is_retried(store, small_golden, monkeypatch):
     script = Accept()
     with pytest.raises(OSError):
         golden.run(store, 20, player=script.play, ask=script.ask, out=lambda *_: None, seed=3)
-    assert golden.row(store)["frozen"] == 0 and len(golden.member_ids(store)) == 5
+    assert splits.golden_row(store.db)["frozen"] == 0 and len(splits.golden_members(store.db)) == 5
     monkeypatch.setattr(splits, "write_and_pin", real)
     lines = []
     with pytest.raises(golden.GoldenError, match="frozen"):  # the retry freezes first, then refuses more
         golden.run(store, 20, player=script.play, ask=script.ask, out=lines.append, seed=3)
-    assert golden.row(store)["frozen"] == 1
+    assert splits.golden_row(store.db)["frozen"] == 1
 
 
 def test_golden_stratifies_across_skewed_apps_and_months():
@@ -541,3 +546,66 @@ def test_set_folders_and_files_are_owner_only(store, home):
     for path in seen:
         mode = stat.S_IMODE(path.stat().st_mode)
         assert mode == (0o700 if path.is_dir() else 0o600), (path, oct(mode))
+
+
+def test_train_ids_is_right_between_builds_and_the_window_is_a_test_zone(store):
+    build_world(store)
+    build_at(store)
+    # a review after the last build: no rebuild has registered it
+    late = add_clip(store, 950, raw="mix the paint with the thinner slowly now", ts=CUTOFF + 10 * DAY)
+    review(store, late)
+    labels.refresh(store, [late])
+    assert late in {r["clip_id"] for r in labels.trainable(store)}  # raw trainable has it
+    assert late not in splits.train_ids(store, cutoff_ms=CUTOFF)
+    # a clip older than the window that near-duplicates an in-window one is out too
+    old_twin = add_clip(store, 951, raw="mix the paint with the thinner slowly now", ts=CUTOFF - 10 * DAY, outcome="edited",
+                        final="Mix the paint with the thinner slowly now kip.", edited="Mix the paint with the thinner slowly now kit.")
+    labels.label_all(store)
+    assert old_twin not in splits.train_ids(store, cutoff_ms=CUTOFF)
+    # and everything it returns is outside the window
+    sess = splits.sessions(store.db)
+    assert all(sess[c][1] <= CUTOFF for c in splits.train_ids(store, cutoff_ms=CUTOFF))
+
+
+def test_a_trained_on_clip_never_becomes_a_test_clip(store, small_golden):
+    ids, _ = build_world(store)
+    old = add_clip(store, 960, raw="water the roses near the porch kip", final="Water the roses near the porch kip.",
+                   edited="Water the roses near the porch kit.", ts=CUTOFF - 6 * DAY, outcome="edited")
+    labels.label_all(store)
+    build_at(store)
+    assert old in {r[0] for r in store.db.execute(
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'train'")}
+    twin = add_clip(store, 961, raw="water the roses near the porch kip", ts=CUTOFF + 3 * DAY)
+    labels.label_all(store)
+    assert twin not in {r["clip_id"] for r in review_module.candidates(store, "random")}
+    assert old not in {r["clip_id"] for r in review_module.candidates(store, "random")}
+    clusters = splits.clip_clusters(store.db)
+    assert twin not in splits.eligible_ids(store.db, clusters, splits.sessions(store.db), CUTOFF)
+    script = Accept()
+    golden.run(store, 20, player=script.play, ask=script.ask, out=lambda *_: None, seed=3)
+    assert twin not in splits.golden_members(store.db) and old not in splits.golden_members(store.db)
+    trained = splits.trained_clusters(store.db, clusters)
+    assert not {clusters[c] for c in splits.golden_members(store.db)} & trained
+    # a later build keeps the earlier train split as a frozen row
+    build_at(store, 10_000)
+    assert [r[0] for r in store.db.execute("SELECT frozen FROM splits WHERE kind = 'train' ORDER BY created_at_ms")] == [1, 0]
+    assert splits.verify(store) == []
+
+
+def test_review_since_cutoff_takes_the_cutoff_flag(store):
+    a = add_clip(store, 1, raw="alpha beta gamma delta epsilon zeta eta", ts=CUTOFF + DAY)
+    b = add_clip(store, 2, raw="one two three four five six seven", ts=CUTOFF - 5 * DAY)
+    shown = []
+
+    class Quit:
+        def play(self, path):
+            shown.append(path)
+
+        def ask(self, prompt):
+            return "q"
+
+    review_module.run(store, 5, "random", True, CUTOFF - 10 * DAY, player=Quit().play, ask=Quit().ask, out=lambda *_: None)
+    assert len(shown) == 1
+    shown.clear()
+    review_module.run(store, 5, "random", True, CUTOFF, player=Quit().play, ask=Quit().ask, out=lambda *_: None)
+    assert len(shown) == 1 and a and b

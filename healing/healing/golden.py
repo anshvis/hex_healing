@@ -1,7 +1,7 @@
 """`healing golden review`: the frozen golden set (D-17, G-10).
 
 You confirm clips in a terminal review (play, see the text, accept or fix); each confirmed clip
-joins `golden-v1`. At `GOLDEN_SIZE` (200) the set freezes on its own: its manifest and WAVs
+joins `golden-v1`. At `splits.GOLDEN_SIZE` (200) the set freezes on its own: its manifest and WAVs
 are written, its SHA-256 is pinned in `sets/golden-v1/manifest.sha256` (the registry, once M5
 lands) and in the `splits` row, and the schema refuses every later change to that row or its
 members. Until then it is pending and evaluates as n/a.
@@ -22,10 +22,6 @@ from healing.store import Store, now_ms
 from healing.wer import normalized_words
 
 
-GOLDEN_ID = "golden-v1"
-GOLDEN_SIZE = 200  # frozen once it reaches this many confirmed clips
-
-
 class GoldenError(RuntimeError):
     pass
 
@@ -35,26 +31,8 @@ def _stratum(row) -> tuple[str, str]:
     return (row["application"] or "(unknown)", month)
 
 
-def row(store: Store):
-    return store.db.execute("SELECT * FROM splits WHERE split_id = ?", (GOLDEN_ID,)).fetchone()
-
-
-def member_ids_db(db) -> list[str]:
-    return [r["clip_id"] for r in db.execute(
-        "SELECT clip_id FROM split_members WHERE split_id = ? ORDER BY clip_id", (GOLDEN_ID,))]
-
-
-def member_ids(store: Store) -> list[str]:
-    return member_ids_db(store.db)
-
-
-def frozen_row(store: Store):
-    current = row(store)
-    return current if current is not None and current["frozen"] else None
-
-
 def check_open(store: Store) -> None:
-    current = row(store)
+    current = splits.golden_row(store.db)
     if current is not None and current["frozen"]:
         raise GoldenError(
             f"golden is frozen at {current['n_clips']} clips ({str(current['manifest_sha256'])[:12]}) and never changes"
@@ -94,15 +72,15 @@ def add(store: Store, clip_id: str) -> bool:
     if clip["label"] != "verified" or not normalized_words(clip["reference_text"] or ""):
         return False
     check_open(store)
-    if row(store) is None:
+    if splits.golden_row(db) is None:
         db.execute(
             "INSERT INTO splits (split_id, kind, created_at_ms) VALUES (?, 'golden', ?)",
-            (GOLDEN_ID, now_ms()),
+            (splits.GOLDEN_ID, now_ms()),
         )
-    db.execute("INSERT OR IGNORE INTO split_members (split_id, clip_id) VALUES (?, ?)", (GOLDEN_ID, clip_id))
+    db.execute("INSERT OR IGNORE INTO split_members (split_id, clip_id) VALUES (?, ?)", (splits.GOLDEN_ID, clip_id))
     db.execute("UPDATE clips SET golden = 1 WHERE clip_id = ?", (clip_id,))
-    count = len(member_ids(store))
-    db.execute("UPDATE splits SET n_clips = ? WHERE split_id = ?", (count, GOLDEN_ID))
+    count = len(splits.golden_members(store.db))
+    db.execute("UPDATE splits SET n_clips = ? WHERE split_id = ?", (count, splits.GOLDEN_ID))
     db.commit()
     freeze_if_full(store)
     return True
@@ -111,8 +89,8 @@ def add(store: Store, clip_id: str) -> bool:
 def freeze_if_full(store: Store) -> bool:
     """Freeze a full, unfrozen golden set. Idempotent, so a freeze that failed is retried by the next
     `add` or `run` and the confirmed 200th clip never strands the set."""
-    current = row(store)
-    if current is None or current["frozen"] or len(member_ids(store)) < GOLDEN_SIZE:
+    current = splits.golden_row(store.db)
+    if current is None or current["frozen"] or len(splits.golden_members(store.db)) < splits.GOLDEN_SIZE:
         return False
     freeze(store)
     return True
@@ -120,17 +98,17 @@ def freeze_if_full(store: Store) -> bool:
 
 def freeze(store: Store) -> None:
     db = store.db
-    ids = member_ids(store)
+    ids = splits.golden_members(store.db)
     rows = [db.execute("SELECT * FROM clips WHERE clip_id = ?", (i,)).fetchone() for i in ids]
     clusters, sessions = splits.clip_clusters(db), splits.sessions(db)
     items = splits.entries(store, rows, clusters, sessions)
     if len(items) != len(ids):
         raise GoldenError("a golden clip has no usable reference; refusing to freeze")
-    path, digest, words, sidecar = splits.write_and_pin(store, GOLDEN_ID, items)
+    info = splits.write_and_pin(store, splits.GOLDEN_ID, items)
     db.execute(
         "UPDATE splits SET manifest_path = ?, manifest_sha256 = ?, sidecar_sha256 = ?, n_clips = ?,"
         " n_words = ?, frozen = 1 WHERE split_id = ?",
-        (str(path), digest, sidecar, len(ids), words, GOLDEN_ID),
+        (str(info.path), info.manifest_sha256, info.sidecar_sha256, len(ids), info.n_words, splits.GOLDEN_ID),
     )
     db.commit()
 
@@ -140,11 +118,14 @@ def run(store: Store, n: int = 20, *, player=review.afplay, ask=input, out=print
     check_open(store)
     db = store.db
     clusters = splits.clip_clusters(db)
-    members = member_ids(store)
+    members = splits.golden_members(store.db)
     taken_clusters = {clusters[m] for m in members}
     taken = Counter(_stratum(db.execute("SELECT * FROM clips WHERE clip_id = ?", (m,)).fetchone()) for m in members)
-    pool = review.candidates(store, "random")
-    rows = stratified_pick(pool, taken, taken_clusters, clusters, min(n, GOLDEN_SIZE - len(members)),
+    # Not a near-duplicate of anything a rolling or edited set holds: a golden clip and a rolling clip
+    # are both test clips, and the registry must keep their clusters apart (`split verify` checks).
+    held = splits.registered_test_clusters(db, clusters)
+    pool = [r for r in review.candidates(store, "random") if clusters[r["clip_id"]] not in held]
+    rows = stratified_pick(pool, taken, taken_clusters, clusters, min(n, splits.GOLDEN_SIZE - len(members)),
                            random.Random(seed))
     if not rows:
         out("nothing to review: no unreviewed clips with audio in a new cluster")
@@ -153,12 +134,12 @@ def run(store: Store, n: int = 20, *, player=review.afplay, ask=input, out=print
     def after(clip, action: str) -> bool:
         if action != "reject":
             add(store, clip["clip_id"])
-        current = row(store)
+        current = splits.golden_row(store.db)
         return current is not None and bool(current["frozen"])
 
     result = review.review_clips(store, rows, "random", player=player, ask=ask, out=out, after=after)
-    current = row(store)
-    out(f"golden: {current['n_clips'] if current else 0} of {GOLDEN_SIZE}"
+    current = splits.golden_row(store.db)
+    out(f"golden: {current['n_clips'] if current else 0} of {splits.GOLDEN_SIZE}"
         + (" (frozen)" if current and current["frozen"] else " (pending)"))
     return result
 

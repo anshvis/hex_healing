@@ -12,7 +12,8 @@ import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
-from healing.eval.bench import BenchRun, git_sha, hex_binary, sha256
+from healing.eval import run as eval_run
+from healing.eval.bench import git_sha, hex_binary
 from healing.paths import repo_root
 
 DEFAULT_MODEL_ID = "parakeet-unified-en-0.6b"
@@ -22,22 +23,8 @@ DEFAULT_GGUF = (
 )
 
 
-def wer_by_source(run: BenchRun, sources: dict[str, str]) -> dict[str, dict]:
-    totals: dict[str, list[int]] = {}
-    for clip in run.clips:
-        errors_words = totals.setdefault(sources[clip["id"]], [0, 0])
-        errors_words[0] += clip["word_errors"]
-        errors_words[1] += clip["reference_words"]
-    return {
-        source: {"wer": errors / words, "word_errors": errors, "reference_words": words}
-        for source, (errors, words) in sorted(totals.items())
-    }
-
-
 def baseline(model: Path, model_id: str, output: Path) -> dict:
-    from healing.eval import run
-
-    document = run.evaluate([model], ["general"], vocabulary="none")
+    document = eval_run.evaluate([model], ["general"], vocabulary="none")
     if "general" in document["unavailable_sets"]:
         raise SystemExit(document["unavailable_sets"]["general"])
     scores = document["scores"][str(model)]["general"]

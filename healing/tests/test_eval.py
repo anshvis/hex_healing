@@ -242,7 +242,7 @@ def test_the_eval_json_has_the_contract_fields(world):
     document = evaluate(world, ["a.gguf"], ["rolling", "general", "edited"], vocabulary="none")
     assert set(document) >= {"eval_id", "hex_sha", "models", "sets", "scores", "per_clip", "edited_span", "started_at_ms", "duration_ms"}
     assert document["models"][0]["gguf_sha256"] and document["models"][0]["gguf_path"].endswith("a.gguf")
-    assert all(set(s) == {"split_id", "manifest_sha256", "n"} for s in document["sets"])
+    assert all(set(s) == {"set", "split_id", "manifest_sha256", "n"} for s in document["sets"])
     score = document["scores"][str(world.models["a.gguf"])]["rolling"]
     assert set(score) >= {"wer", "word_errors", "ref_words", "format_error_rate", "term_error_rate", "term_hits", "median_rtf", "p95_clip_ms"}
     path = eval_run.write(document)
@@ -361,7 +361,7 @@ def test_a_swapped_wav_with_a_rewritten_sidecar_and_pin_is_refused(world):
     pin = (folder / "manifest.sha256").read_text().splitlines()
     (folder / "manifest.sha256").write_text(f"{pin[0]}\n{hashlib.sha256(sidecar.encode()).hexdigest()}  clips.jsonl\n")
     assert manifest.verify(folder)  # the folder is self-consistent...
-    with pytest.raises(eval_run.EvalError, match="clips.jsonl changed"):  # ...but not the registry's pin
+    with pytest.raises(eval_run.EvalError, match="clips.jsonl hash"):  # ...but not the registry's pin
         evaluate(world, ["a.gguf"], ["rolling"], vocabulary="none")
     assert any("clips.jsonl hash" in p for p in splits.verify(world.store))
 
@@ -376,12 +376,12 @@ def test_an_empty_latest_split_is_na_not_an_older_one(world):
 def test_a_frozen_golden_set_is_scored(world, monkeypatch):
     from healing import golden
 
-    monkeypatch.setattr(golden, "GOLDEN_SIZE", 3)
+    monkeypatch.setattr(splits, "GOLDEN_SIZE", 3)
     dataset(world.store)
     ids = [r["clip_id"] for r in world.store.db.execute("SELECT clip_id FROM clips WHERE label = 'verified' LIMIT 3")]
     for clip in ids:
         assert golden.add(world.store, clip)
-    assert golden.frozen_row(world.store) is not None
+    assert splits.golden_row(world.store.db)["frozen"]
     document = evaluate(world, ["a.gguf"], ["golden"], vocabulary="none")
     assert [s["split_id"] for s in document["sets"]] == ["golden-v1"] and document["sets"][0]["n"] == 3
     assert document["scores"][str(world.models["a.gguf"])]["golden"]["wer"] == 0

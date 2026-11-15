@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from healing.eval.baseline import wer_by_source
+from healing.eval.bench import wer_by_source
 from healing.eval.bench import BenchError, parse_jsonl
 
 # Shapes copied from src/transcription/benchmark.rs's `model`, `clip` and

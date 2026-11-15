@@ -20,10 +20,17 @@ from typing import Callable, Iterable, Protocol
 import numpy as np
 import soundfile
 
+from healing.paths import healing_home
+
 from healing.manifest import ManifestError, build_manifest, verify, write_set
 
 SAMPLE_RATE = 16_000
 GENERAL_ID = "general-v1"
+
+
+def folder() -> Path:
+    """Where the general set lives."""
+    return healing_home() / "sets" / "general"
 
 HF_URL = "https://huggingface.co/datasets/{repo}/resolve/{revision}/{path}"
 # LibriSpeech test-other through Hugging Face's parquet copy of openslr's
@@ -112,12 +119,6 @@ def build(
 
     write_set(out, entries, pcm)
     return BuildResult(manifest_path, digest, len(chosen), unchanged=False)
-
-
-def sources_by_clip(set_dir: Path) -> dict[str, str]:
-    """Clip id → source name, from the sidecar."""
-    rows = (json.loads(line) for line in (set_dir / "clips.jsonl").read_text().splitlines())
-    return {row["id"]: row["source"] for row in rows}
 
 
 def subset(out: Path, prefix: str, name: str, expected: int) -> Path:
