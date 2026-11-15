@@ -95,5 +95,5 @@ def test_a_truncated_sidecar_is_refused(tmp_path):
     build(tmp_path, [(FakeSource("ls", 20), 4)])
     sidecar = tmp_path / "clips.jsonl"
     sidecar.write_text("".join(sidecar.read_text().splitlines(keepends=True)[:-1]))
-    with pytest.raises(BuildError, match="exactly the manifest"):
+    with pytest.raises(BuildError, match="exactly the manifest|no longer matches its pin"):
         build(tmp_path, [(FakeSource("ls", 20), 4)])

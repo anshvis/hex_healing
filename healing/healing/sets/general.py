@@ -1,7 +1,7 @@
 """The general regression set: LibriSpeech test-other plus AMI IHM test (D-11).
 
 It never changes once written: `manifest.sha256` pins the clip list, and
-`clips.jsonl` pins each WAV. Audio lives under `$HEALING_HOME`, never in the
+`clips.jsonl` pins each WAV (written and verified by `healing.manifest`, as every set is). Audio lives under `$HEALING_HOME`, never in the
 repo. The manifest is a `hex benchmark-transcription` manifest; every clip is
 group `ordinary`, and the source sits in the `clips.jsonl` sidecar.
 """
@@ -19,6 +19,8 @@ from typing import Callable, Iterable, Protocol
 
 import numpy as np
 import soundfile
+
+from healing.manifest import ManifestError, build_manifest, verify, write_set
 
 SAMPLE_RATE = 16_000
 
@@ -47,8 +49,7 @@ AMI_MIN_WORDS = 3
 AMI_FILLERS = {"um", "umm", "uh", "uhm", "hmm", "hm", "mm", "mmm", "mm-hmm", "mhm", "uh-huh"}
 
 
-class BuildError(RuntimeError):
-    pass
+BuildError = ManifestError
 
 
 @dataclass(frozen=True)
@@ -86,23 +87,12 @@ def build(
         picks = sorted(rng.choice(len(candidates), size=count, replace=False))
         chosen += [candidates[index] for index in picks]
 
-    manifest = {
-        "clips": [
-            {
-                "id": utterance.id,
-                "audio": f"audio/{utterance.id}.wav",
-                "expected": utterance.text,
-                "group": "ordinary",
-            }
-            for utterance in chosen
-        ]
-    }
-    manifest_bytes = (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode()
-    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    entries = [
+        {"id": u.id, "expected": u.text, "terms": [], "source": u.source} for u in chosen
+    ]
+    digest = build_manifest(entries)[2]
     manifest_path = out / "manifest.json"
-    pin_path = out / "manifest.sha256"
-
-    if manifest_path.exists() or pin_path.exists():
+    if manifest_path.exists() or (out / "manifest.sha256").exists():
         existing = verify(out)
         if existing != digest:
             raise BuildError(
@@ -111,26 +101,15 @@ def build(
             )
         return BuildResult(manifest_path, digest, len(chosen), unchanged=True)
 
-    audio_dir = out / "audio"
-    audio_dir.mkdir(parents=True, exist_ok=True)
-    sidecar = []
-    for utterance in chosen:
-        samples, rate = utterance.load()
+    by_id = {u.id: u for u in chosen}
+
+    def pcm(clip_id: str) -> np.ndarray:
+        samples, rate = by_id[clip_id].load()
         if rate != SAMPLE_RATE:
-            raise BuildError(f"{utterance.id}: {rate} Hz audio; the set is 16 kHz only")
-        path = audio_dir / f"{utterance.id}.wav"
-        soundfile.write(path, _mono(samples), SAMPLE_RATE, subtype="PCM_16")
-        sidecar.append(
-            {
-                "id": utterance.id,
-                "source": utterance.source,
-                "audio_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            }
-        )
-    # The pin goes last: a set without it is incomplete, never "different".
-    (out / "clips.jsonl").write_text("".join(json.dumps(row) + "\n" for row in sidecar))
-    manifest_path.write_bytes(manifest_bytes)
-    pin_path.write_text(f"{digest}  manifest.json\n")
+            raise BuildError(f"{clip_id}: {rate} Hz audio; the set is 16 kHz only")
+        return _mono(samples)
+
+    write_set(out, entries, pcm)
     return BuildResult(manifest_path, digest, len(chosen), unchanged=False)
 
 
@@ -138,18 +117,6 @@ def sources_by_clip(set_dir: Path) -> dict[str, str]:
     """Clip id → source name, from the sidecar."""
     rows = (json.loads(line) for line in (set_dir / "clips.jsonl").read_text().splitlines())
     return {row["id"]: row["source"] for row in rows}
-
-
-def verify(out: Path) -> str:
-    """Checks a written set against its pins and returns the manifest's sha256."""
-    manifest_path, pin_path, sidecar = out / "manifest.json", out / "manifest.sha256", out / "clips.jsonl"
-    if not (manifest_path.is_file() and pin_path.is_file() and sidecar.is_file()):
-        raise BuildError(f"{out} holds an incomplete set (a build stopped part-way); delete it and build again")
-    digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-    if pin_path.read_text().split()[0] != digest:
-        raise BuildError(f"{manifest_path} no longer matches its pin in {pin_path.name}")
-    _verify_audio(out)
-    return digest
 
 
 def subset(out: Path, prefix: str, name: str, expected: int) -> Path:
@@ -164,18 +131,6 @@ def subset(out: Path, prefix: str, name: str, expected: int) -> Path:
     path = out / f"{name}.json"
     path.write_text(json.dumps({"clips": clips}, indent=1, sort_keys=True) + "\n")
     return path
-
-
-def _verify_audio(out: Path) -> None:
-    ids = {clip["id"] for clip in json.loads((out / "manifest.json").read_text())["clips"]}
-    rows = {json.loads(line)["id"] for line in (out / "clips.jsonl").read_text().splitlines()}
-    if rows != ids:
-        raise BuildError(f"{out / 'clips.jsonl'} doesn't list exactly the manifest's clips")
-    for line in (out / "clips.jsonl").read_text().splitlines():
-        row = json.loads(line)
-        path = out / "audio" / f"{row['id']}.wav"
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != row["audio_sha256"]:
-            raise BuildError(f"{path} is missing or changed; rebuild the set in a new folder")
 
 
 def _mono(samples: np.ndarray) -> np.ndarray:
