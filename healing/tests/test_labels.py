@@ -454,3 +454,66 @@ def test_concurrent_first_opens_migrate_once(tmp_path, monkeypatch):
     assert all(rc == 0 for _, rc in results), [r[0][1][-200:] for r in results if r[1]][:2]
     assert {out.strip() for (out, _), _ in results} == {str(store_module.SCHEMA_VERSION)}
     assert sorted(p.name for p in root.glob("dataset.sqlite.pre-*")) == ["dataset.sqlite.pre-v5"]
+
+
+def test_a_v7_dataset_missing_columns_is_repaired_on_open(tmp_path, monkeypatch):
+    """An intermediate build stamped v7 before `acoustic_reference`, the sidecar pin and the snapshot
+    detail existed: opening it repairs the file (and does not classify anything again)."""
+    monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))
+    Store().close()
+    path = tmp_path / "home" / "dataset" / "dataset.sqlite"
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE clips DROP COLUMN acoustic_reference")
+    db.execute("ALTER TABLE splits DROP COLUMN detail")
+    db.execute("ALTER TABLE splits DROP COLUMN sidecar_sha256")
+    db.commit()
+    assert db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION
+    db.close()
+    store = Store()
+    assert "acoustic_reference" in {r[1] for r in store.db.execute("PRAGMA table_info(clips)")}
+    assert {"detail", "sidecar_sha256"} <= {r[1] for r in store.db.execute("PRAGMA table_info(splits)")}
+    assert store_module.ensure_m3_schema(store.db) is False  # nothing left to repair
+    store.close()
+
+
+def test_the_process_lock_and_the_lock_probe_share_one_flock(tmp_path):
+    import os
+
+    from healing.store import StoreError, lock_free, locked
+
+    path = tmp_path / "x.lock"
+    with locked(path, wait=False):
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            assert lock_free(descriptor) is False
+        finally:
+            os.close(descriptor)
+        with pytest.raises(StoreError, match="busy now"):
+            with locked(path, wait=False, busy="busy now"):
+                pass
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        assert lock_free(descriptor) is True
+    finally:
+        os.close(descriptor)
+
+
+def test_refresh_labels_every_clip_past_the_chunk_size(store):
+    ids = []
+    for n in range(1, 531):  # more than one chunk of 500
+        ids.append(add_clip(store, n, raw=f"clip {n} says hello there friend", outcome="unchanged", audio=False))
+    counts = labels.refresh(store, ids)
+    assert counts["weak"] == 530
+    assert store.db.execute("SELECT COUNT(*) FROM clips WHERE label = 'weak' AND weight = 0.2").fetchone()[0] == 530
+    assert labels.refresh(store, []) == {}  # none when empty
+
+
+def test_refresh_never_touches_edited_positions(store):
+    from healing import corrections
+
+    cid = add_clip(store, 1, outcome="edited")
+    store.db.execute("UPDATE clips SET edited_text = 'Send it to Kit.' WHERE clip_id = ?", (cid,))
+    corrections.label_corrections(store)
+    review(store, cid, "fix", "send it to kit")  # verified: not strong, but the classifier's positions stay
+    labels.refresh(store)
+    assert label_of(store, cid)[0] == "verified" and row(store, cid)["edited_positions"] == "[[3, 4]]"

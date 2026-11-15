@@ -179,12 +179,33 @@ BEGIN SELECT RAISE(ABORT, 'a frozen split never changes'); END;
 """
 
 
-def _migrate_m3(db: sqlite3.Connection) -> None:
+M3_SPLIT_COLUMNS = {"sidecar_sha256": "TEXT", "detail": "TEXT"}
+
+
+def ensure_m3_schema(db: sqlite3.Connection) -> bool:
+    """Create whatever of the M3 schema is missing; True when it had to. Safe to repeat, so it runs on
+    every open: a v7 file made by an earlier build of this schema (before `acoustic_reference`, the
+    sidecar pin or the snapshot detail existed) is repaired instead of failing."""
     have = {row[1] for row in db.execute("PRAGMA table_info(clips)")}
-    for name, definition in M3_COLUMNS.items():
-        if name not in have:
-            db.execute(f"ALTER TABLE clips ADD COLUMN {name} {definition}")
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    split_have = {row[1] for row in db.execute("PRAGMA table_info(splits)")} if "splits" in tables else None
+    missing = [n for n in M3_COLUMNS if n not in have]
+    if split_have is not None:
+        missing += [n for n in M3_SPLIT_COLUMNS if n not in split_have]
+    if not missing and {"reviews", "splits", "split_members"} <= tables:
+        return False
+    for name in (n for n in M3_COLUMNS if n not in have):
+        db.execute(f"ALTER TABLE clips ADD COLUMN {name} {M3_COLUMNS[name]}")
     db.executescript(SCHEMA_M3)
+    split_have = {row[1] for row in db.execute("PRAGMA table_info(splits)")}
+    for name, definition in M3_SPLIT_COLUMNS.items():
+        if name not in split_have:
+            db.execute(f"ALTER TABLE splits ADD COLUMN {name} {definition}")
+    return True
+
+
+def _migrate_m3(db: sqlite3.Connection) -> None:
+    ensure_m3_schema(db)
     # One time: before `acoustic_reference` the classifier wrote `reference_text`, which labels later
     # overwrote, and `edited_positions` did not exist. Classify those clips again (the next `label all`
     # does), so their strong references and edited words come back. Nothing re-runs this.
@@ -205,20 +226,35 @@ def dataset_root() -> Path:
     return healing_home() / "dataset"
 
 
+def lock_free(descriptor: int) -> bool:
+    """Take an exclusive lock on an open file without waiting; False when another process holds it."""
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
 @contextlib.contextmanager
+def locked(path: Path, *, wait: bool, busy: str = "another healing process is running"):
+    """Hold an exclusive `flock` on `path` (created owner-only) for the block. `wait` blocks until it
+    is free; otherwise a held lock raises `StoreError(busy)`."""
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if wait:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        elif not lock_free(descriptor):
+            raise StoreError(busy)
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def process_lock():
     """One healing writer at a time (`collect`, `prune`): `$HEALING_HOME/.lock`."""
     home = healing_home()
     _owner_dir(home)
-    descriptor = os.open(home / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as error:
-            raise StoreError("another healing process is running") from error
-        yield
-    finally:
-        os.close(descriptor)
+    return locked(home / ".lock", wait=False)
 
 
 def now_ms() -> int:
@@ -254,6 +290,14 @@ def _owner_dir(path: Path) -> None:
     os.chmod(path, 0o700)
 
 
+def _fsync(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _backup_is_whole(path: Path, version: int) -> bool:
     if not path.is_file():
         return False
@@ -261,8 +305,8 @@ def _backup_is_whole(path: Path, version: int) -> bool:
         copy = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
             return copy.execute("PRAGMA user_version").fetchone()[0] == version and (
-                copy.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
-            )
+                copy.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+            ) and copy.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
         finally:
             copy.close()
     except sqlite3.Error:
@@ -292,10 +336,9 @@ class Store:
 
         The exclusive lock covers reading the version, the backup and the steps, and the version is
         read again once it is held, so a second opener finds the work done instead of repeating it.
+        A file already at the current version still has its M3 schema checked and repaired.
         """
-        descriptor = os.open(self.root / ".migrate.lock", os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        with locked(self.root / ".migrate.lock", wait=True):
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
                 raise StoreError(f"dataset is schema {version}; this healing knows {SCHEMA_VERSION}")
@@ -308,9 +351,23 @@ class Store:
                 else:
                     self.db.executescript(migration)
                 self.db.execute(f"PRAGMA user_version = {step + 1}")
+            if version == SCHEMA_VERSION:
+                ensure_m3_schema(self.db)
             self.db.commit()
-        finally:
-            os.close(descriptor)
+
+    @contextlib.contextmanager
+    def immediate(self):
+        """One write transaction that takes the write lock up front (`BEGIN IMMEDIATE`), so a read
+        made inside it can't be stale by the time its write lands: concurrent runs serialize here
+        (waiting out the busy timeout) instead of both deciding on the same facts."""
+        self.db.commit()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            yield self.db
+        except BaseException:
+            self.db.rollback()
+            raise
+        self.db.commit()
 
     def _back_up(self, version: int) -> None:
         """Copy the dataset before a migration touches it: its rows are the user's only copy of what
@@ -318,7 +375,7 @@ class Store:
 
         Written beside the target and moved into place only once complete and synced, so a crash
         leaves no half file under the real name. A backup already there is kept only if it opens at
-        that version; an empty or damaged one is made again.
+        that version and passes a quick check; an empty or damaged one is made again.
         """
         target = self.root / f"dataset.sqlite.pre-v{version}"
         if _backup_is_whole(target, version):
@@ -333,17 +390,9 @@ class Store:
                 self.db.backup(copy)
             finally:
                 copy.close()
-            descriptor = os.open(temporary, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            _fsync(temporary)
             os.replace(temporary, target)
-            directory = os.open(self.root, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            _fsync(self.root)
         except (sqlite3.Error, OSError) as error:
             temporary.unlink(missing_ok=True)
             raise StoreError(f"could not back up the dataset before migrating it: {error}") from error

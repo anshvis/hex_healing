@@ -133,12 +133,14 @@ def write_set(out: Path, entries: list[dict], pcm_for, root: Path | None = None)
 
 
 def _private_dir(path: Path, root: Path) -> None:
-    """Create `path` and make it, and every folder up to `root`, owner-only."""
+    """Create `path` and make it, and every folder up to `root`, owner-only. A `path` outside `root`
+    is a bug in the caller and raises."""
+    path.relative_to(root)
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     folder = path
     while True:
         folder.chmod(0o700)
-        if folder == root or folder.parent == folder:
+        if folder == root:
             break
         folder = folder.parent
 

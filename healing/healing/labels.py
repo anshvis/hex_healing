@@ -70,7 +70,10 @@ def derive(row: sqlite3.Row, kinds: set[str], review: sqlite3.Row | None) -> tup
 
 
 def refresh(store: Store, clip_ids: list[str] | None = None) -> Counter:
-    """Recompute `label`, `weight`, `reference_text`, `edited_positions` and `review_strategy`.
+    """Recompute `label`, `weight`, `reference_text` and `review_strategy`.
+
+    `edited_positions` is the classifier's (`label_corrections` and `collect` write it); this never
+    touches it, and `split build` takes only strong clips' positions.
 
     `clip_ids` limits it to those clips (all of them when None; none when empty).
     """
@@ -90,11 +93,9 @@ def refresh(store: Store, clip_ids: list[str] | None = None) -> Counter:
     for row in rows:
         review = reviews.get(row["clip_id"])
         label, reference, strategy = derive(row, kinds.get(row["clip_id"], set()), review)
-        positions = row["edited_positions"] if label == "strong" else None
         db.execute(
-            "UPDATE clips SET label = ?, weight = ?, reference_text = ?, edited_positions = ?,"
-            " review_strategy = ? WHERE clip_id = ?",
-            (label, WEIGHTS[label], reference, positions, strategy, row["clip_id"]),
+            "UPDATE clips SET label = ?, weight = ?, reference_text = ?, review_strategy = ? WHERE clip_id = ?",
+            (label, WEIGHTS[label], reference, strategy, row["clip_id"]),
         )
         counts[label] += 1
     db.commit()

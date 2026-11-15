@@ -8,7 +8,6 @@ and bytes only, never text (G-4). Hex's own recordings are not touched (G-6).
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import os
 import shutil
@@ -21,7 +20,7 @@ import soundfile
 
 from healing.budget import PruneError, prune, real_file_under
 from healing.paths import healing_home
-from healing.store import Store, now_ms
+from healing.store import Store, lock_free, now_ms
 
 DEFAULT_MIN_FREE = 10 * 1024**3
 HOUR_MS = 3600 * 1000
@@ -204,11 +203,7 @@ def _round_running(round_dir: Path) -> bool:
     except OSError:
         return True
     try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return True
-        return False
+        return not lock_free(descriptor)
     finally:
         os.close(descriptor)
 
