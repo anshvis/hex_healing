@@ -1324,8 +1324,17 @@ impl Parakeet {
             .with_stream(&options, stream_options, cancel, drive)
     }
 
-    pub(crate) fn load_for_benchmark(model_path: &std::path::Path) -> Result<Self> {
-        Self::load_from(model_path, false, None)
+    /// Loads `model_path` for the benchmark, every run biased with `bias`
+    /// when given (refused for a model dictation would not bias).
+    pub(crate) fn load_for_benchmark(
+        model_path: &std::path::Path,
+        bias: Option<crate::transcription::gguf_session::RunBias>,
+    ) -> Result<Self> {
+        let mut parakeet = Self::load_from(model_path, false, None)?;
+        if let Some(bias) = bias {
+            parakeet.session.fix_run_bias(bias, &mut parakeet.options)?;
+        }
+        Ok(parakeet)
     }
 
     fn load_from(

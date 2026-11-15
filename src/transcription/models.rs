@@ -211,6 +211,33 @@ pub struct ModelDefinition {
     pub supports_language_detection: bool,
 }
 
+/// The catalog model a GGUF file is: its blob name is the pinned SHA-256 and
+/// its size matches, or (a plain copy) its file name and size match the pin,
+/// and its repository too when the caller knows it.
+pub(crate) fn catalog_match(
+    blob_sha256: Option<&str>,
+    repository: Option<&str>,
+    file_name: &str,
+    bytes: u64,
+) -> Option<TranscriptionModelId> {
+    MODELS
+        .iter()
+        .find(|model| {
+            let ModelRuntime::Gguf(artifact) = model.runtime else {
+                return false;
+            };
+            artifact.bytes == bytes
+                && match blob_sha256 {
+                    Some(sha256) => sha256 == artifact.sha256,
+                    None => {
+                        artifact.filename == file_name
+                            && repository.is_none_or(|repository| artifact.repository == repository)
+                    }
+                }
+        })
+        .map(|model| model.id)
+}
+
 /// How a model's transcription takes the vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VocabularyUse {
@@ -1455,6 +1482,42 @@ mod tests {
     use super::*;
 
     static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn catalog_match_is_by_name_and_size_without_a_repository() {
+        let ModelRuntime::Gguf(unified) =
+            definition(TranscriptionModelId::ParakeetUnifiedEnglish).runtime
+        else {
+            panic!("Unified English is a GGUF model");
+        };
+        let id = Some(TranscriptionModelId::ParakeetUnifiedEnglish);
+        assert_eq!(
+            catalog_match(None, None, unified.filename, unified.bytes),
+            id
+        );
+        let repository = Some(unified.repository);
+        assert_eq!(
+            catalog_match(None, repository, unified.filename, unified.bytes),
+            id
+        );
+        // A wrong size, name, or repository is no match; the blob name pins the hash.
+        assert_eq!(
+            catalog_match(None, None, unified.filename, unified.bytes - 1),
+            None
+        );
+        assert_eq!(
+            catalog_match(None, None, "renamed.gguf", unified.bytes),
+            None
+        );
+        assert_eq!(
+            catalog_match(None, Some("someone/else"), unified.filename, unified.bytes),
+            None
+        );
+        assert_eq!(
+            catalog_match(Some(unified.sha256), None, "any.gguf", unified.bytes),
+            id
+        );
+    }
 
     /// A five-byte artifact whose checksum is `sha256("hello")`.
     const FIXTURE_ARTIFACT: GgufArtifact = GgufArtifact {

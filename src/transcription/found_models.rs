@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize};
 
 use super::custom_models::Receipt;
 use super::gguf_header::TensorTypes;
-use super::models::{MODELS, ModelDefinition, ModelRuntime, TranscriptionModelId, models_dir};
+use super::models::{
+    ModelDefinition, ModelRuntime, TranscriptionModelId, catalog_match, models_dir,
+};
 
 /// One compatible GGUF found in the cache.
 #[derive(Clone, Debug, PartialEq)]
@@ -252,7 +254,7 @@ fn inspect(
         })
         .filter(|name| name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .map(|name| name.to_lowercase());
-    let catalog = catalog_match(blob_sha256.as_deref(), repository, &file_name, bytes);
+    let catalog = catalog_match(blob_sha256.as_deref(), Some(repository), &file_name, bytes);
     // The pinned digest is the proof: an exact match needs no header read.
     if let (Some(model), Some(_)) = (catalog, &blob_sha256) {
         return Some(catalog_found(
@@ -295,30 +297,6 @@ fn inspect(
         tensor_bytes: header.tensor_bytes,
         too_big: false,
     })
-}
-
-/// The catalog model a cached file is: its blob name is the pinned SHA-256
-/// and its size matches, or (a plain copy) its repository, file name, and
-/// size match the pin.
-fn catalog_match(
-    blob_sha256: Option<&str>,
-    repository: &str,
-    file_name: &str,
-    bytes: u64,
-) -> Option<TranscriptionModelId> {
-    MODELS
-        .iter()
-        .find(|model| {
-            let ModelRuntime::Gguf(artifact) = model.runtime else {
-                return false;
-            };
-            artifact.bytes == bytes
-                && match blob_sha256 {
-                    Some(sha256) => sha256 == artifact.sha256,
-                    None => artifact.repository == repository && artifact.filename == file_name,
-                }
-        })
-        .map(|model| model.id)
 }
 
 fn compression(header: &super::gguf_header::GgufHeader) -> &'static str {
@@ -565,6 +543,7 @@ pub fn describe(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use crate::transcription::gguf_header::tests::gguf;
+    use crate::transcription::models::MODELS;
 
     fn whisper() -> Vec<u8> {
         gguf(
