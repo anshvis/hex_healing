@@ -283,7 +283,7 @@ pub(crate) fn transcription_bias()
     bias_for(&transcription_entries(), boost)
 }
 
-fn bias_for(
+pub(crate) fn bias_for(
     entries: &[VocabularyEntry],
     boost: VocabularyBoost,
 ) -> Option<(Vec<String>, transcribe_cpp::ParakeetVocabularyOptions)> {

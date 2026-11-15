@@ -179,7 +179,22 @@ enum Command {
         /// Full-corpus measured passes.
         #[arg(long, default_value_t = 7)]
         runs: usize,
+        /// Bias every clip with this vocabulary (a settings.json-shaped JSON
+        /// list), as dictation does.
+        #[arg(long)]
+        vocabulary: Option<PathBuf>,
+        /// How strongly `--vocabulary` biases; Hex's own default when omitted.
+        #[arg(long, value_enum, requires = "vocabulary")]
+        boost: Option<TranscriptionBenchmarkBoost>,
     },
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, ValueEnum)]
+enum TranscriptionBenchmarkBoost {
+    Light,
+    Normal,
+    Strong,
 }
 
 #[cfg(target_os = "macos")]
@@ -582,7 +597,36 @@ fn main() -> Result<()> {
             model,
             warmups,
             runs,
+            vocabulary,
+            boost,
         } => {
+            let vocabulary = match vocabulary {
+                Some(path) => {
+                    let entries = match transcription::benchmark::read_vocabulary(&path) {
+                        Ok(entries) => entries,
+                        Err(message) => {
+                            eprintln!("error: --vocabulary {message}");
+                            std::process::exit(2);
+                        }
+                    };
+                    Some(transcription::benchmark::RunVocabulary {
+                        entries,
+                        boost: match boost {
+                            None => dictation::vocabulary::VocabularyBoost::default(),
+                            Some(TranscriptionBenchmarkBoost::Light) => {
+                                dictation::vocabulary::VocabularyBoost::Light
+                            }
+                            Some(TranscriptionBenchmarkBoost::Normal) => {
+                                dictation::vocabulary::VocabularyBoost::Normal
+                            }
+                            Some(TranscriptionBenchmarkBoost::Strong) => {
+                                dictation::vocabulary::VocabularyBoost::Strong
+                            }
+                        },
+                    })
+                }
+                None => None,
+            };
             let backend = match backend {
                 TranscriptionBenchmarkBackend::Onnx => transcription::benchmark::Backend::Onnx,
                 TranscriptionBenchmarkBackend::TranscribeCpp => {
@@ -594,7 +638,7 @@ fn main() -> Result<()> {
                     }
                 }
             };
-            transcription::benchmark::run(&manifest, warmups, runs, backend)
+            transcription::benchmark::run(&manifest, warmups, runs, backend, vocabulary)
         }
     }
 }

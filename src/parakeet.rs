@@ -1445,6 +1445,27 @@ impl Parakeet {
         &self.name
     }
 
+    /// Biases every later run with `bias` (as [`crate::dictation::vocabulary::bias_for`]
+    /// builds it), or with nothing. Held on this transcriber's own options, so no
+    /// global vocabulary or boost state changes; the benchmark's way to bias a run
+    /// exactly as dictation does.
+    pub(crate) fn set_run_bias(
+        &mut self,
+        bias: Option<(Vec<String>, transcribe_cpp::ParakeetVocabularyOptions)>,
+    ) {
+        match bias {
+            Some((terms, options)) => {
+                self.options.vocabulary = terms;
+                self.options.family =
+                    Some(transcribe_cpp::RunExtension::ParakeetVocabulary(options));
+            }
+            None => {
+                self.options.vocabulary = Vec::new();
+                self.options.family = None;
+            }
+        }
+    }
+
     pub(crate) fn matches_selection(&self, selection: &TranscriptionSelection) -> bool {
         self.selection.as_ref() == Some(selection)
     }
