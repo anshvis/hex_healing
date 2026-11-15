@@ -118,20 +118,37 @@ fn ends_sentence(field: &str, token: &Token, next: Option<&Token>) -> bool {
         || next.is_some_and(|next| field[token.end..next.start].contains('\n'))
 }
 
-/// Aligns `inserted` against `field`. U+FFFC is stripped from both.
-pub fn align(field: &str, inserted: &str) -> Alignment {
+/// Whether `want` is a run of consecutive tokens of `have`, folded.
+fn contains_run(have: &[Token], want: &[Token]) -> bool {
+    have.windows(want.len())
+        .any(|run| run.iter().zip(want).all(|(a, b)| a.fold == b.fold))
+}
+
+/// Aligns `inserted` against `field`. U+FFFC is stripped from both. A
+/// `windowed` field is only part of the field (it held more than a read
+/// takes): it can show the paste whole, or not at all, never an edit of it.
+pub fn align(field: &str, inserted: &str, windowed: bool) -> Alignment {
     let field = strip(field);
     let inserted = strip(inserted);
     let inserted = inserted.trim();
-    if inserted.is_empty() {
-        return Alignment::NotFound;
-    }
-    if field.contains(inserted) {
-        return Alignment::Unchanged;
-    }
     let (want, have) = (tokens(inserted), tokens(&field));
     if want.is_empty() || have.is_empty() {
         return Alignment::NotFound;
+    }
+    // Whole words: "Yes" is not in "Yesterday".
+    if contains_run(&have, &want) {
+        return Alignment::Unchanged;
+    }
+    if windowed {
+        return Alignment::NotFound;
+    }
+    if let [_] = &want[..] {
+        // One word in, one word out: the field is that word's replacement.
+        // Anywhere else a lone word is found only whole.
+        return match &have[..] {
+            [only] => Alignment::Edited(field[only.start..only.end].to_string()),
+            _ => Alignment::NotFound,
+        };
     }
     let width = have.len() + 1;
     let mut h = vec![0_i32; (want.len() + 1) * width];
@@ -151,10 +168,6 @@ pub fn align(field: &str, inserted: &str) -> Alignment {
         }
     }
     if best == 0 {
-        // One word in, one word out: the field is that word's replacement.
-        if let ([_], [only]) = (&want[..], &have[..]) {
-            return Alignment::Edited(field[only.start..only.end].to_string());
-        }
         return Alignment::NotFound;
     }
     let (mut i, mut j) = at;
@@ -166,7 +179,9 @@ pub fn align(field: &str, inserted: &str) -> Alignment {
         let here = h[i * width + j];
         let s = score(&want[i - 1], &have[j - 1]);
         if here == h[(i - 1) * width + j - 1] + s {
-            aligned += 1;
+            // Only a pair that scores counts: a mismatch is inside the core
+            // but is not evidence the text is there.
+            aligned += usize::from(s > 0);
             exact += usize::from(s == MATCH);
             last.get_or_insert(j - 1);
             first = Some(j - 1);
@@ -188,13 +203,16 @@ pub fn align(field: &str, inserted: &str) -> Alignment {
     let (Some(mut first), Some(mut last)) = (first, last) else {
         return Alignment::NotFound;
     };
-    // The aligned core must cover the inserted text by itself (T2.2's 50% rule):
-    // an extended edge never makes up the difference, or an unrelated field
-    // that shares one common word would be stored as an edit.
-    if aligned < needed {
+    // The aligned core must cover the inserted text by itself (T2.2's 50% rule),
+    // counting exact and near pairs only, with at least two exact words in a
+    // text of three or more: an extended edge or a mismatch never makes up
+    // the difference, or an unrelated field sharing a phrase would be stored
+    // as an edit. At most one inserted token may be left over at an end: more
+    // is a different text that shares the rest.
+    if aligned < needed || (want.len() >= 3 && exact < 2) || i > 1 || trailing > 1 {
         return Alignment::NotFound;
     }
-    if exact == want.len() && aligned == want.len() && !gaps {
+    if exact == want.len() && !gaps {
         return Alignment::Unchanged;
     }
     // One inserted token left over at an end stands for the field token the
@@ -220,7 +238,7 @@ mod tests {
     use super::*;
 
     fn edited(field: &str, inserted: &str) -> String {
-        match align(field, inserted) {
+        match align(field, inserted, false) {
             Alignment::Edited(span) => span,
             other => panic!("{field:?} vs {inserted:?}: {other:?}"),
         }
@@ -229,11 +247,11 @@ mod tests {
     #[test]
     fn exact_text_is_unchanged() {
         assert_eq!(
-            align("send it to Kip", "send it to Kip"),
+            align("send it to Kip", "send it to Kip", false),
             Alignment::Unchanged
         );
         assert_eq!(
-            align("hi. send it to Kip. bye", " send it to Kip "),
+            align("hi. send it to Kip. bye", " send it to Kip ", false),
             Alignment::Unchanged
         );
     }
@@ -277,7 +295,7 @@ mod tests {
     #[test]
     fn punctuation_and_case_alone_are_unchanged() {
         assert_eq!(
-            align("Send it to kip.", "send it to Kip"),
+            align("Send it to kip.", "send it to Kip", false),
             Alignment::Unchanged
         );
     }
@@ -285,7 +303,7 @@ mod tests {
     #[test]
     fn duplicate_pastes_stay_unchanged_while_one_copy_is_intact() {
         assert_eq!(
-            align("Kit said hi. Kip said hi", "Kip said hi"),
+            align("Kit said hi. Kip said hi", "Kip said hi", false),
             Alignment::Unchanged
         );
         assert_eq!(
@@ -297,7 +315,7 @@ mod tests {
     #[test]
     fn attachment_characters_are_stripped() {
         assert_eq!(
-            align("send\u{FFFC} it to Kip", "send it to Kip\u{FFFC}"),
+            align("send\u{FFFC} it to Kip", "send it to Kip\u{FFFC}", false),
             Alignment::Unchanged
         );
     }
@@ -305,11 +323,11 @@ mod tests {
     #[test]
     fn unrelated_field_is_not_found() {
         assert_eq!(
-            align("the weather is nice today", "send it to Kip"),
+            align("the weather is nice today", "send it to Kip", false),
             Alignment::NotFound
         );
-        assert_eq!(align("", "send it to Kip"), Alignment::NotFound);
-        assert_eq!(align("hello world", "Kip"), Alignment::NotFound);
+        assert_eq!(align("", "send it to Kip", false), Alignment::NotFound);
+        assert_eq!(align("hello world", "Kip", false), Alignment::NotFound);
     }
 
     #[test]
@@ -345,7 +363,7 @@ mod tests {
     fn a_lone_word_replaced_by_a_lone_word() {
         assert_eq!(edited("Hex", "Hanks"), "Hex");
         assert_eq!(edited(" Hex.", "Hanks"), "Hex.");
-        assert_eq!(align("Hex and Rune", "Hanks"), Alignment::NotFound);
+        assert_eq!(align("Hex and Rune", "Hanks", false), Alignment::NotFound);
     }
 
     #[test]
@@ -417,6 +435,14 @@ mod tests {
     #[test]
     fn unrelated_fields_sharing_a_common_word_are_not_found() {
         for (field, inserted) in [
+            ("he went to a store yesterday", "go to the store now"),
+            ("to be honest the plan", "to be honest I agree"),
+            ("send me to", "send it to Kip now please"),
+            ("go to the store and then to the bank", "send it to the Kip"),
+            (
+                "we are going to the park today",
+                "please tell Kip we are late",
+            ),
             ("go to bed", "send to Kip"),
             ("please talk to me", "send it to Kip"),
             ("I like Kip", "send it to Kip"),
@@ -427,7 +453,7 @@ mod tests {
             ("hi Hex", "hi Kip"),
         ] {
             assert_eq!(
-                align(field, inserted),
+                align(field, inserted, false),
                 Alignment::NotFound,
                 "{field:?} vs {inserted:?}"
             );
@@ -435,11 +461,45 @@ mod tests {
     }
 
     #[test]
-    fn the_edge_extends_by_one_token_at_most() {
-        // Two replaced words at the end: the core stays honest, one is kept.
+    fn a_short_insert_is_found_whole_or_not_at_all() {
+        // Whole words only, never inside a longer one.
+        assert_eq!(align("Yesterday I went", "Yes", false), Alignment::NotFound);
+        assert_eq!(align("so yes, ok", "Yes", false), Alignment::Unchanged);
+        // A near word anywhere is not an edit; only a lone word is.
         assert_eq!(
-            edited("send it to Hex Rune", "send it to Hanks Kip"),
-            "send it to Hex"
+            align("thank you for the help", "Thanks", false),
+            Alignment::NotFound
+        );
+        assert_eq!(
+            align("thank", "Thanks", false),
+            Alignment::Edited("thank".into())
+        );
+    }
+
+    #[test]
+    fn a_windowed_read_shows_the_paste_whole_or_not_at_all() {
+        let inserted = "send it to Kip";
+        assert_eq!(
+            align("a lot of text. send it to Kip", inserted, true),
+            Alignment::Unchanged
+        );
+        // The window cut the paste: that is not an edit.
+        assert_eq!(
+            align("lot of text. send it to", inserted, true),
+            Alignment::NotFound
+        );
+        assert_eq!(align("send it to Kit", inserted, true), Alignment::NotFound);
+        assert_eq!(
+            align("send it to Kit", inserted, false),
+            Alignment::Edited("send it to Kit".into())
+        );
+    }
+
+    #[test]
+    fn more_than_one_unexplained_token_at_an_end_is_a_different_text() {
+        assert_eq!(
+            align("send it to Hex please", "send it to Hanks Smith", false),
+            Alignment::NotFound
         );
     }
 }
