@@ -12,6 +12,7 @@ use serde_json::json;
 use crate::dictation::resample_for_parakeet;
 use crate::dictation::vocabulary::{self, VocabularyBoost, VocabularyEntry, bias_for};
 use crate::parakeet::Parakeet;
+use crate::transcription::gguf_session::RunBias;
 use crate::transcription::models::{TranscriptionModelId, VocabularyUse, catalog_match};
 use crate::transcription::pad_gguf_samples;
 
@@ -19,69 +20,91 @@ pub enum Backend {
     Onnx,
     TranscribeCpp {
         model: PathBuf,
+        /// The catalog model the file is (name and size), resolved once, so
+        /// clips are prepared as dictation prepares them for it. `None` for a
+        /// file that is not a catalog artifact.
+        model_id: Option<TranscriptionModelId>,
         /// `--vocabulary`: every clip is biased with it, as dictation biases.
         vocabulary: Option<RunVocabulary>,
     },
 }
 
-/// The backend a `benchmark-transcription` command line names, or why it
-/// cannot run. `model` is the transcribe-cpp file, `None` for ONNX.
-/// `--vocabulary` is read here, and only a Parakeet model can take it:
-/// dictation hands Whisper and Qwen3-ASR the list as a prompt, which a bias
-/// would not measure.
-pub fn backend(
-    model: Option<PathBuf>,
-    vocabulary: Option<&Path>,
-    boost: Option<VocabularyBoost>,
-) -> std::result::Result<Backend, String> {
-    let vocabulary = vocabulary
-        .map(|path| {
-            RunVocabulary::read(path, boost.unwrap_or_default())
-                .map_err(|error| format!("--vocabulary {error}"))
-        })
-        .transpose()?;
-    let Some(model) = model else {
-        if vocabulary.is_some() {
-            return Err("--vocabulary needs the transcribe-cpp backend".into());
-        }
-        return Ok(Backend::Onnx);
-    };
-    if vocabulary.is_some()
-        && let Some(id) = catalog_model(&model)
-    {
-        let definition = crate::transcription::models::definition(id);
-        if definition.vocabulary_use() != VocabularyUse::Bias {
-            return Err(format!(
-                "--vocabulary biases only Parakeet models, and {} takes its vocabulary another way",
-                definition.name
-            ));
-        }
-    }
-    Ok(Backend::TranscribeCpp { model, vocabulary })
-}
-
-/// The catalog model a file is (name and size), so clips are prepared as
-/// dictation prepares them for it. `None` for a file that is not a catalog
-/// artifact.
-fn catalog_model(path: &Path) -> Option<TranscriptionModelId> {
-    let name = path.file_name()?.to_str()?;
-    let bytes = fs::metadata(path).ok()?.len();
-    catalog_match(None, None, name, bytes)
-}
-
 impl Backend {
-    fn model_id(&self) -> Option<TranscriptionModelId> {
-        match self {
-            Self::TranscribeCpp { model, .. } => catalog_model(model),
-            Self::Onnx => None,
+    /// The transcribe-cpp backend for `model`, reading `--vocabulary` when
+    /// given. Only a Parakeet model takes the bias: dictation hands Whisper and
+    /// Qwen3-ASR the list as a prompt, which a bias would not measure.
+    pub fn transcribe_cpp(
+        model: PathBuf,
+        vocabulary: Option<&Path>,
+        boost: Option<VocabularyBoost>,
+    ) -> std::result::Result<Self, String> {
+        let vocabulary = vocabulary
+            .map(|path| {
+                RunVocabulary::read(path, boost.unwrap_or_default())
+                    .map_err(|error| format!("--vocabulary {error}"))
+            })
+            .transpose()?;
+        let model_id = model
+            .file_name()
+            .and_then(|name| name.to_str())
+            .zip(fs::metadata(&model).ok())
+            .and_then(|(name, meta)| catalog_match(None, None, name, meta.len()));
+        if model_id.is_none() {
+            eprintln!(
+                "note: the model file is not a catalog artifact (by name and size), so clips get no model trailing silence"
+            );
         }
+        if vocabulary.is_some() {
+            require_bias_model(model_id)?;
+        }
+        Ok(Self::TranscribeCpp {
+            model,
+            model_id,
+            vocabulary,
+        })
     }
+
+    /// The model the clips are prepared for, and what the `model` record adds
+    /// to say how they were prepared and biased.
+    fn preparation(&self) -> (Option<TranscriptionModelId>, serde_json::Value) {
+        let model_id = match self {
+            Self::TranscribeCpp { model_id, .. } => *model_id,
+            Self::Onnx => None,
+        };
+        let mut record = json!({
+            "trailing_silence_samples": crate::transcription::trailing_silence_samples(model_id),
+        });
+        if let Self::TranscribeCpp {
+            vocabulary: Some(vocabulary),
+            ..
+        } = self
+        {
+            // Only with the flag.
+            record["bias_vocabulary"] = vocabulary.record();
+        }
+        (model_id, record)
+    }
+}
+
+/// An early failure for the catalog models that never take a bias, before
+/// anything loads. The load checks every file again (`fixed_run_bias`), which
+/// also covers one this cannot name.
+fn require_bias_model(id: Option<TranscriptionModelId>) -> std::result::Result<(), String> {
+    let Some(id) = id else { return Ok(()) };
+    let definition = crate::transcription::models::definition(id);
+    if definition.vocabulary_use() == VocabularyUse::Bias {
+        return Ok(());
+    }
+    Err(format!(
+        "--vocabulary biases only Parakeet models, and {} takes its vocabulary another way",
+        definition.name
+    ))
 }
 
 /// The terms and boost every run is biased with, as dictation builds them
 /// (same cleaning, limits, and 64-term cut).
 pub struct RunVocabulary {
-    bias: (Vec<String>, transcribe_cpp::ParakeetVocabularyOptions),
+    bias: RunBias,
     /// Entries read, before the engine's term cut.
     input_terms: usize,
     boost: VocabularyBoost,
@@ -134,9 +157,12 @@ impl LoadedBackend {
     fn load(backend: Backend) -> Result<Self> {
         match backend {
             Backend::Onnx => load_onnx(),
-            Backend::TranscribeCpp { model, vocabulary } => Ok(Self::TranscribeCpp(Box::new(
-                Parakeet::load_for_benchmark(&model, vocabulary.map(|vocabulary| vocabulary.bias))?,
-            ))),
+            Backend::TranscribeCpp {
+                model, vocabulary, ..
+            } => Ok(Self::TranscribeCpp(Box::new(Parakeet::load_for_benchmark(
+                &model,
+                vocabulary.map(|vocabulary| vocabulary.bias),
+            )?))),
         }
     }
 
@@ -310,17 +336,7 @@ pub fn run(manifest_path: &Path, warmups: usize, runs: usize, backend: Backend) 
         .wrap_err_with(|| format!("could not parse {}", manifest_path.display()))?;
     validate_manifest(&manifest)?;
     let vocabulary = manifest.vocabulary;
-    let model_id = backend.model_id();
-    let bias_record = match &backend {
-        Backend::TranscribeCpp { vocabulary, .. } => vocabulary.as_ref().map(RunVocabulary::record),
-        Backend::Onnx => None,
-    };
-    if matches!(backend, Backend::TranscribeCpp { .. }) && model_id.is_none() {
-        eprintln!(
-            "note: the model file is not a catalog artifact (by name and size), so clips get no model trailing silence"
-        );
-    }
-    let trailing_silence = crate::transcription::trailing_silence_samples(model_id);
+    let (model_id, preparation) = backend.preparation();
     let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let clips = manifest
         .clips
@@ -344,12 +360,11 @@ pub fn run(manifest_path: &Path, warmups: usize, runs: usize, backend: Backend) 
         "warmups": warmups,
         "runs": runs,
         "scoring_vocabulary": vocabulary,
-        "trailing_silence_samples": trailing_silence,
     });
-    if let Some(bias_record) = bias_record {
-        // Only with the flag.
-        model_record["bias_vocabulary"] = bias_record;
-    }
+    model_record
+        .as_object_mut()
+        .expect("a json! object")
+        .extend(preparation.as_object().expect("a json! object").clone());
     write_json(&mut output, model_record)?;
 
     let mut first_warmup_ms = None;
@@ -835,35 +850,60 @@ mod tests {
     }
 
     #[test]
-    fn vocabulary_needs_the_transcribe_cpp_backend_and_a_parakeet_model() {
+    fn vocabulary_is_refused_for_models_that_take_it_as_a_prompt() {
+        use crate::transcription::models::MODELS;
+        assert_eq!(require_bias_model(None), Ok(()));
+        for model in MODELS {
+            let result = require_bias_model(Some(model.id));
+            if model.vocabulary_use() == VocabularyUse::Bias {
+                assert_eq!(result, Ok(()), "{}", model.name);
+            } else {
+                assert!(
+                    result.unwrap_err().contains("only Parakeet"),
+                    "{}",
+                    model.name
+                );
+            }
+        }
+        assert!(
+            require_bias_model(Some(TranscriptionModelId::WhisperLargeV3Turbo)).is_err(),
+            "Whisper reads the vocabulary as a prompt"
+        );
+        assert!(require_bias_model(Some(TranscriptionModelId::ParakeetUnifiedEnglish)).is_ok());
+    }
+
+    #[test]
+    fn the_transcribe_cpp_backend_reads_the_vocabulary_once_and_names_a_bad_file() {
         let directory =
             std::env::temp_dir().join(format!("hex-vocab-backend-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
         let vocabulary = directory.join("vocabulary.json");
         fs::write(&vocabulary, r#"["Hex"]"#).unwrap();
 
-        let error = backend(None, Some(&vocabulary), None).err().unwrap();
-        assert!(error.contains("transcribe-cpp"), "{error}");
-        assert!(matches!(backend(None, None, None), Ok(Backend::Onnx)));
-
         // A file that is no catalog artifact is checked once it loads.
-        let unknown = backend(
-            Some(PathBuf::from("renamed.gguf")),
+        let unknown = Backend::transcribe_cpp(
+            PathBuf::from("renamed.gguf"),
             Some(&vocabulary),
             Some(VocabularyBoost::Light),
-        );
-        assert!(matches!(
-            unknown,
-            Ok(Backend::TranscribeCpp {
-                vocabulary: Some(_),
-                ..
-            })
-        ));
+        )
+        .unwrap();
+        let (model_id, record) = unknown.preparation();
+        assert_eq!(model_id, None);
+        assert_eq!(record["trailing_silence_samples"], 0);
+        assert_eq!(record["bias_vocabulary"]["boost"], "light");
 
-        let error = backend(None, Some(&directory.join("missing.json")), None)
-            .err()
-            .unwrap();
+        let error = Backend::transcribe_cpp(
+            PathBuf::from("renamed.gguf"),
+            Some(&directory.join("missing.json")),
+            None,
+        )
+        .err()
+        .unwrap();
         assert!(error.starts_with("--vocabulary could not read"), "{error}");
+
+        let (_, record) = Backend::Onnx.preparation();
+        assert_eq!(record["trailing_silence_samples"], 0);
+        assert!(record.get("bias_vocabulary").is_none());
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -592,18 +592,27 @@ fn main() -> Result<()> {
             vocabulary,
             boost,
         } => {
-            let model = match backend {
-                TranscriptionBenchmarkBackend::Onnx => None,
-                TranscriptionBenchmarkBackend::TranscribeCpp => Some(match model {
-                    Some(model) => model,
-                    None => parakeet::default_model_path()?,
-                }),
-            };
-            let backend = transcription::benchmark::backend(model, vocabulary.as_deref(), boost)
-                .unwrap_or_else(|message| {
-                    eprintln!("error: {message}");
-                    std::process::exit(2);
-                });
+            let backend = match backend {
+                TranscriptionBenchmarkBackend::Onnx if vocabulary.is_some() => {
+                    Err("--vocabulary needs the transcribe-cpp backend".to_string())
+                }
+                TranscriptionBenchmarkBackend::Onnx => Ok(transcription::benchmark::Backend::Onnx),
+                TranscriptionBenchmarkBackend::TranscribeCpp => {
+                    let model = match model {
+                        Some(model) => model,
+                        None => parakeet::default_model_path()?,
+                    };
+                    transcription::benchmark::Backend::transcribe_cpp(
+                        model,
+                        vocabulary.as_deref(),
+                        boost,
+                    )
+                }
+            }
+            .unwrap_or_else(|message| {
+                eprintln!("error: {message}");
+                std::process::exit(2);
+            });
             transcription::benchmark::run(&manifest, warmups, runs, backend)
         }
     }
