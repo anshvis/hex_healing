@@ -66,79 +66,86 @@ starts when the paste completes, not after History's write. Outcome IDs:
 `return`, `timeout`. The log line carries those IDs, a character count and
 milliseconds only.
 
-**Invariant: fail closed.** Hex stores only text inside the paste's own region
-in the current field (what now occupies the place the pasted text occupied,
-plus a token that touches its edge, for a replaced edge word) and never text
-from before or after it. When unsure the answer is "not found" or "unchanged".
-No edit is stored before the paste has been seen whole in the field.
-`property_tests.rs` checks it over 4,000 generated cases: the paste in a field
-between corpus sentences (some sharing its words, some empty, some with
-attachments, emoji or CJK), put through edits of one word, two, a trailing two
-words, replacement and deletion of the paste, text typed before and after it, a
-second dictation, a Return and a newline then a fix, and a cleared field. The
-stored span never leaves the region (plus one token), a deleted paste stores
-nothing, and the one-word, two-word and trailing replacements are stored
-exactly. Before the anchor rework the same run stored text outside the region
-in 448 cases and from a deleted paste in 489.
+**Invariant: fail closed.** Hex stores an edit only from a region it is
+following, only text inside that region (what now occupies the place the pasted
+text occupied, plus a token that touches its edge), and never text from before
+or after it. When unsure the answer is "not found" or "unchanged". A region
+once lost stays lost, and no edit is stored before the paste has been seen
+whole. There is no whole-field edit path: the old strict search for the edit
+anywhere in the field is gone, because it trades precision for recall (about 1%
+of unrelated chat sentences were stored as edits).
 
-Where to look (`locate.rs`). Before the paste, Hex reads the caret
-(`AXSelectedTextRange`'s location, in UTF-16 units, which is where a paste
-starts); with the paste's length that is the anchor.
+How the region is found (`locate.rs`, `Tracker`):
 
-- Anchored. The anchor is trusted once a read shows the paste whole at that
-  offset (until then a read only reports the paste unchanged or not found,
-  never an edit). A paste found in the field but not at the offset is waited on
-  for half a second (the read may have come before the app applied the paste),
-  then the anchor is given up and the strict rules below apply. Once landed,
-  the paste's region is followed through every read by diffing the field
-  against the read before: text inserted or removed before the region moves it,
-  a change inside stretches or shrinks it, one after it leaves it (so text typed
-  after an edit is never part of it), an insertion at its start counts as
-  before and at its end as after, and a change that crosses an edge, or that
-  could as well have been made on either side of one (text typed before the
-  paste that begins with the paste's first letters), loses it. Only the field's
-  text in the region is judged. Intact in the region is unchanged, whatever
-  else the field says, and the same text elsewhere does not count. For a paste
-  of one or two words, position is evidence: whatever now sits in the region
-  is what it became ("Hanks" to "Hex", "Yes" to "No", two words for two, a
-  trailing word for three). A longer paste must still resemble itself: half its
-  words (exact or near) in order, two of them exact. An empty region is the paste
-  deleted, and the paste wholly replaced by unrelated words, both
-  `span_not_found`. Two changes in one read (typed before and edited inside)
-  lose the region; one change per read, which is what polling at the tick
-  gives, is followed. Offsets are UTF-16 units, attachment placeholders
-  (U+FFFC) keep their place in the text, and a field read as a window (over
-  8,192 characters) cannot be followed.
-- Strict, with no anchor (the app reports no selection range) or one that did
-  not hold. A token-level local alignment of the pasted text against the whole
-  field: a one-letter-off word of three or more letters is a near match, so
-  "Kip" to "Kit" aligns in a longer text. The aligned core must cover half the
-  pasted tokens (all of them below three) on its own, counting only exact and
-  near pairs, with at least two exact words in a text of three or more, and at
-  most one pasted token may be left over at either end; so an unrelated field
-  that shares a word or a phrase ("go to bed" against "send to Kip", "to be
-  honest the plan" against "to be honest I agree") is not found. A replaced
-  first or last word that is not near scores below zero and sits outside the
-  core, so the span extends one field token over it, never across sentence
-  punctuation or a line break. Whole words only: "Yes" is not found in
-  "Yesterday", and a one-word paste is an edit only when the field is that one
-  word. It cannot tell a text pasted twice apart while one copy is intact, and
-  an app that clears the field a tick after Return with the next message typed
-  in the same tick cannot be told from an edit.
+- With a caret. Before the paste, Hex reads the caret (`AXSelectedTextRange`'s
+  location, in UTF-16 units, which is where a paste starts). The first read
+  that shows the paste's words as a run starting within 8 units of it lands
+  there. The region is then snapped to the field's own tokens (first matched
+  word's start to the last one's end), so an app that stores fewer units than
+  were inserted (blank lines collapsed, a dropped edge space), or an anchor a
+  unit or two off, cannot leave it hanging past the paste. The paste found only
+  elsewhere (another copy; the app has not applied it yet) is not a landing; it
+  waits.
+- With no caret (the app reports no selection range). Before the paste, Hex
+  reads the field's text instead. The first read where the paste's words occur
+  exactly once, having occurred nowhere before it, adopts that occurrence.
+  Occurring before it, twice, or the field before it unread: the watch can only
+  report unchanged or lost.
+
+How the region is followed: every read is diffed against the last (common
+prefix and suffix). Text inserted or removed before the region moves it, a
+change inside stretches or shrinks it, one after it leaves it (so text typed
+after an edit is never part of it), an insertion at its start counts as before
+and at its end as after. A change that crosses an edge loses the region, and so
+does one that could as well have been made on either side of an edge (text
+typed before the paste that begins with the paste's first letters) or that ran
+on to an edge over units that match what follows by chance. A change that
+shortens the region at an edge (backspace, or typing over a selection) leaves
+that edge open: typing right at it counts as inside, up to the words deleted
+plus one; a longer change at an edge in one read is lost. So a trailing word
+replaced by a word and one more is stored, key by key or in one read, and a
+longer replacement is cut at that bound (key by key) or lost (one read), which
+is also what keeps "Kip" to "Kit" plus appended unrelated text from being
+stored. Two changes in one read (typed before, edited inside) lose the region,
+except that whitespace deleted just outside it as "word " or " word" does not.
+A blank read retires the region (an undo to empty, then other text pasted back
+in, is never an edit), and so does a window (a field over 8,192 characters is
+read around the caret and cannot be followed). Offsets are UTF-16 units and
+attachment placeholders (U+FFFC) keep their place in the text.
+
+What the region says: intact (the paste's words as a run in it) is unchanged,
+whatever else the field says; the same text elsewhere does not count. For a
+paste of one or two words, position is evidence: whatever now sits in the
+region is what it became ("Hanks" to "Hex", "Yes" to "No"), unless it grew
+past four extra words. A longer paste must still resemble itself: half its
+words (exact or near, one letter off in a word of three or more) in order, two
+of them exact. An empty region is the paste deleted, and a paste wholly
+replaced by unrelated words, both `span_not_found`.
+
+`property_tests.rs` checks the invariant over 4,000 generated cases, each run
+with the caret known, with it a few units off, with none, with an app that
+collapses blank lines, and with a field too large to read whole (11,976 runs).
+The paste sits between corpus sentences (some sharing its words, some empty,
+some with attachments, emoji or CJK), and goes through single-word, two-word
+and trailing edits, replacement and deletion of the paste, typing before and
+after it (all at once and a key at a time), backspace and retype at both edges,
+typing over a selection, an edit coalesced with typing before or after, a wipe
+and refill, a second paste of the same words or another, a Return and a newline
+then a fix, and a cleared field. The stored span never leaves the region (plus
+one token), a deleted paste stores nothing, and the one-word, two-word and
+trailing replacements are stored exactly. Before this rework, the same cases
+stored text outside the region 402 times and from a deleted paste 30 times, and
+missed 150 of 390 known-good edits; now 0, 0 and 0.
 
 Known limits, stated plainly: a send button without a Return loses the
-observation (the field going blank looks like delete-all); text without
-whitespace (CJK) is one token, so it is effectively unsupported; a window over
-8,192 characters is never followed; two changes in one read lose the anchored
-region; the strict fallback is the only protection for apps that report no
-caret, with the measured rate below.
-
-Precision, measured on a corpus of 36 unrelated chat sentences, every ordered
-pair (1,260): the strict rules store 14 as edits (1.1%); anchored, none, and an
-edit at the anchor never carries the neighbouring text (`locate::tests`,
-`the_unrelated_pair_corpus`). Text without whitespace (CJK) is one token, so
-it is effectively unsupported. A paste over 4,000,000 alignment cells (inserted
-tokens times field tokens) is not aligned.
+observation (the field going blank looks like delete-all); a keystroke that
+shares a tick with the Return that sends it is never read, so the edit kept is
+the word as far as it was read ("Ki" for "Kit"); text without whitespace (CJK)
+is one token, so it is effectively unsupported; a window over 8,192 characters
+is never followed; two changes in one read lose the region; an app whose
+selection offsets are not UTF-16 units gets unchanged or lost only (the paste is
+never adopted from elsewhere); an app that clears the field a tick after Return
+with the next message typed in the same tick cannot be told from an edit.
 
 Storage (`history/corrections.rs`): the watcher thread calls
 `History::observe_correction` on the History carried by the paste target, which
