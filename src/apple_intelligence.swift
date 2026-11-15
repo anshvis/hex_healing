@@ -228,7 +228,14 @@ public func hexAppleIntelligenceAvailability() -> Int32 {
 public func hexAppleIntelligenceContextSize() -> Int {
     #if canImport(FoundationModels)
     guard #available(macOS 26.0, *) else { return 0 }
+    #if compiler(>=6.3)
     return SystemLanguageModel.default.contextSize
+    #else
+    // `contextSize` arrived in the macOS 26.4 SDK (Xcode 26.4, Swift 6.3), and Xcode 26.4
+    // needs macOS Tahoe 26.2, so a Mac on Sequoia builds with Xcode 26.3 at most. Apple
+    // back-deploys the property as 4096 tokens before 26.4; report the same.
+    return 4096
+    #endif
     #else
     return 0
     #endif
