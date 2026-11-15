@@ -42,9 +42,15 @@ Put the CLI on your PATH once: `ln -s /Applications/Hex.app/Contents/MacOS/hex ~
   which `healing` doesn't read unless `HEX_BIN` points at it.
 - A plain `scripts/install-app.sh` needs `HEX_TEAM_ID` and a Developer ID identity, and fails without them.
 
-The signature is ad-hoc, so macOS may ask for Microphone and Accessibility again after a rebuild.
-If the shortcut stops working while Hex looks allowed, remove Hex under System Settings › Privacy &
-Security › Accessibility and add `/Applications/Hex.app` back. Turn on Settings › Labs › Keep
+The signature is ad-hoc, so macOS ties the Accessibility grant to that exact binary and every rebuild
+invalidates it, even though System Settings still shows Hex as allowed. If Hex says "Waiting for setup"
+or the shortcut stops working after a rebuild, reset the grant and relaunch, then allow Hex again if
+asked:
+
+```sh
+tccutil reset Accessibility anomaly.hex && hex quit; open /Applications/Hex.app
+```
+ Turn on Settings › Labs › Keep
 recordings, or `healing collect` has no audio to copy.
 
 ## Commands
