@@ -783,7 +783,9 @@ def test_a_text_change_after_a_snapshot_cannot_hide_what_the_model_saw(store):
     build_at(store)
     assert a in splits.snapshot_train(store, cutoff_ms=CUTOFF)
     # the clip's classifier output changes later; the snapshot still stands for what it was given
-    store.db.execute("UPDATE clips SET acoustic_reference = 'Something else entirely that the classifier now says.' WHERE clip_id = ?", (a,))
+    # its text moves on entirely (a Replace in Hex, and a different classification)
+    store.db.execute("UPDATE clips SET acoustic_reference = 'Something else entirely that the classifier now says.',"
+                     " raw_text = 'Something else entirely that the classifier now says.' WHERE clip_id = ?", (a,))
     store.db.commit()
     labels.refresh(store, [a])
     twin = add_clip(store, 981, raw="Hang the picture frame above the old fireplace kit", ts=CUTOFF + 5 * DAY)
@@ -937,3 +939,38 @@ def test_the_cli_fails_on_a_snapshot_overlap_alone(store, capsys):
     assert main(["split", "verify"]) == 1
     out = capsys.readouterr().out
     assert "snapshot overlap:" in out and "violation:" not in out and "1 snapshot overlap" in out
+
+
+def test_a_snapshot_is_dated_by_the_clock_it_is_given(store):
+    build_world(store)
+    old_trainable(store, 995, "oil the squeaking hinge on the garage side door", days=9)
+    when = CUTOFF + 40 * DAY
+    assert splits.snapshot_train(store, cutoff_ms=CUTOFF, now=when)
+    created = store.db.execute("SELECT created_at_ms, split_id FROM splits WHERE kind = 'train'").fetchone()
+    assert created["created_at_ms"] == when
+    stamp = __import__("datetime").datetime.fromtimestamp(when / 1000, __import__("datetime").timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    assert created["split_id"] == f"train-current-{stamp}"
+
+
+def test_a_golden_freeze_takes_the_write_lock_before_it_writes_anything(store, home, small_golden, monkeypatch):
+    build_world(store)
+    monkeypatch.setattr(golden, "freeze_if_full", lambda store: False)  # fill it without freezing
+    ids = [r["clip_id"] for r in store.db.execute(
+        "SELECT clip_id FROM clips c WHERE label = 'verified' AND review_strategy = 'random' ORDER BY clip_id")]
+    added = []
+    for clip in ids:
+        if len(added) == 5:
+            break
+        if golden.add(store, clip):
+            added.append(clip)
+    assert len(added) == 5 and not splits.golden_row(store.db)["frozen"]
+    other = Store()
+    store.db.execute("PRAGMA busy_timeout = 50")
+    try:
+        with other.immediate():
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                golden.freeze(store)
+        assert not (home / "sets" / "golden-v1").exists()  # nothing was written before the lock
+    finally:
+        other.close()
+    assert golden.freeze(store) is True and golden.freeze(store) is False  # and a second freeze is a no-op
