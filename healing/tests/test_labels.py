@@ -215,7 +215,8 @@ def test_label_corrections_stores_positions_and_never_the_label(store):
     store.db.execute("UPDATE clips SET edited_text = 'Send it to Kit.' WHERE clip_id = ?", (cid,))
     corrections.label_corrections(store)
     r = row(store, cid)
-    assert r["label"] == "unlabelled" and r["reference_text"] == "send it to kit" and r["edited_positions"] == "[[3, 4]]"
+    assert r["label"] == "unlabelled" and r["acoustic_reference"] == "send it to kit" and r["edited_positions"] == "[[3, 4]]"
+    assert r["reference_text"] is None  # derived by refresh, not written by the classifier
     labels.refresh(store)
     assert label_of(store, cid) == ("strong", 1.0)
 
@@ -266,20 +267,62 @@ def test_datasets_at_each_earlier_version_migrate_to_current(tmp_path, monkeypat
     store.close()
 
 
-def test_label_all_backfills_positions_for_clips_classified_before_they_existed(store):
+def _snapshot(store):
+    return [tuple(r) for r in store.db.execute(
+        "SELECT clip_id, label, weight, reference_text, acoustic_reference, edited_positions, classified_at_ms,"
+        " review_strategy FROM clips ORDER BY clip_id")]
+
+
+def test_label_all_twice_changes_nothing(store):
     from healing import corrections
 
-    cid = add_clip(store, 1, outcome="edited")
-    store.db.execute("UPDATE clips SET edited_text = 'Send it to Kit.' WHERE clip_id = ?", (cid,))
-    corrections.label_corrections(store)
-    labels.refresh(store)
-    # a dataset migrated from v5/v6: classified (reference set), but no edited_positions column value
-    store.db.execute("UPDATE clips SET edited_positions = NULL WHERE clip_id = ?", (cid,))
+    strong = add_clip(store, 1, outcome="edited")
+    store.db.execute("UPDATE clips SET edited_text = 'Send it to Kit.' WHERE clip_id = ?", (strong,))
+    verified_edited = add_clip(store, 2, raw="send it to kip please", final="Send it to kip please.", outcome="edited")
+    store.db.execute("UPDATE clips SET edited_text = 'Send it to Kit please.' WHERE clip_id = ?", (verified_edited,))
+    rewrite_only = add_clip(store, 3, raw="send it to kip", final="Send it to kip.", outcome="edited")
+    store.db.execute("UPDATE clips SET edited_text = 'Send it to kip, and then go home.' WHERE clip_id = ?", (rewrite_only,))
+    store.db.commit()
     labels.label_all(store)
-    assert row(store, cid)["edited_positions"] == "[[3, 4]]" and label_of(store, cid) == ("strong", 1.0)
-    before = row(store, cid)["classified_at_ms"]
-    labels.label_all(store)  # settled: nothing is classified again
-    assert row(store, cid)["classified_at_ms"] == before
+    review(store, verified_edited, "fix", "send it to kit please")
+    labels.label_all(store)
+    assert label_of(store, strong)[0] == "strong" and label_of(store, verified_edited)[0] == "verified"
+    assert label_of(store, rewrite_only)[0] in ("weak", "unlabelled")
+    first = _snapshot(store)
+    labels.label_all(store)
+    assert _snapshot(store) == first
+    assert corrections.label_corrections(store)["clips"] == 0  # nothing is classified again
+
+
+def test_the_migration_clears_classifications_that_lack_the_classifiers_own_output(tmp_path, monkeypatch):
+    """A v6 dataset (classified before `acoustic_reference` and positions) re-classifies once, and
+    its strong clip reaches the edited set."""
+    monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))
+    root = tmp_path / "home" / "dataset"
+    (root / "audio").mkdir(parents=True)
+    db = sqlite3.connect(root / "dataset.sqlite")
+    for step in range(6):
+        migration = MIGRATIONS[step]
+        migration(db) if callable(migration) else db.executescript(migration)
+    db.execute("PRAGMA user_version = 6")
+    db.execute(
+        "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text, collected_at_ms,"
+        " correction_outcome, edited_text, reference_text, classified_at_ms) VALUES"
+        " ('c1', 1, 1, 1, 'dictation', 'send it to kip', 'Send it to kip.', 1, 'edited', 'Send it to Kit.',"
+        " 'send it to kit', 5)"
+    )
+    db.execute("INSERT INTO edits (clip_id, idx, raw_from, final_from, to_text, kind) VALUES ('c1', 0, 'kip', 'kip', 'Kit', 'acoustic')")
+    db.commit()
+    db.close()
+    store = Store()
+    r = row(store, "c1")
+    assert r["classified_at_ms"] is None and r["acoustic_reference"] is None
+    labels.label_all(store)
+    r = row(store, "c1")
+    assert (r["label"], r["acoustic_reference"], r["edited_positions"]) == ("strong", "send it to kit", "[[3, 4]]")
+    settled = _snapshot(store)
+    labels.label_all(store)
+    assert _snapshot(store) == settled
 
 
 def test_an_existing_dataset_is_copied_before_it_migrates(tmp_path, monkeypatch):

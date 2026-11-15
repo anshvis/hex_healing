@@ -1,16 +1,16 @@
 """`healing label all`: every clip's label, weight and reference, from corrections and reviews.
 
 | label        | when                                                    | weight |
-| strong       | at least one acoustic edit (reference is `reference_text`) | 1.0 |
+| strong       | at least one acoustic edit (reference is `acoustic_reference`) | 1.0 |
 | verified     | you confirmed the reference in a review                 | 1.0    |
 | weak         | observed unchanged (or edited without an acoustic fix)  | 0.2    |
 | unlabelled   | never observed, unmapped edits, an OpenCode rewrite, or rejected | 0 |
 
 Labels derive from the `edits` table (T2.4's classifier; no second one) and the `reviews` table,
 so `label all` is a pure function of its evidence and running it twice changes nothing. This is
-the one writer of `label`: `corrections.label_corrections` stores edits, `reference_text` and
+the one writer of `label`: `corrections.label_corrections` stores edits, `acoustic_reference` and
 `edited_positions` only, and `collect` leaves labels to `refresh` too. A clip's reference follows its
-label: strong keeps `reference_text`, verified takes your review, weak is what Hex heard, and
+label: strong takes the classifier's `acoustic_reference`, verified takes your review, weak is what Hex heard, and
 unlabelled has none.
 
 Weak references are the model's own output, and so are a strong clip's untouched words, so they
@@ -57,12 +57,12 @@ def derive(row: sqlite3.Row, kinds: set[str], review: sqlite3.Row | None) -> tup
     if outcome == "unchanged" and not row["rewritten"]:
         return "weak", row["raw_text"], None
     if outcome == "edited" and not row["rewritten"]:
+        if row["classified_at_ms"] is None:
+            return "unlabelled", None, None  # not classified yet (or its classification was thrown away)
         if "unmapped" in kinds:
             return "unlabelled", None, None  # an edit we can't place: the reference may be wrong
         if "acoustic" in kinds:
-            return "strong", row["reference_text"], None
-        if row["classified_at_ms"] is None:
-            return "unlabelled", None, None  # not classified yet
+            return "strong", row["acoustic_reference"], None
         # Only rewrites: you changed your mind, but the speech was heard right.
         return "weak", row["raw_text"], None
     # Never observed, lost, or an OpenCode rewrite produced the pasted text.
@@ -70,18 +70,24 @@ def derive(row: sqlite3.Row, kinds: set[str], review: sqlite3.Row | None) -> tup
 
 
 def refresh(store: Store, clip_ids: list[str] | None = None) -> Counter:
-    """Recompute `label`, `weight`, `reference_text`, `edited_positions` and `review_strategy`."""
+    """Recompute `label`, `weight`, `reference_text`, `edited_positions` and `review_strategy`.
+
+    `clip_ids` limits it to those clips (all of them when None; none when empty).
+    """
     db = store.db
-    where, parameters = "", []
-    if clip_ids is not None:
-        where = f" WHERE clip_id IN ({','.join('?' * len(clip_ids))})"
-        parameters = list(clip_ids)
     kinds: dict[str, set[str]] = {}
     for edit in db.execute("SELECT clip_id, kind FROM edits"):
         kinds.setdefault(edit["clip_id"], set()).add(edit["kind"])
     reviews = latest_reviews(db, clip_ids)
     counts: Counter = Counter()
-    for row in db.execute(f"SELECT * FROM clips{where}", parameters).fetchall():
+    if clip_ids is None:
+        rows = db.execute("SELECT * FROM clips").fetchall()
+    else:
+        rows = []
+        for start in range(0, len(clip_ids), 500):
+            chunk = clip_ids[start : start + 500]
+            rows += db.execute(f"SELECT * FROM clips WHERE clip_id IN ({','.join('?' * len(chunk))})", chunk).fetchall()
+    for row in rows:
         review = reviews.get(row["clip_id"])
         label, reference, strategy = derive(row, kinds.get(row["clip_id"], set()), review)
         positions = row["edited_positions"] if label == "strong" else None
@@ -97,7 +103,7 @@ def refresh(store: Store, clip_ids: list[str] | None = None) -> Counter:
 
 def label_all(store: Store) -> Counter:
     """Classify any unclassified correction (T2.4), then recompute every clip's label."""
-    corrections.label_corrections(store, backfill=True)
+    corrections.label_corrections(store)
     return refresh(store)
 
 

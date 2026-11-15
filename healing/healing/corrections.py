@@ -173,22 +173,17 @@ def reference_text(raw_text: str, edits: list[Edit]) -> str | None:
     return reference_with_spans(raw_text, edits)[0]
 
 
-def label_corrections(
-    store: Store, since_ms: int | None = None, recompute: bool = False, backfill: bool = False
-) -> Counter:
+def label_corrections(store: Store, since_ms: int | None = None, recompute: bool = False) -> Counter:
     """Classify every edited, un-rewritten clip not yet classified. Counts by kind.
 
-    `backfill` also classifies again a clip classified before `edited_positions` existed (it has a
-    reference and no positions), so a migrated dataset's strong clips reach the edited set.
-
-    Writes the edits, `reference_text` and `edited_positions` only; `labels.refresh` is the one
-    writer of `label`.
+    Writes the edits, `acoustic_reference` and `edited_positions` only: the classifier's own output,
+    which nothing else overwrites. `labels.refresh` is the one writer of `label` and of
+    `reference_text`, which it derives from the label.
     """
     where = "correction_outcome = 'edited' AND edited_text IS NOT NULL AND rewritten = 0"
     parameters: list = []
     if not recompute:
-        missing = " OR (reference_text IS NOT NULL AND edited_positions IS NULL)" if backfill else ""
-        where += f" AND (classified_at_ms IS NULL{missing})"
+        where += " AND classified_at_ms IS NULL"
     if since_ms is not None:
         where += " AND timestamp_ms >= ?"
         parameters.append(since_ms)
@@ -216,7 +211,7 @@ def label_corrections(
         reference, spans = reference_with_spans(row["raw_text"], edits)
         positions = wer.positions_of(reference, spans) if reference is not None else []
         store.db.execute(
-            "UPDATE clips SET reference_text = ?, edited_positions = ?, classified_at_ms = ? WHERE clip_id = ?",
+            "UPDATE clips SET acoustic_reference = ?, edited_positions = ?, classified_at_ms = ? WHERE clip_id = ?",
             (reference, json.dumps(positions) if positions else None, now_ms(), row["clip_id"]),
         )
         counts["clips"] += 1

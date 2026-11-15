@@ -10,7 +10,7 @@ import json
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -56,6 +56,7 @@ class Summary:
     audio_new: int = 0
     missing_audio: int = 0
     audio_skipped: int = 0  # not copied: free space is under the floor
+    touched: list[str] = field(default_factory=list)  # clips inserted or changed: labelled once at the end
 
     def __str__(self) -> str:
         text = (
@@ -165,6 +166,9 @@ def collect(
         error = type(failure).__name__
         raise
     finally:
+        # Labels follow the evidence this run changed: once for every clip it inserted or touched,
+        # never per row. Everything else is labelled by `label all` and `split build`.
+        labels.refresh(store, summary.touched)
         store.db.execute(
             "UPDATE runs SET seen = ?, new = ?, audio_new = ?, missing_audio = ?, error = ?"
             " WHERE run_id = ?",
@@ -242,6 +246,7 @@ def _store_entry(
                 fields["edited_text"],
             ),
         )
+        summary.touched.append(clip_id(epoch, hex_id))
         return
     changed = {k: v for k, v in fields.items() if existing[k] != v}
     changed = _correction_changes(existing, correction, observed, changed)
@@ -252,7 +257,7 @@ def _store_entry(
     if any(name in changed for name in CLASSIFICATION_INPUTS):
         # Hex added or changed the correction: `label corrections` classifies it again.
         store.db.execute("DELETE FROM edits WHERE clip_id = ?", (existing["clip_id"],))
-        changed["reference_text"] = None
+        changed["acoustic_reference"] = None
         changed["edited_positions"] = None
         changed["classified_at_ms"] = None
     assignments = ", ".join(f"{name} = ?" for name in changed)
@@ -260,7 +265,7 @@ def _store_entry(
         f"UPDATE clips SET {assignments} WHERE hex_epoch_ms = ? AND hex_id = ?",
         (*changed.values(), epoch, hex_id),
     )
-    labels.refresh(store, [existing["clip_id"]])  # the label follows the changed evidence
+    summary.touched.append(existing["clip_id"])
 
 
 def _correction_changes(existing, correction: dict | None, observed: dict, changed: dict) -> dict:

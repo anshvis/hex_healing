@@ -309,3 +309,18 @@ def test_log_has_no_transcript_text(world, capsys, monkeypatch):
     seen = capsys.readouterr()
     for text in texts:
         assert text not in seen.out + seen.err
+
+
+def test_labels_follow_a_run_once_not_per_row(world, monkeypatch):
+    from healing import labels
+
+    calls = []
+    real = labels.refresh
+    monkeypatch.setattr(labels, "refresh", lambda store, ids=None: (calls.append(list(ids or [])), real(store, ids))[1])
+    world.run()
+    assert len(calls) == 1 and len(calls[0]) == 3  # one refresh, every inserted clip
+    calls.clear()
+    world.doc["entries"][0].update(raw_text="hello their")
+    world.save()
+    world.run()
+    assert len(calls) == 1 and len(calls[0]) == 1  # one refresh, the one clip it changed

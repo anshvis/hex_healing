@@ -170,8 +170,8 @@ def test_v4_dataset_with_rows_migrates_to_the_current_schema(tmp_path):
         "UPDATE clips SET correction_outcome = 'edited', edited_text = 'Send it to Kit.' WHERE clip_id = 'a'"
     )
     assert label_corrections(store)["acoustic"] == 1
-    row = store.db.execute("SELECT label, reference_text FROM clips").fetchone()
-    assert (row["label"], row["reference_text"]) == ("verified", "send it to kit")
+    row = store.db.execute("SELECT label, acoustic_reference FROM clips").fetchone()
+    assert (row["label"], row["acoustic_reference"]) == ("verified", "send it to kit")  # the label is not the classifier's
 
 
 def test_v5_dataset_made_before_the_classified_marker_migrates_to_v6(tmp_path):
