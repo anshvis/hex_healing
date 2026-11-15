@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub static ESCAPES: AtomicU64 = AtomicU64::new(0);
-pub static RETURNS: AtomicU64 = AtomicU64::new(0);
+static RETURNS: AtomicU64 = AtomicU64::new(0);
 
 /// Counts `event` if it is an Escape or Return press.
 pub fn note(event: crate::suppression::InputEvent) {

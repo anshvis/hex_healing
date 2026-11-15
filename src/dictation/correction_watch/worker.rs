@@ -9,7 +9,8 @@ use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::session::{CorrectionObservation, Event, Field, Outcome, Session, Step};
+use super::locate::Tracker;
+use super::session::{CorrectionObservation, Event, Field, Outcome, Session, Step, WATCH};
 use super::{PasteTarget, QUEUE};
 use crate::accessibility::{self, Notification, Observer, RetainedElement};
 use crate::dictation::key_counts;
@@ -50,6 +51,8 @@ pub fn wake() {
 struct Active {
     history: History,
     entry_id: u64,
+    /// The dictation's final text, as History must still hold it.
+    text: String,
     session: Session<RetainedElement>,
     observer: Option<Observer>,
     /// The listener's Return count when this watch last looked.
@@ -64,11 +67,11 @@ impl Active {
         Self {
             history: target.history,
             entry_id: target.entry_id,
+            text: target.text,
             session: Session::new(
                 target.element,
-                target.inserted,
                 target.pasted_at,
-                target.anchor,
+                Tracker::new(target.inserted, target.anchor, target.before.as_deref()),
             ),
             returns: target.returns,
             poll_at: observer
@@ -95,6 +98,11 @@ impl Active {
         }
         order(returned, notifications, polled)
     }
+}
+
+/// Whether the paste's watch window has passed.
+fn expired(target: &PasteTarget, now: Instant) -> bool {
+    now.saturating_duration_since(target.pasted_at) >= WATCH
 }
 
 /// The events of one tick, in the order the session needs: a Return first
@@ -135,8 +143,12 @@ fn run() {
         while active.len() < MAX_ACTIVE {
             let Some(target) = QUEUE.take() else { break };
             // Never watch Hex's own field, nor start one the lab has since
-            // turned off (it drops the element unread).
-            if target.pid != std::process::id() as i32 && crate::labs::learn_from_corrections() {
+            // turned off (it drops the element unread), nor one whose window
+            // passed while it waited: no read happens after it.
+            if target.pid != std::process::id() as i32
+                && crate::labs::learn_from_corrections()
+                && !expired(&target, Instant::now())
+            {
                 active.push(Active::start(target));
             }
         }
@@ -159,7 +171,7 @@ fn run() {
                 Step::Wait => true,
                 Step::Drop => false,
                 Step::Done(seen) => {
-                    keep(&watched.history, watched.entry_id, seen);
+                    keep(&watched.history, watched.entry_id, &watched.text, seen);
                     false
                 }
             }
@@ -185,7 +197,7 @@ fn feed<F: Field>(
 
 /// Stores `seen` on its History entry. Counts and outcome IDs are logged,
 /// never text.
-fn keep(history: &History, entry_id: u64, seen: CorrectionObservation) {
+fn keep(history: &History, entry_id: u64, text: &str, seen: CorrectionObservation) {
     let chars = match &seen.outcome {
         Outcome::Edited(span) => span.chars().count(),
         _ => 0,
@@ -195,7 +207,7 @@ fn keep(history: &History, entry_id: u64, seen: CorrectionObservation) {
         seen.trigger.as_str(),
         seen.observed_at_ms,
     );
-    match history.observe_correction(entry_id, seen.into_history()) {
+    match history.observe_correction(entry_id, text, seen.into_history()) {
         Ok(kept) => tracing::info!(outcome, trigger, chars, ms, kept, "correction observed"),
         Err(error) => tracing::warn!(%error, outcome, "could not keep a correction"),
     }
@@ -236,6 +248,20 @@ mod tests {
         Instant::now()
     }
 
+    /// A session with no caret, over a field that held none of the paste before.
+    fn watching<F: Field>(field: F, inserted: &str, t0: Instant) -> Session<F> {
+        Session::new(field, t0, Tracker::new(inserted.into(), None, Some("")))
+    }
+
+    #[test]
+    fn a_target_whose_window_passed_while_it_waited_is_dropped() {
+        let history = history_for_test();
+        let mut old = target(&history, 1);
+        old.pasted_at = Instant::now() - WATCH - Duration::from_secs(1);
+        assert!(expired(&old, Instant::now()));
+        assert!(!expired(&target(&history, 2), Instant::now()));
+    }
+
     #[test]
     fn quit_drops_pending() {
         let history = history_for_test();
@@ -255,7 +281,7 @@ mod tests {
 
     /// A session over `field` that has seen the paste whole and then its edit.
     fn edited<'a>(field: &'a Cell<&'static str>, t0: Instant) -> Session<Fake<'a>> {
-        let mut session = Session::new(Fake(field), "send it to Kip".into(), t0, None);
+        let mut session = watching(Fake(field), "send it to Kip", t0);
         field.set("send it to Kip");
         assert_eq!(
             feed(&mut session, order(false, [], false), at(t0, 50), OPEN),
@@ -357,7 +383,7 @@ mod tests {
     fn a_closed_gate_drops_the_watch_unread() {
         let field = Cell::new("send it");
         let t0 = now();
-        let mut session = Session::new(Fake(&field), "send it".into(), t0, None);
+        let mut session = watching(Fake(&field), "send it", t0);
         let closed: &dyn Fn() -> bool = &|| false;
         let step = feed(&mut session, [Event::ValueChanged], t0, closed);
         assert_eq!(step, Step::Drop);
@@ -368,7 +394,7 @@ mod tests {
     fn events_after_a_finish_are_not_fed() {
         let field = Cell::new("");
         let t0 = now();
-        let mut session = Session::new(Fake(&field), "send it".into(), t0, None);
+        let mut session = watching(Fake(&field), "send it", t0);
         let step = feed(&mut session, [Event::Return, Event::ValueChanged], t0, OPEN);
         let seen = kept(step);
         assert_eq!(seen.outcome, Outcome::Lost(Lost::ClearedBeforeRead));
@@ -397,6 +423,7 @@ mod tests {
         keep(
             &history,
             id,
+            "Send it to Kip.",
             CorrectionObservation {
                 outcome: Outcome::Edited("Kit".into()),
                 trigger: Trigger::FocusOut,

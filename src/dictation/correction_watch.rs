@@ -42,8 +42,13 @@ pub struct PasteTarget {
     /// The text that reached the field after the continuation join and smart
     /// spacing, not the dictation's final text.
     pub inserted: String,
+    /// The dictation's final text, which the History entry must still hold
+    /// for the observation to be stored on it.
+    pub text: String,
     /// Where in the field it went, if the app says where the caret was.
     pub anchor: Option<Anchor>,
+    /// The field's text before the paste, read when there was no caret.
+    pub before: Option<String>,
     /// When the paste completed, before History's write.
     pub pasted_at: Instant,
     /// The listener's Return count at the paste: a Return after it may be a
@@ -58,14 +63,23 @@ pub struct Pending {
     element: RetainedElement,
     /// Where the caret is (a paste starts there), if the app says.
     caret: Option<usize>,
+    /// The field's text, read when the app names no caret: without one the
+    /// paste is found by what it added.
+    before: Option<String>,
 }
 
 impl Pending {
-    pub fn new(pid: i32, element: RetainedElement, caret: Option<usize>) -> Self {
+    pub fn new(
+        pid: i32,
+        element: RetainedElement,
+        caret: Option<usize>,
+        before: Option<String>,
+    ) -> Self {
         Self {
             pid,
             element,
             caret,
+            before,
         }
     }
 }
@@ -89,7 +103,13 @@ impl Handoff for Live {
         let pid = crate::dictation::context::frontmost_pid()?;
         let element = accessibility::focused_element(pid)?;
         let caret = accessibility::caret(&element);
-        Some(Pending::new(pid, element, caret))
+        let before = caret.is_none().then(|| {
+            accessibility::read_value_bounded(&element, session::READ_CHARS)
+                .ok()
+                .filter(|read| !read.windowed)
+                .map(|read| read.text)
+        });
+        Some(Pending::new(pid, element, caret, before.flatten()))
     }
 
     fn submit(&mut self, target: PasteTarget) {
@@ -164,6 +184,7 @@ impl Watch {
         handoff: &mut impl Handoff,
         history: Option<&History>,
         entry_id: Option<u64>,
+        text: &str,
     ) {
         if let (State::Pasted(pending, landed), Some(history), Some(entry_id)) =
             (self.0, history, entry_id)
@@ -174,7 +195,9 @@ impl Watch {
                 history: history.clone(),
                 entry_id,
                 inserted: landed.inserted,
+                text: text.to_string(),
                 anchor: landed.anchor,
+                before: pending.before,
                 pasted_at: landed.at,
                 returns: landed.returns,
             });
@@ -253,7 +276,9 @@ fn target_for_test(history: &History, entry_id: u64) -> PasteTarget {
         history: history.clone(),
         entry_id,
         inserted: "pasted".into(),
+        text: "pasted".into(),
         anchor: None,
+        before: None,
         pasted_at: Instant::now(),
         returns: 0,
     }
@@ -305,7 +330,12 @@ mod tests {
 
     impl Handoff for Fake {
         fn read(&mut self) -> Option<Pending> {
-            Some(Pending::new(1, RetainedElement::for_test(), self.caret))
+            Some(Pending::new(
+                1,
+                RetainedElement::for_test(),
+                self.caret,
+                None,
+            ))
         }
         fn submit(&mut self, target: PasteTarget) {
             self.submitted.push(target);
@@ -352,9 +382,9 @@ mod tests {
             panic!("the paste is noted");
         };
         assert!(landed.at > pasted_at, "the time is taken at each paste");
-        watch.recorded(&mut fake, Some(&history), None);
+        watch.recorded(&mut fake, Some(&history), None, "hello");
         assert!(fake.submitted.is_empty(), "no entry, no target");
-        again.recorded(&mut fake, Some(&history), Some(7));
+        again.recorded(&mut fake, Some(&history), Some(7), "hello");
         assert_eq!(fake.submitted.len(), 1);
         assert_eq!(fake.submitted[0].entry_id, 7);
         assert_eq!(fake.submitted[0].inserted, " hello");
@@ -369,7 +399,7 @@ mod tests {
         };
         let mut watch = Watch::before(&mut fake, Some(&history));
         watch.pasted("hi".into());
-        watch.recorded(&mut fake, Some(&history), Some(1));
+        watch.recorded(&mut fake, Some(&history), Some(1), "hi");
         assert_eq!(fake.submitted[0].anchor, None);
         let mut empty = Watch::before(&mut fake, Some(&history));
         empty.pasted(String::new());

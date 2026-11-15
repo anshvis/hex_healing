@@ -793,8 +793,13 @@ impl History {
 
     /// Keep a correction observation on entry `id` ([`corrections`]).
     #[cfg(target_os = "macos")]
-    pub fn observe_correction(&self, id: u64, correction: HistoryCorrection) -> io::Result<bool> {
-        self.synced().observe_correction(id, correction)
+    pub fn observe_correction(
+        &self,
+        id: u64,
+        final_text: &str,
+        correction: HistoryCorrection,
+    ) -> io::Result<bool> {
+        self.synced().observe_correction(id, final_text, correction)
     }
 
     /// Whether a dictation would be recorded: retention is not Off.

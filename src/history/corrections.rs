@@ -48,11 +48,13 @@ impl HistoryEntry {
 impl HistoryStore {
     /// Keep `correction` on entry `id`, its text cut to the per-entry cap and
     /// the store pruned to its hard caps, in one save. Returns false when the
-    /// entry is gone or already has one. A failed save keeps the entry as it
-    /// was.
+    /// entry is gone, already has one, or no longer holds `final_text` (a
+    /// Replace took it: the correction was seen against other text). A failed
+    /// save keeps the entry as it was.
     pub fn observe_correction(
         &mut self,
         id: u64,
+        final_text: &str,
         mut correction: HistoryCorrection,
     ) -> std::io::Result<bool> {
         correction.edited_text = correction
@@ -65,7 +67,8 @@ impl HistoryStore {
         let Some(index) = self.entries.iter().position(|entry| entry.id == id) else {
             return Ok(false);
         };
-        if self.entries[index].correction.is_some() {
+        let entry = &self.entries[index];
+        if entry.correction.is_some() || entry.final_text != truncated(final_text, MAX_TEXT_BYTES) {
             return Ok(false);
         }
         let before = self.entries.clone();
@@ -120,6 +123,19 @@ mod tests {
         }
     }
 
+    /// Observes with the text the entry holds now, as a watch of it would.
+    fn observe(
+        store: &mut HistoryStore,
+        id: u64,
+        correction: HistoryCorrection,
+    ) -> std::io::Result<bool> {
+        let text = store
+            .entry(id)
+            .map(|entry| entry.final_text.clone())
+            .unwrap_or_default();
+        store.observe_correction(id, &text, correction)
+    }
+
     fn edited(text: &str) -> HistoryCorrection {
         HistoryCorrection {
             outcome: "edited".into(),
@@ -136,8 +152,8 @@ mod tests {
             .record(draft("Send it to Kip."), now_ms())
             .unwrap()
             .unwrap();
-        assert!(store.observe_correction(id, edited("Kit")).unwrap());
-        assert!(!store.observe_correction(id, edited("Other")).unwrap());
+        assert!(observe(&mut store, id, edited("Kit")).unwrap());
+        assert!(!observe(&mut store, id, edited("Other")).unwrap());
         let reopened = HistoryStore::open(path, HistoryRetention::Week, 20);
         let correction = reopened.entry(id).unwrap().correction.clone().unwrap();
         assert_eq!(correction.outcome, "edited");
@@ -148,7 +164,7 @@ mod tests {
     #[test]
     fn observe_correction_on_missing_entry_is_false() {
         let (_, mut store) = store("missing");
-        assert!(!store.observe_correction(99, edited("Kit")).unwrap());
+        assert!(!observe(&mut store, 99, edited("Kit")).unwrap());
         assert_eq!(store.len(), 0);
     }
 
@@ -156,13 +172,13 @@ mod tests {
     fn correction_counts_toward_text_cap() {
         let (_, mut store) = store("cap");
         let id = store.record(draft("a"), now_ms()).unwrap().unwrap();
-        store.observe_correction(id, edited("kit")).unwrap();
+        observe(&mut store, id, edited("kit")).unwrap();
         let entry = store.entry(id).unwrap();
         assert_eq!(entry.text_bytes(), 1 + 1 + 3);
         let long = "x".repeat(MAX_TEXT_BYTES * 2);
         let (_, mut other) = self::store("cap-long");
         let id = other.record(draft("a"), now_ms()).unwrap().unwrap();
-        other.observe_correction(id, edited(&long)).unwrap();
+        observe(&mut other, id, edited(&long)).unwrap();
         let kept = other.entry(id).unwrap().correction.clone().unwrap();
         assert!(kept.edited_text.unwrap().len() <= MAX_TEXT_BYTES);
     }
@@ -171,7 +187,7 @@ mod tests {
     fn clear_all_removes_correction() {
         let (path, mut store) = store("clear");
         let id = store.record(draft("hello"), now_ms()).unwrap().unwrap();
-        store.observe_correction(id, edited("Hullo")).unwrap();
+        observe(&mut store, id, edited("Hullo")).unwrap();
         store.clear().unwrap();
         assert!(store.entry(id).is_none());
         let text = std::fs::read_to_string(&path).unwrap();
@@ -209,7 +225,7 @@ mod tests {
         store.entries[0].raw_text = "x".repeat(room - (total - 1));
         let total: usize = store.entries().map(HistoryEntry::text_bytes).sum();
         assert_eq!(total, room);
-        store.observe_correction(last, edited(&big)).unwrap();
+        observe(&mut store, last, edited(&big)).unwrap();
         let total: usize = store.entries().map(HistoryEntry::text_bytes).sum();
         assert!(total <= MAX_TOTAL_TEXT_BYTES, "{total}");
         assert!(store.entry(last).is_some(), "the newest entry stays");
@@ -226,7 +242,7 @@ mod tests {
             observed_at_ms: 1,
             edited_text: None,
         };
-        assert!(store.observe_correction(id, lost).unwrap());
+        assert!(observe(&mut store, id, lost).unwrap());
         let kept = store.entry(id).unwrap().correction.clone().unwrap();
         assert_eq!(kept.reason.as_deref(), Some("secure"));
         assert_eq!(kept.edited_text, None);
@@ -240,9 +256,7 @@ mod tests {
             .record(draft("send it to kip"), now_ms())
             .unwrap()
             .unwrap();
-        store
-            .observe_correction(id, edited("send it to Kit"))
-            .unwrap();
+        observe(&mut store, id, edited("send it to Kit")).unwrap();
         assert!(store.entry(id).unwrap().correction.is_some());
         let again = Transcript {
             text: "send it to Kip".into(),
@@ -253,7 +267,7 @@ mod tests {
         assert!(store.replace_text(id, again, now_ms()).unwrap());
         assert_eq!(store.entry(id).unwrap().correction, None);
         // A new observation may come for the new text, and a restore drops it too.
-        assert!(store.observe_correction(id, edited("x")).unwrap());
+        assert!(observe(&mut store, id, edited("x")).unwrap());
         assert!(store.restore_version(id, 0).unwrap());
         assert_eq!(store.entry(id).unwrap().correction, None);
     }
@@ -265,7 +279,7 @@ mod tests {
         store
             .set_retention(HistoryRetention::Off, now_ms())
             .unwrap();
-        assert!(!store.observe_correction(id, edited("Hullo")).unwrap());
+        assert!(!observe(&mut store, id, edited("Hullo")).unwrap());
         store
             .set_retention(HistoryRetention::Week, now_ms())
             .unwrap();
@@ -274,8 +288,36 @@ mod tests {
         let blocked = path.with_file_name("blocked");
         std::fs::write(&blocked, "").unwrap();
         store.path = blocked.join("history.json");
-        assert!(store.observe_correction(id, edited("Hullo")).is_err());
+        assert!(observe(&mut store, id, edited("Hullo")).is_err());
         assert_eq!(store.entry(id).unwrap().correction, None);
         assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn a_correction_seen_against_text_the_entry_no_longer_holds_is_not_stored() {
+        use crate::history::Transcript;
+        let (_, mut store) = store("provenance");
+        let id = store
+            .record(draft("send it to Kip"), now_ms())
+            .unwrap()
+            .unwrap();
+        let replaced = Transcript {
+            text: "send it to Kit".into(),
+            model: None,
+            model_id: None,
+            language: None,
+        };
+        // A Replace took the text mid-watch: the watch still holds the old one.
+        assert!(store.replace_text(id, replaced, now_ms()).unwrap());
+        let stale = store
+            .observe_correction(id, "send it to Kip", edited("x"))
+            .unwrap();
+        assert!(!stale);
+        assert_eq!(store.entry(id).unwrap().correction, None);
+        assert!(
+            store
+                .observe_correction(id, "send it to Kit", edited("x"))
+                .unwrap()
+        );
     }
 }

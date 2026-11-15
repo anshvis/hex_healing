@@ -195,7 +195,7 @@ pub(super) fn finish_output(
                     let entry_id = history.and_then(|history| {
                         record_history(history, target, sent, &mut completed)
                     });
-                    watch.recorded(corrections, history, entry_id);
+                    watch.recorded(corrections, history, entry_id, &completed.text);
                 }
                 tracing::info!(
                     audio_ms = completed.timings.audio_ms,
@@ -356,6 +356,7 @@ mod tests {
             Some(crate::dictation::correction_watch::Pending::new(
                 1,
                 crate::accessibility::RetainedElement::for_test(),
+                None,
                 None,
             ))
         }

@@ -27,14 +27,12 @@
 //!   then an edit), is an ordinary read, and after the window the watch is
 //!   `Watching` again.
 //!
-//! Where the paste is in the field is [`Anchoring`]'s: nothing is reported
-//! as an edit before the paste has been seen whole (position or not), and
-//! with an anchor only the paste's own region is judged, followed through
-//! every read (see `locate`).
+//! Where the paste is in the field is the [`Tracker`]'s (see `locate`): an
+//! edit is stored only from a region it is following.
 
 use std::time::{Duration, Instant};
 
-use super::locate::{self, Alignment, Anchor, Landing, Region};
+use super::locate::{self, Alignment, Tracker};
 use crate::accessibility::{FieldText, ReadError};
 use crate::history::HistoryCorrection;
 
@@ -53,10 +51,6 @@ pub const MAX_READS: usize = 200;
 /// How long a blank field is waited on before it is called cleared with no
 /// Return: two ticks, so a Return counted a recognition wake late converts it.
 pub const CLEAR_GRACE: Duration = Duration::from_millis(100);
-/// How long a paste found in the field but not at its anchor is waited on
-/// (the read may have come before the app applied the paste) before the
-/// anchor is given up and the whole field searched.
-pub const ELSEWHERE_GRACE: Duration = Duration::from_millis(500);
 /// How long after a Return the field changing means it was sent.
 pub const SEND_WINDOW: Duration = Duration::from_secs(1);
 /// Returns per target that are read; a held Return key is not.
@@ -111,8 +105,16 @@ impl Lost {
         }
     }
 
-    /// Which reason wins when reads disagree: a field that was cleared, then
-    /// one that held other text, then a read that failed.
+    /// This reason, unless `held` is already a stronger one: a field that was
+    /// cleared outranks one that held other text, which outranks a read that
+    /// failed.
+    fn against(self, held: &Finished) -> Self {
+        match held {
+            Err(old) if old.priority() > self.priority() => *old,
+            _ => self,
+        }
+    }
+
     fn priority(self) -> u8 {
         match self {
             Self::ClearedBeforeRead => 2,
@@ -229,35 +231,27 @@ enum Input {
     Read(Reading),
 }
 
-/// The watch's state. `held` is `None` only before the first read.
+/// The watch's state. `held` is what the watch would end with now; before
+/// the first read it is a placeholder every first read replaces.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct State {
     phase: Phase,
-    held: Option<Finished>,
+    held: Finished,
     /// Since when the field has been blank with something kept.
     cleared_since: Option<Instant>,
-}
-
-/// Which reason to keep when reads disagree: a field that was cleared, then
-/// one that held other text, then a read that failed.
-fn stronger(held: &Option<Finished>, lost: Lost) -> Lost {
-    match held {
-        Some(Err(old)) if old.priority() > lost.priority() => *old,
-        _ => lost,
-    }
 }
 
 impl State {
     fn new() -> Self {
         Self {
             phase: Phase::Watching,
-            held: None,
+            held: Err(Lost::Read(ReadError::Timeout)),
             cleared_since: None,
         }
     }
 
     fn best(&self) -> Option<&CorrectionObservation> {
-        self.held.as_ref().and_then(|held| held.as_ref().ok())
+        self.held.as_ref().ok()
     }
 
     fn sending(&self, now: Instant) -> bool {
@@ -282,18 +276,14 @@ impl State {
             Input::Failed(error) => {
                 // A failed read never erases what was kept.
                 if self.best().is_none() {
-                    self.held = Some(Err(stronger(&self.held, Lost::Read(error))));
+                    self.held = Err(Lost::Read(error).against(&self.held));
                 }
-                (error == ReadError::ElementGone).then(|| {
-                    self.held
-                        .clone()
-                        .unwrap_or(Err(Lost::Read(ReadError::ElementGone)))
-                })
+                (error == ReadError::ElementGone).then(|| self.held.clone())
             }
             Input::Read(reading) => self.read(reading, now),
         };
         if let Some(finished) = &finished {
-            self.held = Some(finished.clone());
+            self.held = finished.clone();
         }
         (self, finished)
     }
@@ -318,7 +308,7 @@ impl State {
                     }
                 },
                 (false, _, None) => {
-                    self.held = Some(Err(stronger(&self.held, Lost::ClearedBeforeRead)));
+                    self.held = Err(Lost::ClearedBeforeRead.against(&self.held));
                     None
                 }
             };
@@ -331,117 +321,22 @@ impl State {
         {
             return Some(Ok(kept));
         }
-        self.held = Some(match reading.outcome {
+        self.held = match reading.outcome {
             Some(outcome) => Ok(CorrectionObservation {
                 outcome,
                 trigger: reading.trigger,
                 observed_at_ms: reading.ms,
             }),
-            None => Err(stronger(&self.held, Lost::SpanNotFound)),
-        });
-        None
-    }
-}
-
-/// Where the paste is expected to sit in the field.
-enum Anchoring {
-    /// No anchor, or one that did not hold: the whole field is searched,
-    /// under the strict rules. `seen`: the paste has been seen whole, which
-    /// an edit needs.
-    Whole { seen: bool },
-    /// The paste has not yet been seen where it was put. `elsewhere` is
-    /// since when it has been found, but not there.
-    Pending {
-        anchor: Anchor,
-        elsewhere: Option<Instant>,
-    },
-    /// It has: only its region is judged, followed through each read from
-    /// `text`, the read it was last followed on. `None`: the region is lost.
-    Landed {
-        region: Option<Region>,
-        text: String,
-    },
-}
-
-fn outcome_of(alignment: Alignment) -> Option<Outcome> {
-    match alignment {
-        Alignment::Unchanged => Some(Outcome::Unchanged),
-        Alignment::Edited(span) => Some(Outcome::Edited(span)),
-        Alignment::NotFound => None,
-    }
-}
-
-impl Anchoring {
-    /// What a read shows of the paste, and where that leaves the anchoring.
-    fn read(self, read: &FieldText, inserted: &str, now: Instant) -> (Self, Option<Outcome>) {
-        let FieldText { text, windowed } = read;
-        // Strict, over the whole field; an edit only once the paste was seen.
-        let strict = |seen: bool| match locate::align(text, inserted, *windowed) {
-            Alignment::Unchanged => (true, Some(Outcome::Unchanged)),
-            Alignment::Edited(span) if seen => (seen, Some(Outcome::Edited(span))),
-            _ => (seen, None),
+            None => Err(Lost::SpanNotFound.against(&self.held)),
         };
-        match self {
-            Self::Whole { seen } => {
-                let (seen, outcome) = strict(seen);
-                (Self::Whole { seen }, outcome)
-            }
-            // A window's offsets are not the field's: no landing in one.
-            Self::Pending { anchor, elsewhere } if *windowed => {
-                (Self::Pending { anchor, elsewhere }, strict(false).1)
-            }
-            Self::Pending { anchor, elsewhere } => match locate::landing(text, inserted, &anchor) {
-                Landing::Landed(region) => (
-                    Self::Landed {
-                        region: Some(region),
-                        text: text.clone(),
-                    },
-                    Some(Outcome::Unchanged),
-                ),
-                Landing::Elsewhere => {
-                    let since = elsewhere.unwrap_or(now);
-                    let next = if now.saturating_duration_since(since) >= ELSEWHERE_GRACE {
-                        Self::Whole { seen: true }
-                    } else {
-                        Self::Pending {
-                            anchor,
-                            elsewhere: Some(since),
-                        }
-                    };
-                    (next, Some(Outcome::Unchanged))
-                }
-                Landing::Absent => (
-                    Self::Pending {
-                        anchor,
-                        elsewhere: None,
-                    },
-                    None,
-                ),
-            },
-            Self::Landed {
-                region,
-                text: before,
-            } => {
-                // A window cannot be followed: the region is lost for good.
-                let region = region
-                    .filter(|_| !windowed)
-                    .and_then(|region| locate::follow(&before, text, region));
-                let outcome = match region {
-                    Some(region) => outcome_of(locate::judge(text, inserted, region)),
-                    None => strict(false).1,
-                };
-                let text = if *windowed { before } else { text.clone() };
-                (Self::Landed { region, text }, outcome)
-            }
-        }
+        None
     }
 }
 
 pub struct Session<F: Field> {
     field: F,
-    inserted: String,
     started: Instant,
-    anchoring: Option<Anchoring>,
+    tracker: Tracker,
     /// Reads that found the field changed (see [`MAX_READS`]).
     reads: usize,
     return_reads: usize,
@@ -452,18 +347,11 @@ pub struct Session<F: Field> {
 }
 
 impl<F: Field> Session<F> {
-    pub fn new(field: F, inserted: String, started: Instant, anchor: Option<Anchor>) -> Self {
-        let anchoring = anchor.map_or(Anchoring::Whole { seen: false }, |anchor| {
-            Anchoring::Pending {
-                anchor,
-                elsewhere: None,
-            }
-        });
+    pub fn new(field: F, started: Instant, tracker: Tracker) -> Self {
         Self {
             field,
-            inserted,
             started,
-            anchoring: Some(anchoring),
+            tracker,
             reads: 0,
             return_reads: 0,
             last_read: None,
@@ -565,16 +453,11 @@ impl<F: Field> Session<F> {
                     .last_text
                     .as_ref()
                     .is_some_and(|before| read.text.chars().count() < before.chars().count());
-                let outcome = if blank {
-                    None
-                } else {
-                    let anchoring = self
-                        .anchoring
-                        .take()
-                        .unwrap_or(Anchoring::Whole { seen: false });
-                    let (anchoring, outcome) = anchoring.read(&read, &self.inserted, now);
-                    self.anchoring = Some(anchoring);
-                    outcome
+                // A blank field is read too: it retires the tracker's region.
+                let outcome = match self.tracker.read(&read) {
+                    Alignment::Unchanged => Some(Outcome::Unchanged),
+                    Alignment::Edited(span) => Some(Outcome::Edited(span)),
+                    Alignment::NotFound => None,
                 };
                 self.last_text = Some(read.text);
                 Input::Read(Reading {
@@ -619,10 +502,7 @@ impl<F: Field> Session<F> {
 
     /// What the watch holds. A read always came first, so it holds something.
     fn observation(&mut self, now: Instant, trigger: Trigger) -> Step {
-        match self.state.held.take() {
-            Some(held) => Step::Done(self.observed(held, now, trigger)),
-            None => Step::Drop,
-        }
+        Step::Done(self.observed(self.state.held.clone(), now, trigger))
     }
 }
 
@@ -630,6 +510,7 @@ impl<F: Field> Session<F> {
 mod tests {
     use std::cell::{Cell, RefCell};
 
+    use super::super::locate::Anchor;
     use super::*;
 
     /// A field that answers a script of reads, repeating the last, and counts
@@ -674,6 +555,22 @@ mod tests {
         start + Duration::from_millis(ms)
     }
 
+    /// A session that watches without a caret, over a field that held none of
+    /// the paste's text before it.
+    fn session<F: Field>(field: F, inserted: impl Into<String>, t0: Instant) -> Session<F> {
+        Session::new(field, t0, Tracker::new(inserted.into(), None, Some("")))
+    }
+
+    fn anchored<F: Field>(
+        field: F,
+        inserted: impl Into<String>,
+        t0: Instant,
+        anchor: Option<Anchor>,
+    ) -> Session<F> {
+        let before = anchor.is_none().then_some("");
+        Session::new(field, t0, Tracker::new(inserted.into(), anchor, before))
+    }
+
     /// The first read of a watch: the paste, whole. No edit is called before.
     fn baseline<F: Field>(session: &mut Session<F>, t0: Instant) {
         assert_eq!(session.step(at(t0, 50), Event::Tick, OPEN), Step::Wait);
@@ -689,11 +586,10 @@ mod tests {
     #[test]
     fn keeps_last_matching_read_before_clear() {
         let t0 = Instant::now();
-        let mut session = Session::new(
+        let mut session = session(
             Script::new(&["send it to Kip", "send it to Kit", ""]),
-            "send it to Kip".into(),
+            "send it to Kip",
             t0,
-            None,
         );
         baseline(&mut session, t0);
         assert_eq!(
@@ -713,7 +609,7 @@ mod tests {
         // Select Kip, type K, i, t at 80 ms, press Return 80 ms later (inside
         // one 100 ms gap of the last key): the field is cleared when the
         // Return read lands.
-        let mut session = Session::new(
+        let mut session = session(
             Script::new(&[
                 "send it to Kip",
                 "send it to K",
@@ -721,9 +617,8 @@ mod tests {
                 "send it to Kit",
                 "",
             ]),
-            "send it to Kip".into(),
+            "send it to Kip",
             t0,
-            None,
         );
         baseline(&mut session, t0);
         for ms in [100, 180, 260] {
@@ -737,11 +632,10 @@ mod tests {
     #[test]
     fn a_burst_inside_one_gap_is_read_once_it_has_passed() {
         let t0 = Instant::now();
-        let mut session = Session::new(
+        let mut session = session(
             Script::new(&["send it to Kip", "send it to K", "send it to Kit", ""]),
-            "send it to Kip".into(),
+            "send it to Kip",
             t0,
-            None,
         );
         baseline(&mut session, t0);
         for ms in [100, 110, 120] {
@@ -764,15 +658,14 @@ mod tests {
     #[test]
     fn return_in_a_notes_app_keeps_watching() {
         let t0 = Instant::now();
-        let mut session = Session::new(
+        let mut session = session(
             Script::new(&[
                 "send it to Kip",
                 "send it to Kip\nthanks",
                 "send it to Kit\nthanks",
             ]),
-            "send it to Kip".into(),
+            "send it to Kip",
             t0,
-            None,
         );
         // Return is a newline here: the field did not shrink.
         assert_eq!(session.step(at(t0, 500), Event::Return, OPEN), Step::Wait);
@@ -790,15 +683,14 @@ mod tests {
     #[test]
     fn return_that_shrinks_the_field_is_a_send() {
         let t0 = Instant::now();
-        let mut session = Session::new(
+        let mut session = session(
             Script::new(&[
                 "send it to Kip please",
                 "send it to Kit please",
                 "send it to Kit",
             ]),
-            "send it to Kip please".into(),
+            "send it to Kip please",
             t0,
-            None,
         );
         baseline(&mut session, t0);
         session.step(at(t0, 100), Event::ValueChanged, OPEN);
@@ -814,20 +706,19 @@ mod tests {
     #[test]
     fn nothing_matching_reports_why() {
         let t0 = Instant::now();
-        let mut cleared = Session::new(Script::new(&[""]), "send it".into(), t0, None);
+        let mut cleared = session(Script::new(&[""]), "send it", t0);
         let seen = done(cleared.step(at(t0, 5), Event::Return, OPEN));
         assert_eq!(seen.outcome, Outcome::Lost(Lost::ClearedBeforeRead));
-        let mut other = Session::new(
+        let mut other = session(
             Script::new(&["unrelated words here", "unrelated words here"]),
-            "send it".into(),
+            "send it",
             t0,
-            None,
         );
         assert_eq!(other.step(at(t0, 5), Event::Return, OPEN), Step::Wait);
         let seen = done(other.step(at(t0, 400), Event::FocusOut, OPEN));
         assert_eq!(seen.outcome, Outcome::Lost(Lost::SpanNotFound));
         let gone = Script::of(vec![Err(ReadError::ElementGone)]);
-        let mut gone = Session::new(gone, "send it".into(), t0, None);
+        let mut gone = session(gone, "send it", t0);
         let seen = done(gone.step(at(t0, 5), Event::Return, OPEN));
         assert_eq!(
             seen.outcome,
@@ -845,12 +736,7 @@ mod tests {
             Err(ReadError::Secure),
             Ok("still unrelated words".into()),
         ];
-        let mut session = Session::new(
-            Script::of(reads.into_iter().rev().collect()),
-            "send it".into(),
-            t0,
-            None,
-        );
+        let mut session = session(Script::of(reads.into_iter().rev().collect()), "send it", t0);
         for n in 0..4 {
             session.step(at(t0, n * 200), Event::ValueChanged, OPEN);
         }
@@ -861,7 +747,7 @@ mod tests {
     #[test]
     fn timeout_closes_an_untouched_paste_as_unchanged() {
         let t0 = Instant::now();
-        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0, None);
+        let mut session = session(Script::new(&["send it"]), "send it", t0);
         assert_eq!(session.step(at(t0, 29_000), Event::Tick, OPEN), Step::Wait);
         let seen = done(session.step(at(t0, 30_000), Event::Tick, OPEN));
         assert_eq!(
@@ -875,7 +761,7 @@ mod tests {
         let t0 = Instant::now();
         let open = Cell::new(true);
         let gate = || open.get();
-        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0, None);
+        let mut session = session(Script::new(&["send it"]), "send it", t0);
         assert_eq!(
             session.step(at(t0, 10), Event::ValueChanged, &gate),
             Step::Wait
@@ -900,7 +786,7 @@ mod tests {
             .map(|n| format!("send it {n}"))
             .collect();
         let reads = texts.iter().rev().map(|t| Ok(t.clone())).collect();
-        let mut session = Session::new(Script::of(reads), "send it".into(), t0, None);
+        let mut session = session(Script::of(reads), "send it", t0);
         for n in 0..(MAX_READS + 100) as u64 {
             session.step(at(t0, n * 100), Event::ValueChanged, OPEN);
         }
@@ -920,7 +806,7 @@ mod tests {
     #[test]
     fn reads_that_find_the_field_as_before_spend_nothing() {
         let t0 = Instant::now();
-        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0, None);
+        let mut session = session(Script::new(&["send it"]), "send it", t0);
         for n in 0..100 {
             session.step(at(t0, n * 1_000), Event::ValueChanged, OPEN);
         }
@@ -933,12 +819,7 @@ mod tests {
         let t0 = Instant::now();
         // No value change is ever reported (the paste's own predates the
         // observer): the read when the watch starts is the baseline.
-        let mut session = Session::new(
-            Script::new(&["send it to Kip", ""]),
-            "send it to Kip".into(),
-            t0,
-            None,
-        );
+        let mut session = session(Script::new(&["send it to Kip", ""]), "send it to Kip", t0);
         assert_eq!(session.step(at(t0, 50), Event::Tick, OPEN), Step::Wait);
         let seen = done(session.step(at(t0, 3_000), Event::Return, OPEN));
         assert_eq!(seen.outcome, Outcome::Unchanged);
@@ -948,11 +829,10 @@ mod tests {
     #[test]
     fn a_later_read_of_other_text_drops_the_read_kept_before() {
         let t0 = Instant::now();
-        let mut session = Session::new(
+        let mut session = session(
             Script::new(&["send it to Kit", "something else entirely now"]),
-            "send it to Kip".into(),
+            "send it to Kip",
             t0,
-            None,
         );
         session.step(at(t0, 0), Event::ValueChanged, OPEN);
         session.step(at(t0, 100), Event::ValueChanged, OPEN);
@@ -966,11 +846,10 @@ mod tests {
     fn an_async_clear_after_return_keeps_the_edit_even_if_text_follows() {
         let t0 = Instant::now();
         for next in ["", "ok see you"] {
-            let mut session = Session::new(
+            let mut session = session(
                 Script::new(&["send it to Kip", "send it to Kit", "send it to Kit", next]),
-                "send it to Kip".into(),
+                "send it to Kip",
                 t0,
-                None,
             );
             baseline(&mut session, t0);
             session.step(at(t0, 250), Event::ValueChanged, OPEN);
@@ -993,7 +872,7 @@ mod tests {
         let t0 = Instant::now();
         for edited in ["send it to Kit", "send it to Kip"] {
             let reads = ["send it to Kip", edited, ""];
-            let mut session = Session::new(Script::new(&reads), "send it to Kip".into(), t0, None);
+            let mut session = session(Script::new(&reads), "send it to Kip", t0);
             baseline(&mut session, t0);
             session.step(at(t0, 100), Event::ValueChanged, OPEN);
             // Blank, with something kept: waited on, in case a Return the
@@ -1022,11 +901,10 @@ mod tests {
         reads.extend_from_slice(&texts[..MAX_READS - 1]);
         reads.push("send it to Kit last".into());
         reads.push(String::new());
-        let mut session = Session::new(
+        let mut session = session(
             Script::of(reads.iter().rev().map(|t| Ok(t.clone())).collect()),
-            "send it to Kip".into(),
+            "send it to Kip",
             t0,
-            None,
         );
         baseline(&mut session, t0);
         for n in 1..(MAX_READS + 5) as u64 {
@@ -1047,15 +925,14 @@ mod tests {
     #[test]
     fn other_text_long_after_a_return_is_not_a_send() {
         let t0 = Instant::now();
-        let mut session = Session::new(
+        let mut session = session(
             Script::new(&[
                 "send it to Kip",
                 "send it to Kip\nmore",
                 "totally different now",
             ]),
-            "send it to Kip".into(),
+            "send it to Kip",
             t0,
-            None,
         );
         assert_eq!(session.step(at(t0, 300), Event::Return, OPEN), Step::Wait);
         session.step(at(t0, 400), Event::ValueChanged, OPEN);
@@ -1071,12 +948,7 @@ mod tests {
     #[test]
     fn a_missing_value_is_a_failed_read_not_a_cleared_field() {
         let t0 = Instant::now();
-        let mut session = Session::new(
-            Script::of(vec![Err(ReadError::Failed)]),
-            "send it".into(),
-            t0,
-            None,
-        );
+        let mut session = session(Script::of(vec![Err(ReadError::Failed)]), "send it", t0);
         assert_eq!(session.step(at(t0, 5), Event::Return, OPEN), Step::Wait);
         let seen = done(session.step(at(t0, 400), Event::FocusOut, OPEN));
         assert_eq!(seen.outcome, Outcome::Lost(Lost::Read(ReadError::Failed)));
@@ -1085,7 +957,7 @@ mod tests {
     #[test]
     fn a_held_return_key_stops_being_read() {
         let t0 = Instant::now();
-        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0, None);
+        let mut session = session(Script::new(&["send it"]), "send it", t0);
         for n in 0..(MAX_RETURN_READS as u64 + 30) {
             session.step(at(t0, n), Event::Return, OPEN);
         }
@@ -1104,9 +976,9 @@ mod tests {
     fn an_anchored_watch_judges_the_region_at_the_anchor() {
         let t0 = Instant::now();
         let base = "Hi team. send it to Kip";
-        let mut session = Session::new(
+        let mut session = anchored(
             Script::new(&[base, "Hi team. send it to Hex"]),
-            "send it to Kip".into(),
+            "send it to Kip",
             t0,
             Some(anchor(base, "send it to Kip")),
         );
@@ -1121,9 +993,9 @@ mod tests {
         let t0 = Instant::now();
         // The field at the anchor says something else from the start: nothing
         // anchored ever calls it an edit.
-        let mut session = Session::new(
+        let mut session = anchored(
             Script::new(&["we should go to lunch today"]),
-            "send it to Kip".into(),
+            "send it to Kip",
             t0,
             Some(Anchor { start: 0, len: 14 }),
         );
@@ -1131,10 +1003,10 @@ mod tests {
         let seen = done(session.step(at(t0, 400), Event::FocusOut, OPEN));
         assert_eq!(seen.outcome, Outcome::Lost(Lost::SpanNotFound));
         // An anchor in other units (the paste is in the field, elsewhere) is
-        // given up after a grace, and the strict whole-field rules apply.
-        let mut session = Session::new(
+        // never adopted: the copy there could be an old one.
+        let mut session = anchored(
             Script::new(&["send it to Kip", "send it to Kip", "send it to Kit"]),
-            "send it to Kip".into(),
+            "send it to Kip",
             t0,
             Some(Anchor {
                 start: 500,
@@ -1145,7 +1017,7 @@ mod tests {
         session.step(at(t0, 700), Event::ValueChanged, OPEN);
         session.step(at(t0, 900), Event::ValueChanged, OPEN);
         let seen = done(session.step(at(t0, 1_300), Event::FocusOut, OPEN));
-        assert_eq!(seen.outcome, Outcome::Edited("send it to Kit".into()));
+        assert!(!matches!(seen.outcome, Outcome::Edited(_)));
     }
 
     #[test]
@@ -1155,9 +1027,9 @@ mod tests {
         // the paste is applied, and the paste then lands at its anchor.
         let before = "send it to Kip. ok";
         let after = "send it to Kip. ok send it to Kip";
-        let mut session = Session::new(
+        let mut session = anchored(
             Script::new(&[before, after, "send it to Kip. ok send it to Kit"]),
-            "send it to Kip".into(),
+            "send it to Kip",
             t0,
             Some(Anchor { start: 19, len: 14 }),
         );
@@ -1172,7 +1044,7 @@ mod tests {
     fn nothing_is_an_edit_before_the_paste_was_seen_whole() {
         let t0 = Instant::now();
         for anchor in [None, Some(Anchor { start: 0, len: 6 })] {
-            let mut session = Session::new(Script::new(&["secret"]), "Kip".into(), t0, anchor);
+            let mut session = anchored(Script::new(&["secret"]), "Kip", t0, anchor);
             baseline(&mut session, t0);
             let seen = done(session.step(at(t0, 400), Event::FocusOut, OPEN));
             assert!(!matches!(seen.outcome, Outcome::Edited(_)), "{anchor:?}");
@@ -1182,11 +1054,10 @@ mod tests {
     #[test]
     fn a_late_return_converts_a_blank_field_into_a_send() {
         let t0 = Instant::now();
-        let mut session = Session::new(
+        let mut session = session(
             Script::new(&["send it to Kip", "send it to Kit", "", ""]),
-            "send it to Kip".into(),
+            "send it to Kip",
             t0,
-            None,
         );
         baseline(&mut session, t0);
         session.step(at(t0, 100), Event::ValueChanged, OPEN);
@@ -1202,11 +1073,10 @@ mod tests {
     #[test]
     fn a_fix_after_a_return_in_a_notes_app_is_an_ordinary_read() {
         let t0 = Instant::now();
-        let mut session = Session::new(
+        let mut session = session(
             Script::new(&["send it to Kip", "send it to Kip\n", "send it to Kit\n"]),
-            "send it to Kip".into(),
+            "send it to Kip",
             t0,
-            None,
         );
         baseline(&mut session, t0);
         assert_eq!(session.step(at(t0, 200), Event::Return, OPEN), Step::Wait);
@@ -1222,21 +1092,217 @@ mod tests {
     #[test]
     fn a_huge_paste_is_not_aligned() {
         let t0 = Instant::now();
-        let mut session = Session::new(
+        let mut session = session(
             Script::new(&["word ".repeat(3_000).as_str()]),
             "other ".repeat(40_000),
             t0,
-            None,
         );
         session.step(at(t0, 50), Event::Tick, OPEN);
         let seen = done(session.step(at(t0, 400), Event::FocusOut, OPEN));
         assert_eq!(seen.outcome, Outcome::Lost(Lost::SpanNotFound));
     }
 
+    fn reading(blank: bool, shrank: bool, outcome: Option<Outcome>) -> Input {
+        Input::Read(Reading {
+            trigger: Trigger::ValueChanged,
+            ms: 7,
+            blank,
+            shrank,
+            outcome,
+        })
+    }
+
+    fn kit() -> Outcome {
+        Outcome::Edited("send it to Kit".into())
+    }
+
+    fn kept() -> CorrectionObservation {
+        CorrectionObservation {
+            outcome: kit(),
+            trigger: Trigger::ValueChanged,
+            observed_at_ms: 7,
+        }
+    }
+
+    /// The model, row by row: inputs (each at a time, in ms after the start)
+    /// to what the watch ends with, if it ends, and what it holds.
+    #[test]
+    fn advance_table() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let edited = || reading(false, false, Some(kit()));
+        /// A named row: inputs at times, what the watch ends with, what it holds.
+        type Row = (&'static str, Vec<(u64, Input)>, Option<Finished>, Finished);
+        let cases: Vec<Row> = vec![
+            ("an edit is held", vec![(0, edited())], None, Ok(kept())),
+            (
+                "other text drops it",
+                vec![(0, edited()), (50, reading(false, false, None))],
+                None,
+                Err(Lost::SpanNotFound),
+            ),
+            (
+                "blank with nothing kept is noted and goes on",
+                vec![(0, reading(true, false, None))],
+                None,
+                Err(Lost::ClearedBeforeRead),
+            ),
+            (
+                "blank with something kept waits the grace",
+                vec![(0, edited()), (50, reading(true, false, None))],
+                None,
+                Ok(kept()),
+            ),
+            (
+                "blank still, after the grace, is cleared with no Return",
+                vec![
+                    (0, edited()),
+                    (50, reading(true, false, None)),
+                    (200, reading(true, false, None)),
+                ],
+                Some(Err(Lost::ClearedBeforeRead)),
+                Err(Lost::ClearedBeforeRead),
+            ),
+            (
+                "text again inside the grace forgets the blank",
+                vec![
+                    (0, edited()),
+                    (50, reading(true, false, None)),
+                    (80, edited()),
+                    (200, reading(true, false, None)),
+                ],
+                None,
+                Ok(kept()),
+            ),
+            (
+                "a Return, then blank, is a send",
+                vec![
+                    (0, edited()),
+                    (50, Input::Return),
+                    (60, reading(true, false, None)),
+                ],
+                Some(Ok(kept())),
+                Ok(kept()),
+            ),
+            (
+                "a Return after the blank, inside the grace, is a send too",
+                vec![
+                    (0, edited()),
+                    (50, reading(true, false, None)),
+                    (70, Input::Return),
+                    (75, reading(true, false, None)),
+                ],
+                Some(Ok(kept())),
+                Ok(kept()),
+            ),
+            (
+                "after a Return, shorter text is the clear",
+                vec![
+                    (0, edited()),
+                    (50, Input::Return),
+                    (60, reading(false, true, Some(kit()))),
+                ],
+                Some(Ok(kept())),
+                Ok(kept()),
+            ),
+            (
+                "after a Return, other text is the clear",
+                vec![
+                    (0, edited()),
+                    (50, Input::Return),
+                    (60, reading(false, false, None)),
+                ],
+                Some(Ok(kept())),
+                Ok(kept()),
+            ),
+            (
+                "after a Return, the paste still there is an ordinary read",
+                vec![
+                    (0, reading(false, false, Some(Outcome::Unchanged))),
+                    (50, Input::Return),
+                    (60, edited()),
+                ],
+                None,
+                Ok(kept()),
+            ),
+            (
+                "a Return's window passes",
+                vec![
+                    (0, edited()),
+                    (50, Input::Return),
+                    (2_000, reading(false, false, None)),
+                ],
+                None,
+                Err(Lost::SpanNotFound),
+            ),
+            (
+                "a Return with nothing kept, then blank, is cleared",
+                vec![(0, Input::Return), (10, reading(true, false, None))],
+                Some(Err(Lost::ClearedBeforeRead)),
+                Err(Lost::ClearedBeforeRead),
+            ),
+            (
+                "a failed read never erases what was kept",
+                vec![(0, edited()), (50, Input::Failed(ReadError::Timeout))],
+                None,
+                Ok(kept()),
+            ),
+            (
+                "the element gone ends it with what was kept",
+                vec![(0, edited()), (50, Input::Failed(ReadError::ElementGone))],
+                Some(Ok(kept())),
+                Ok(kept()),
+            ),
+            (
+                "a failed read with nothing kept is why",
+                vec![(0, Input::Failed(ReadError::Secure))],
+                None,
+                Err(Lost::Read(ReadError::Secure)),
+            ),
+            (
+                "a cleared field outranks a failed read",
+                vec![
+                    (0, reading(true, false, None)),
+                    (50, Input::Failed(ReadError::Timeout)),
+                ],
+                None,
+                Err(Lost::ClearedBeforeRead),
+            ),
+        ];
+        for (name, inputs, ends, held) in cases {
+            let mut state = State::new();
+            let mut finished = None;
+            for (at, input) in inputs {
+                (state, finished) = state.advance(input, ms(at));
+            }
+            assert_eq!(finished, ends, "{name}: ends");
+            assert_eq!(state.held, held, "{name}: holds");
+        }
+    }
+
+    /// The limit, stated: a keystroke that shares a tick with the Return that
+    /// sends it is never read, so the edit kept is the word as far as it was
+    /// read: "Ki", not "Kit". A Return read within a tick of a one-character
+    /// change cannot be told from one that came after more typing.
+    #[test]
+    fn a_key_unread_at_the_return_is_the_known_limit() {
+        let t0 = Instant::now();
+        let mut session = session(
+            Script::new(&["send it to Kip", "send it to K", "send it to Ki", ""]),
+            "send it to Kip",
+            t0,
+        );
+        baseline(&mut session, t0);
+        session.step(at(t0, 100), Event::ValueChanged, OPEN);
+        session.step(at(t0, 180), Event::ValueChanged, OPEN);
+        let seen = done(session.step(at(t0, 260), Event::Return, OPEN));
+        assert_eq!(seen.outcome, Outcome::Edited("send it to Ki".into()));
+    }
+
     #[test]
     fn the_pastes_own_focus_change_is_ignored() {
         let t0 = Instant::now();
-        let mut session = Session::new(Script::new(&["send it"]), "send it".into(), t0, None);
+        let mut session = session(Script::new(&["send it"]), "send it", t0);
         assert_eq!(session.step(at(t0, 100), Event::FocusOut, OPEN), Step::Wait);
         assert!(matches!(
             session.step(at(t0, 400), Event::FocusOut, OPEN),
