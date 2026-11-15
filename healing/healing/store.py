@@ -102,7 +102,6 @@ ALTER TABLE clips ADD COLUMN correction_outcome TEXT;
 ALTER TABLE clips ADD COLUMN correction_reason TEXT;
 ALTER TABLE clips ADD COLUMN edited_text TEXT;
 ALTER TABLE clips ADD COLUMN reference_text TEXT;
-ALTER TABLE clips ADD COLUMN classified_at_ms INTEGER;
 CREATE TABLE edits (
     clip_id TEXT NOT NULL REFERENCES clips(clip_id),
     idx INTEGER NOT NULL,
@@ -117,6 +116,10 @@ CREATE TABLE edits (
     CHECK (kind != 'acoustic' OR raw_from != '')
 );
 """
+
+# Added to schema 5 after datasets existed at 5 (so no new version number): `_migrate` adds them
+# to any dataset that lacks them. A fresh dataset gets them the same way.
+LATE_V5_COLUMNS = {"classified_at_ms": "INTEGER"}
 
 MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5]
 
@@ -200,7 +203,15 @@ class Store:
         for step in range(version, SCHEMA_VERSION):
             self.db.executescript(MIGRATIONS[step])
             self.db.execute(f"PRAGMA user_version = {step + 1}")
+        self._add_missing_columns()
         self.db.commit()
+
+    def _add_missing_columns(self) -> None:
+        """Columns added to schema 5 after datasets were already collected at 5."""
+        have = {row["name"] for row in self.db.execute("PRAGMA table_info(clips)")}
+        for name, definition in LATE_V5_COLUMNS.items():
+            if name not in have:
+                self.db.execute(f"ALTER TABLE clips ADD COLUMN {name} {definition}")
 
     def close(self) -> None:
         self.db.close()

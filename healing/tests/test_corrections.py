@@ -180,3 +180,33 @@ def test_v4_dataset_with_rows_migrates_to_v5(tmp_path):
     assert label_corrections(store)["acoustic"] == 1
     row = store.db.execute("SELECT label, reference_text FROM clips").fetchone()
     assert (row["label"], row["reference_text"]) == ("verified", "send it to kit")
+
+
+def test_v5_dataset_made_before_the_classified_marker_gains_the_column(tmp_path):
+    import sqlite3
+
+    from healing import store as store_module
+
+    root = tmp_path / "dataset"
+    root.mkdir()
+    db = sqlite3.connect(root / "dataset.sqlite")
+    for step in range(5):
+        db.executescript(store_module.MIGRATIONS[step])
+    assert "classified_at_ms" not in {r[1] for r in db.execute("PRAGMA table_info(clips)")}  # the old v5
+    db.execute("PRAGMA user_version = 5")
+    db.execute(
+        "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text,"
+        " collected_at_ms, correction_outcome, edited_text, reference_text)"
+        " VALUES ('a', 1, 1, 10, 'dictation', 'send it to kip', 'Send it to Kip.', 5, 'edited',"
+        " 'Send it to Kit.', 'send it to kit')"
+    )
+    db.commit()
+    db.close()
+
+    store = Store(root)
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 5
+    row = store.db.execute("SELECT * FROM clips").fetchone()
+    assert row["classified_at_ms"] is None and row["reference_text"] == "send it to kit"
+    Store(root).close()  # opening again is a no-op
+    assert label_corrections(store)["acoustic"] == 1  # the unmarked row classifies once
+    assert label_corrections(store)["clips"] == 0
