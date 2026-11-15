@@ -420,3 +420,50 @@ def test_baseline_without_a_general_set_is_an_error_the_cli_reports(world, capsy
     world.settings({})
     assert main(["eval", "baseline", "--model", str(world.models["a.gguf"])]) == 1
     assert "no general set" in capsys.readouterr().err
+
+
+def test_nothing_scored_writes_no_eval_file(world, capsys):
+    assert main(["eval", "--model", str(world.models["a.gguf"]), "--sets", "rolling,golden", "--vocabulary", "none"]) == 1
+    assert not list((world.home / "evals").glob("*.json")) if (world.home / "evals").exists() else True
+    assert "n/a" in capsys.readouterr().out  # the table still says why
+
+
+def test_runs_below_one_are_refused(world, capsys):
+    general_set(world.home)
+    assert main(["eval", "--model", str(world.models["a.gguf"]), "--sets", "general", "--runs", "0", "--vocabulary", "none"]) == 2
+    assert "--runs is at least 1" in capsys.readouterr().err
+    with pytest.raises(eval_run.EvalError, match="at least 1"):
+        evaluate(world, ["a.gguf"], ["general"], runs=0, vocabulary="none")
+    assert not world.tmp.joinpath("calls.jsonl").exists()
+
+
+def test_a_set_named_twice_is_scored_once(world):
+    general_set(world.home)
+    document = evaluate(world, ["a.gguf"], ["general", "general"], vocabulary="none")
+    assert [s["set"] for s in document["sets"]] == ["general"] and len(world.calls()) == 1
+
+
+def test_a_write_failure_is_an_error_not_a_traceback(world, capsys, monkeypatch):
+    general_set(world.home)
+    monkeypatch.setattr(eval_run, "write", lambda document: (_ for _ in ()).throw(OSError("disk full")))
+    assert main(["eval", "--model", str(world.models["a.gguf"]), "--sets", "general", "--vocabulary", "none"]) == 1
+    assert "disk full" in capsys.readouterr().err
+
+
+def test_an_edited_row_is_decided_by_the_scoring_policy_not_the_name(world):
+    dataset(world.store)
+    document = evaluate(world, ["a.gguf"], ["edited", "rolling"], vocabulary="none")
+    lines = {l.split()[0]: l for l in eval_run.table(document).splitlines()[1:]}
+    assert lines["edited"].split()[-1] != "n/a" and lines["rolling"].split()[-1] == "n/a"
+    assert eval_run.SET_NAMES == tuple(eval_run.SCORING)
+
+
+def test_repeated_words_in_the_edited_span_are_not_double_credited():
+    """"kit ... kit" scored against a transcript with "kit" once credits one of the two edited positions."""
+    from healing.wer import matched_positions, normalized_words
+
+    matched = matched_positions(normalized_words("kit and the other kit"), normalized_words("kit and the other"), {0, 4})
+    assert matched == [True, True, True, True, False]
+    assert [matched[0], matched[4]].count(True) == 1
+    both = matched_positions(normalized_words("kit kit"), normalized_words("kit"), {0, 1})
+    assert both.count(True) == 1

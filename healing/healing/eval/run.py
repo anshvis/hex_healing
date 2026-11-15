@@ -36,10 +36,9 @@ from healing.eval.bench import (
 )
 from healing.paths import healing_home, hex_support_dir
 from healing.sets import general
-from healing.store import Store, StoreError
+from healing.store import Store, StoreError, dataset_root
 from healing.wer import matched_positions, normalized_words, surface_errors
 
-SET_NAMES = ("rolling", "golden", "general", "edited")
 VOCABULARY_MODES = ("current", "none")
 
 
@@ -58,6 +57,7 @@ SCORING = {
     "general": Scoring(whole_reference=True, formatted=False, edited_words=False),  # LibriSpeech and AMI are unformatted
     "edited": Scoring(whole_reference=False, formatted=False, edited_words=True),
 }
+SET_NAMES = tuple(SCORING)
 
 
 class EvalError(RuntimeError):
@@ -238,6 +238,9 @@ def evaluate(
 ) -> dict:
     if vocabulary not in VOCABULARY_MODES:
         raise EvalError(f"--vocabulary is one of {', '.join(VOCABULARY_MODES)}")
+    if runs < 1:
+        raise EvalError("--runs is at least 1")
+    set_names = list(dict.fromkeys(set_names))  # a set named twice is scored once
     if len({str(m) for m in models}) != len(models):
         raise EvalError("the same model was named twice")
     for model in models:
@@ -337,7 +340,7 @@ def table(document: dict) -> str:
             continue
         for model in models:
             scores = document["scores"][model][name]
-            span = document["edited_span"].get(model) if name == "edited" else None
+            span = document["edited_span"].get(model) if SCORING[name].edited_words else None
             edited = _percent(span["errors"] / span["positions"]) if span and span["positions"] else "n/a"
             lines.append(
                 f"{name:<10}{Path(model).name[:32]:<34}{shown[ref['split_id']]['n']:>6}{_percent(scores['wer']):>8}"
@@ -352,14 +355,17 @@ def main(args) -> int:
     if not args.models:
         print("error: healing eval needs at least one --model <gguf>", file=sys.stderr)
         return 2
-    names = [n.strip() for n in args.sets.split(",") if n.strip()]
+    if args.runs < 1:
+        print("error: --runs is at least 1", file=sys.stderr)
+        return 2
+    names = list(dict.fromkeys(n.strip() for n in args.sets.split(",") if n.strip()))
     unknown = [n for n in names if n not in SET_NAMES]
     if unknown:
         print(f"error: unknown set {unknown[0]!r}; sets are {', '.join(SET_NAMES)}", file=sys.stderr)
         return 2
     store = None
     try:
-        if (healing_home() / "dataset" / "dataset.sqlite").is_file():
+        if (dataset_root() / "dataset.sqlite").is_file():
             store = Store(sweep=False)
         try:
             document = evaluate(
@@ -369,13 +375,14 @@ def main(args) -> int:
         finally:
             if store is not None:
                 store.close()
-    except (EvalError, BenchError, StoreError) as error:
+        if not document["sets"]:  # nothing was scored: say why, and leave no eval file behind
+            print(table(document))
+            print("error: none of the requested sets could be scored", file=sys.stderr)
+            return 1
+        path = write(document)
+    except (EvalError, BenchError, StoreError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    path = write(document)
     print(table(document))
     print(f"\nwrote {path}")
-    if not document["sets"]:
-        print("error: none of the requested sets could be scored", file=sys.stderr)
-        return 1
     return 0
