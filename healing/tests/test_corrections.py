@@ -164,7 +164,7 @@ def test_v4_dataset_with_rows_migrates_to_the_current_schema(tmp_path):
     db.close()
 
     store = Store(root)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION == 6
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION
     row = store.db.execute("SELECT * FROM clips").fetchone()
     assert (row["clip_id"], row["raw_text"], row["label"], row["collected_at_ms"]) == (
         "a", "send it to kip", "verified", 5
@@ -204,7 +204,7 @@ def test_v5_dataset_made_before_the_classified_marker_migrates_to_v6(tmp_path):
     db.close()
 
     store = Store(root)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION
     row = store.db.execute("SELECT * FROM clips").fetchone()
     assert row["classified_at_ms"] is None and row["reference_text"] == "send it to kit"
     Store(root).close()  # opening again is a no-op
