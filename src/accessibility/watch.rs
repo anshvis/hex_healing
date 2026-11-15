@@ -30,6 +30,14 @@ pub enum ReadError {
     Failed,
 }
 
+/// What a bounded read of the field gave.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FieldText {
+    pub text: String,
+    /// Only a window around the caret: the field held more than a read takes.
+    pub windowed: bool,
+}
+
 const AX_ERROR_INVALID_UI_ELEMENT: i32 = -25202;
 const AX_ERROR_CANNOT_COMPLETE: i32 = -25204;
 const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25205;
@@ -56,7 +64,7 @@ fn read_around_caret(
     element: &CfObject,
     characters: i64,
     max_chars: usize,
-) -> Result<String, ReadError> {
+) -> Result<FieldText, ReadError> {
     let caret = copy_range(element, c"AXSelectedTextRange").ok_or(ReadError::TooLarge)?;
     let start = (caret.location - (max_chars / 2) as isize).max(0);
     let length = (characters as isize - start).min(max_chars as isize);
@@ -68,6 +76,10 @@ fn read_around_caret(
         },
         Keep::Head,
     )
+    .map(|text| FieldText {
+        text,
+        windowed: true,
+    })
     .ok_or(ReadError::Failed)
 }
 
@@ -78,7 +90,7 @@ fn read_around_caret(
 pub fn read_value_bounded(
     element: &RetainedElement,
     max_chars: usize,
-) -> Result<String, ReadError> {
+) -> Result<FieldText, ReadError> {
     let element = &element.0;
     read_attribute(element, c"AXRole")?;
     if is_secure_text_field(element) {
@@ -89,19 +101,26 @@ pub fn read_value_bounded(
     {
         return read_around_caret(element, characters, max_chars);
     }
+    // No string value (a web view, a terminal) is a field this cannot read,
+    // not an empty one.
     let Some(value) = read_attribute(element, c"AXValue")? else {
-        return Ok(String::new());
+        return Err(ReadError::Failed);
     };
     // SAFETY: `value` is a live Core Foundation object.
     if unsafe { CFGetTypeID(value.0) != CFStringGetTypeID() } {
-        return Ok(String::new());
+        return Err(ReadError::Failed);
     }
     // SAFETY: the type was checked as a string just above.
     let length = unsafe { CFStringGetLength(value.0) }.max(0);
     if length as usize > max_chars {
         return read_around_caret(element, length as i64, max_chars);
     }
-    Ok(cf_string(value.0).unwrap_or_default())
+    cf_string(value.0)
+        .map(|text| FieldText {
+            text,
+            windowed: false,
+        })
+        .ok_or(ReadError::Failed)
 }
 
 /// What an observer reported.

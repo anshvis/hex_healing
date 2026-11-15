@@ -195,7 +195,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
-    use crate::accessibility::ReadError;
+    use crate::accessibility::{FieldText, ReadError};
     use crate::dictation::correction_watch::session::{Lost, Trigger};
     use crate::dictation::correction_watch::{Pending, history_for_test};
     use crate::history::{HistoryDraft, HistoryKind};
@@ -208,8 +208,11 @@ mod tests {
     struct Fake<'a>(&'a Cell<&'static str>);
 
     impl Field for Fake<'_> {
-        fn read(&self) -> Result<String, ReadError> {
-            Ok(self.0.get().to_string())
+        fn read(&self) -> Result<FieldText, ReadError> {
+            Ok(FieldText {
+                text: self.0.get().to_string(),
+                windowed: false,
+            })
         }
     }
 

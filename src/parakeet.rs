@@ -1114,8 +1114,7 @@ fn finish_output(
                             // clipboard while Hex saved it) keeps the text
                             // for Paste last dictation, as above, so the
                             // dictation isn't lost.
-                            // Labs › Learn from corrections watches a pasted
-                            // field, not a Send or a copy only.
+                            // Labs › Learn from corrections: not a Send or copy only.
                             if matches!(mode, PasteMode::Continue) {
                                 watch = Watch::before(corrections, history);
                             }
@@ -1254,13 +1253,11 @@ fn record_history(
         model,
         model_id,
     };
-    match history.record(draft) {
-        Ok(id) => id,
-        Err(error) => {
-            tracing::warn!(%error, "could not record dictation history");
-            None
-        }
-    }
+    history
+        .record(draft)
+        .inspect_err(|error| tracing::warn!(%error, "could not record dictation history"))
+        .ok()
+        .flatten()
 }
 
 fn paste_meeting_delta(paste: &mut impl FnMut(&str, PasteMode) -> Result<()>) -> Result<String> {

@@ -45,8 +45,14 @@ shortcut listener saw after the paste (`dictation/key_counts`, a count the
 listener bumps, as for YOLO mode's Escape; no key-state poll, no event tap of
 its own) that left the field empty or shorter, or 30 s. The kept read is the
 last one in which the field still held the pasted text, so a chat field
-cleared by send still yields the edit; a read that finds other, non-empty text
-drops it. One gate (the lab with its managed lock,
+cleared by send still yields the edit: a blank read after a kept text ends the
+watch with it (a send button, Cmd+Return), and for a second after a Return the
+field shortening or holding other text does too, because the app clears the
+field a moment after the listener counts the Return. Past that, a read that
+finds other, non-empty text drops the kept read. A field with no string value
+(a web view, a terminal) is `read_failed`, never an empty one, and a field over
+8,192 characters is read around the caret and can show the paste whole or not
+at all, never an edit of it. One gate (the lab with its managed lock,
 `labs::learn_from_corrections`) is checked before every read and before a
 queued target starts, and Hex's own pid is never observed. The watch clock
 starts when the paste completes, not after History's write. Outcome IDs:
@@ -58,9 +64,16 @@ milliseconds only.
 
 Alignment (`locate.rs`) is a token-level local alignment of the pasted text
 against the field. A one-letter-off word of three or more letters is a near
-match, so "Kip" to "Kit" aligns even alone. The aligned core must cover half
-the pasted tokens (all of them below three) on its own, so an unrelated field
-that shares a word or two ("go to bed" against "send to Kip") is not found.
+match, so "Kip" to "Kit" aligns in a longer text. The aligned core must cover
+half the pasted tokens (all of them below three) on its own, counting only
+exact and near pairs, with at least two exact words in a text of three or
+more, and at most one pasted token may be left over at either end; so an
+unrelated field that shares a word or a phrase ("go to bed" against "send to
+Kip", "to be honest the plan" against "to be honest I agree") is not found.
+Whole words only: "Yes" is not found in "Yesterday", and a one-word paste is an
+edit only when the field is that one word. Text without whitespace (CJK) is one
+token, so it is effectively unsupported; a caret anchor (accepting only spans
+near the caret recorded at the paste) is a known gap, not built.
 Given such a core, a replaced first or last word that is not near ("Hanks" to
 "Hex") scores below zero and sits outside it, so the span extends over at most
 one field token at each end that has a pasted token left over, and never across
