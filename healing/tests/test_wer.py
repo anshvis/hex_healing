@@ -46,3 +46,13 @@ def test_one_alignment_serves_every_count():
     assert matched_positions(["a", "b", "c"], ["a", "x", "c"]) == [True, False, True]
     assert [w for w, _, _ in word_spans("Hello, World")] == normalized_words("Hello, World")
     assert positions_of("send it to kit", [(11, 14)]) == [[3, 4]]
+
+
+def test_a_repeated_word_is_matched_when_any_optimal_alignment_matches_it():
+    from healing.wer import matched_positions
+
+    # "a b a" against "a": two equally good alignments, keeping the first or the last "a"
+    assert matched_positions(["a", "b", "a"], ["a"]) == [True, False, True]
+    assert matched_positions(["a", "a"], ["a"]) == [True, True]
+    assert matched_positions(["x", "a", "y"], ["x", "y"]) == [True, False, True]
+    assert matched_positions(["a", "b"], ["b", "a"]) == [True, True]  # a swap costs 2 whichever word is kept

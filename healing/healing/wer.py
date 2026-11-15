@@ -33,12 +33,8 @@ def normalized_words(text: str) -> list[str]:
     return [word for word, _, _ in word_spans(text)]
 
 
-def align(reference: Sequence, hypothesis: Sequence) -> tuple[int, list[bool]]:
-    """(edit distance, per reference item whether a minimum-edit alignment pairs it with an equal one).
-
-    The one edit-distance table: word errors, surface errors, matched positions and the phonetic
-    scores' character distance all read it.
-    """
+def _table(reference: Sequence, hypothesis: Sequence) -> list[list[int]]:
+    """Edit distances of every prefix of `reference` against every prefix of `hypothesis`."""
     rows, cols = len(reference), len(hypothesis)
     table = [[0] * (cols + 1) for _ in range(rows + 1)]
     for i in range(rows + 1):
@@ -49,20 +45,30 @@ def align(reference: Sequence, hypothesis: Sequence) -> tuple[int, list[bool]]:
         for j in range(1, cols + 1):
             cost = 0 if reference[i - 1] == hypothesis[j - 1] else 1
             table[i][j] = min(table[i - 1][j - 1] + cost, table[i - 1][j] + 1, table[i][j - 1] + 1)
-    matched = [False] * rows
-    i, j = rows, cols
-    while i > 0 and j > 0:
-        same = reference[i - 1] == hypothesis[j - 1]
-        if same and table[i][j] == table[i - 1][j - 1]:
-            matched[i - 1] = True
-            i, j = i - 1, j - 1
-        elif table[i][j] == table[i - 1][j - 1] + 1:
-            i, j = i - 1, j - 1
-        elif table[i][j] == table[i - 1][j] + 1:
-            i -= 1
-        else:
-            j -= 1
-    return table[rows][cols], matched
+    return table
+
+
+def align(reference: Sequence, hypothesis: Sequence) -> tuple[int, list[bool]]:
+    """(edit distance, per reference item whether SOME minimum-edit alignment pairs it with an equal item).
+
+    Several alignments can be equally good when a word repeats ("a b a" against "a"). A reference
+    position counts as matched when any of them matches it, so which of two tied words an
+    alignment happens to keep never decides the score: a position is wrong only if no optimal
+    alignment can match it. The one edit-distance table: word errors, surface errors, matched
+    positions and the phonetic scores' character distance all read it.
+    """
+    rows, cols = len(reference), len(hypothesis)
+    forward = _table(reference, hypothesis)
+    total = forward[rows][cols]
+    backward = _table(reference[::-1], hypothesis[::-1])  # backward[a][b]: the last a against the last b
+    matched = [
+        any(
+            reference[i] == hypothesis[j] and forward[i][j] + backward[rows - i - 1][cols - j - 1] == total
+            for j in range(cols)
+        )
+        for i in range(rows)
+    ]
+    return total, matched
 
 
 def word_errors(expected: str, actual: str) -> tuple[int, int]:
