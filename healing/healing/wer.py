@@ -108,12 +108,6 @@ def surface_errors(expected: str, actual: str) -> tuple[int, int]:
     return distance(reference, actual.split()), len(reference)
 
 
-def matched_positions(reference: list[str], hypothesis: list[str], wanted: Iterable[int] | None = None) -> list[bool]:
-    """For each reference word, whether the chosen minimum-edit alignment pairs it with the same word
-    (see `align`: one alignment, the one that matches the most `wanted` positions)."""
-    return align(reference, hypothesis, wanted)[1]
-
-
 def positions_of(text: str, spans: list[tuple[int, int]]) -> list[list[int]]:
     """Word ranges [start, end), in `normalized_words(text)`, touched by the character `spans`."""
     words = word_spans(text)

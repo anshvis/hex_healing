@@ -460,12 +460,12 @@ def test_an_edited_row_is_decided_by_the_scoring_policy_not_the_name(world):
 
 def test_repeated_words_in_the_edited_span_are_not_double_credited():
     """"kit ... kit" scored against a transcript with "kit" once credits one of the two edited positions."""
-    from healing.wer import matched_positions, normalized_words
+    from healing.wer import align, normalized_words
 
-    matched = matched_positions(normalized_words("kit and the other kit"), normalized_words("kit and the other"), {0, 4})
+    matched = align(normalized_words("kit and the other kit"), normalized_words("kit and the other"), {0, 4})[1]
     assert matched == [True, True, True, True, False]
     assert [matched[0], matched[4]].count(True) == 1
-    both = matched_positions(normalized_words("kit kit"), normalized_words("kit"), {0, 1})
+    both = align(normalized_words("kit kit"), normalized_words("kit"), {0, 1})[1]
     assert both.count(True) == 1
 
 

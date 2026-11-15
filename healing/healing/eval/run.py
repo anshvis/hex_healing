@@ -37,7 +37,7 @@ from healing.eval.bench import (
 from healing.paths import healing_home, hex_support_dir
 from healing.sets import general
 from healing.store import Store, StoreError, dataset_root
-from healing.wer import matched_positions, normalized_words, surface_errors
+from healing.wer import align, normalized_words, surface_errors
 
 VOCABULARY_MODES = ("current", "none")
 
@@ -192,7 +192,7 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict]]:
         positions = sidecar.get(record["id"], {}).get("edited_positions")
         if policy.edited_words and positions:
             wanted = {i for start, end in positions for i in range(start, end)}
-            matched = matched_positions(normalized_words(definition["expected"]), normalized_words(transcript), wanted)
+            matched = align(normalized_words(definition["expected"]), normalized_words(transcript), wanted)[1]
             wrong = sum(1 for start, end in positions for i in range(start, end) if not matched[i])
             total = sum(end - start for start, end in positions)
             row["edited_errors"], row["edited_positions"] = wrong, total
