@@ -251,3 +251,29 @@ def test_a_rejected_clip_loses_its_reference(store):
     review(store, cid, "reject")
     labels.label_all(store)
     assert label_of(store, cid) == ("unlabelled", 0) and row(store, cid)["reference_text"] is None
+
+
+@pytest.mark.parametrize("start", [5, 6])
+def test_datasets_at_each_earlier_version_migrate_to_current(tmp_path, monkeypatch, start):
+    """A v5 and a v6 dataset (whatever the base put at 6) both reach the current schema with their rows."""
+    monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))
+    root = tmp_path / "home" / "dataset"
+    (root / "audio").mkdir(parents=True)
+    db = sqlite3.connect(root / "dataset.sqlite")
+    for step in range(start):
+        migration = MIGRATIONS[step]
+        migration(db) if callable(migration) else db.executescript(migration)
+    db.execute(f"PRAGMA user_version = {start}")
+    db.execute(
+        "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, kind, raw_text, final_text, collected_at_ms)"
+        " VALUES ('c1', 1, 1, 1, 'dictation', 'a b c', 'A b c.', 1)"
+    )
+    db.commit()
+    db.close()
+    store = Store()
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION
+    columns = {r[1] for r in store.db.execute("PRAGMA table_info(clips)")}
+    assert {"classified_at_ms", "weight", "edited_positions", "review_strategy"} <= columns
+    assert "sidecar_sha256" in {r[1] for r in store.db.execute("PRAGMA table_info(splits)")}
+    assert store.db.execute("SELECT raw_text FROM clips").fetchone()[0] == "a b c"
+    store.close()
