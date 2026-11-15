@@ -1271,7 +1271,7 @@ impl Parakeet {
             return Err(eyre!("{} is not installed", definition.name));
         }
         let path = model_path(definition)?;
-        let mut parakeet = Self::load_from(&path, true, Some(selection))?;
+        let mut parakeet = Self::load_from(&path, true, Some(selection), None)?;
         parakeet.prewarm()?;
         let stream_run = parakeet.stream_run_options();
         let architecture = match definition.runtime {
@@ -1309,14 +1309,20 @@ impl Parakeet {
             .with_stream(&options, stream_options, cancel, drive)
     }
 
-    pub(crate) fn load_for_benchmark(model_path: &std::path::Path) -> Result<Self> {
-        Self::load_from(model_path, false, None)
+    /// Loads `model_path` for the benchmark, every run biased with `bias`
+    /// when given, set once on the run options.
+    pub(crate) fn load_for_benchmark(
+        model_path: &std::path::Path,
+        bias: Option<crate::transcription::gguf_session::RunBias>,
+    ) -> Result<Self> {
+        Self::load_from(model_path, false, None, bias)
     }
 
     fn load_from(
         model_path: &std::path::Path,
         diagnostics: bool,
         selection: Option<&TranscriptionSelection>,
+        bias: Option<crate::transcription::gguf_session::RunBias>,
     ) -> Result<Self> {
         if diagnostics {
             TRANSCRIBE_LOGGING.call_once(transcribe_cpp::init_logging);
@@ -1387,6 +1393,9 @@ impl Parakeet {
             }
             options.language = runtime_language;
         }
+        if let Some(bias) = bias {
+            crate::transcription::gguf_session::fixed_run_bias(&model, bias, &mut options)?;
+        }
         let session = OfflineGgufSession::new(model)?;
         let weights_bytes = std::fs::metadata(model_path).map_or(0, |meta| meta.len() as usize);
         Ok(Self {
@@ -1443,27 +1452,6 @@ impl Parakeet {
 
     pub(crate) fn name(&self) -> &str {
         &self.name
-    }
-
-    /// Biases every later run with `bias` (as [`crate::dictation::vocabulary::bias_for`]
-    /// builds it), or with nothing. Held on this transcriber's own options, so no
-    /// global vocabulary or boost state changes; the benchmark's way to bias a run
-    /// exactly as dictation does.
-    pub(crate) fn set_run_bias(
-        &mut self,
-        bias: Option<(Vec<String>, transcribe_cpp::ParakeetVocabularyOptions)>,
-    ) {
-        match bias {
-            Some((terms, options)) => {
-                self.options.vocabulary = terms;
-                self.options.family =
-                    Some(transcribe_cpp::RunExtension::ParakeetVocabulary(options));
-            }
-            None => {
-                self.options.vocabulary = Vec::new();
-                self.options.family = None;
-            }
-        }
     }
 
     pub(crate) fn matches_selection(&self, selection: &TranscriptionSelection) -> bool {
@@ -1582,7 +1570,7 @@ mod tests {
             model: TranscriptionModelId::CohereTranscribe,
             language: "en".into(),
         };
-        let mut model = Parakeet::load_from(&model_path, false, Some(&selection)).unwrap();
+        let mut model = Parakeet::load_from(&model_path, false, Some(&selection), None).unwrap();
         eprintln!(
             "Cohere maximum chunk: {:?} samples",
             model.max_audio_samples
@@ -1912,6 +1900,7 @@ mod tests {
             &PathBuf::from(std::env::var("HEX_STREAM_MODEL").unwrap()),
             false,
             Some(&selection),
+            None,
         )
         .unwrap();
         model.stream = model
@@ -2194,5 +2183,5 @@ mod dictation_corpus_tests;
 /// recordings without the installed model catalog.
 #[cfg(test)]
 pub(crate) fn load_test_model(path: &std::path::Path) -> Result<Parakeet> {
-    Parakeet::load_from(path, false, Some(&TranscriptionSelection::default()))
+    Parakeet::load_from(path, false, Some(&TranscriptionSelection::default()), None)
 }

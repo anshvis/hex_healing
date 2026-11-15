@@ -101,6 +101,7 @@ fn release_boundary_harness() {
         &PathBuf::from(std::env::var("HEX_TAIL_MODEL").unwrap()),
         false,
         Some(&TranscriptionSelection::default()),
+        None,
     )
     .unwrap();
     for path in std::env::var("HEX_TAIL_WAVS").unwrap().split(',') {
