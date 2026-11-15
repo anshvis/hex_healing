@@ -99,46 +99,57 @@ class LshIndex:
         }
 
 
+class NearIndex:
+    """Normalized texts indexed once for near-duplicate queries.
+
+    Equal texts and texts whose 3-gram Jaccard is at least `JACCARD` are near; texts under 3 tokens
+    have no 3-grams and are near only when equal. Built once, queried many times: a verify of 2,000
+    members against 2,000 texts builds this once, not once per member.
+    """
+
+    def __init__(self, keys: Iterable[str]):
+        self.keys = sorted(set(keys))
+        self.position = {key: i for i, key in enumerate(self.keys)}
+        self.grams: dict[int, frozenset[str]] = {}
+        self.index = LshIndex()
+        for position, key in enumerate(self.keys):
+            found = shingles(key)
+            if found is not None:
+                self.grams[position] = found
+                self.index.add(position, found)
+
+    def near(self, key: str) -> Iterator[str]:
+        """Indexed texts equal to `key` (itself, when indexed) or near-duplicates of it, in order."""
+        if key in self.position:
+            yield key
+        found = shingles(key)
+        if found is None:
+            return
+        for other in sorted(self.index.query(found)):
+            if self.keys[other] != key and jaccard(self.grams[other], found) >= JACCARD:
+                yield self.keys[other]
+
+
 def near_duplicate_pairs(keys: Iterable[str]) -> Iterator[tuple[str, str]]:
     """Pairs of distinct normalized texts whose 3-gram Jaccard is at least `JACCARD`.
 
     Texts under 3 tokens have no 3-grams and pair with nothing here (callers match them by equality).
     """
-    unique = sorted(set(keys))
-    index, grams = LshIndex(), {}
-    for position, key in enumerate(unique):
-        found = shingles(key)
-        if found is None:
-            continue
-        for earlier in sorted(index.query(found)):
-            if jaccard(grams[earlier], found) >= JACCARD:
-                yield unique[earlier], key
-        grams[position] = found
-        index.add(position, found)
+    near = NearIndex(keys)
+    for position, key in enumerate(near.keys):
+        for other in near.near(key):
+            if near.position[other] < position:
+                yield other, key
 
 
 def near_duplicate_cross(left: Iterable[str], right: Iterable[str]) -> Iterator[tuple[str, str]]:
-    """(left, right) pairs of normalized texts that are equal or whose 3-gram Jaccard is at least
-    `JACCARD`. A direct test between two sets, with no clustering and so nothing transitive: an
-    overlap exists only when two texts really are near-duplicates. Texts under 3 tokens match by
-    equality only."""
-    unique_right = sorted(set(right))
-    index, grams = LshIndex(), {}
-    for position, key in enumerate(unique_right):
-        found = shingles(key)
-        if found is not None:
-            grams[position] = found
-            index.add(position, found)
-    positions = {key: i for i, key in enumerate(unique_right)}
+    """(left, right) pairs of normalized texts that are equal or near. A direct test between two sets,
+    with no clustering and so nothing transitive: an overlap exists only when two texts really are
+    near-duplicates."""
+    near = NearIndex(right)
     for key in sorted(set(left)):
-        if key in positions:
-            yield key, key
-        found = shingles(key)
-        if found is None:
-            continue
-        for other in sorted(index.query(found)):
-            if unique_right[other] != key and jaccard(grams[other], found) >= JACCARD:
-                yield key, unique_right[other]
+        for other in near.near(key):
+            yield key, other
 
 
 @dataclass
