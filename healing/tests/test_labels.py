@@ -242,3 +242,12 @@ def test_a_v6_dataset_gains_the_sidecar_pin_and_frozen_member_updates_are_refuse
     with pytest.raises(sqlite3.DatabaseError):
         store.db.execute("INSERT OR REPLACE INTO split_members (split_id, clip_id) VALUES ('g', 'c1')")
     store.close()
+
+
+def test_a_rejected_clip_loses_its_reference(store):
+    cid = add_clip(store, 1, outcome="unchanged")
+    labels.label_all(store)
+    assert row(store, cid)["reference_text"] == "send it to kip"
+    review(store, cid, "reject")
+    labels.label_all(store)
+    assert label_of(store, cid) == ("unlabelled", 0) and row(store, cid)["reference_text"] is None

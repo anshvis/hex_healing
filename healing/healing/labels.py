@@ -84,7 +84,7 @@ def refresh(store: Store, clip_ids: list[str] | None = None) -> Counter:
         if not rejected and current == "verified" and label != "verified":
             label, reference = current, row["reference_text"]  # a confirmed clip is never downgraded
         weight = WEIGHTS[label]
-        reference = reference if reference is not None else row["reference_text"]
+        reference = None if rejected else (reference if reference is not None else row["reference_text"])
         positions = row["edited_positions"] if label == "strong" else None
         db.execute(
             "UPDATE clips SET label = ?, weight = ?, reference_text = ?, edited_positions = ?,"

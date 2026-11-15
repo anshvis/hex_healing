@@ -23,6 +23,7 @@ import soundfile
 from healing.manifest import ManifestError, build_manifest, verify, write_set
 
 SAMPLE_RATE = 16_000
+GENERAL_ID = "general-v1"
 
 HF_URL = "https://huggingface.co/datasets/{repo}/resolve/{revision}/{path}"
 # LibriSpeech test-other through Hugging Face's parquet copy of openslr's

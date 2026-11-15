@@ -104,9 +104,8 @@ def test_since_cutoff_takes_only_clips_of_later_sessions(store):
     straddle_a = add_clip(store, 2, ts=cutoff - 1000)
     straddle_b = add_clip(store, 3, ts=cutoff + 1000)  # same session as the one before the cut-off
     after = add_clip(store, 4, ts=cutoff + DAY)
-    splits.ensure_cutoff(store, "current", cutoff)
     script = Script("", "", "")
-    result = drive(store, script, n=10, since_cutoff=True)
+    result = drive(store, script, n=10, since_cutoff=True, cutoff_ms=cutoff)
     assert result.shown == 1
     assert [r["clip_id"] for r in store.db.execute("SELECT clip_id FROM reviews")] == [after]
     assert before and straddle_a and straddle_b
@@ -120,8 +119,7 @@ def test_since_cutoff_skips_clips_near_a_golden_one(store):
     store.db.execute("INSERT INTO splits (split_id, kind, created_at_ms) VALUES ('golden-v1', 'golden', 1)")
     store.db.execute("INSERT INTO split_members VALUES ('golden-v1', ?)", (gold,))
     store.db.commit()
-    splits.ensure_cutoff(store, "current", cutoff)
-    drive(store, Script("", ""), n=10, since_cutoff=True)
+    drive(store, Script("", ""), n=10, since_cutoff=True, cutoff_ms=cutoff)
     assert [r["clip_id"] for r in store.db.execute("SELECT clip_id FROM reviews")] == [free]
     assert twin
 
@@ -141,3 +139,14 @@ def test_the_command_reads_stdin(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(review, "run", lambda *a, **k: review.ReviewResult(available=1, accepted=1))
     assert main(["review", "--n", "1"]) == 0
     assert "accepted 1" in capsys.readouterr().out
+
+
+def test_an_uncertain_review_does_not_shrink_the_random_frame(store):
+    a = add_clip(store, 1, raw="clip number 1 says hello there", outcome="unchanged")
+    b = add_clip(store, 2, raw="clip number 2 says hello there")
+    labels_refresh = __import__("healing.labels", fromlist=["refresh"]).refresh
+    labels_refresh(store)
+    drive(store, Script(""), n=1, strategy="uncertain")
+    assert {r["clip_id"] for r in review.candidates(store, "random")} == {a, b}
+    store.db.execute("INSERT INTO reviews (clip_id, reviewed_at_ms, action, text, strategy) VALUES (?, 1, 'reject', NULL, 'random')", (b,))
+    assert {r["clip_id"] for r in review.candidates(store, "random")} == {a}

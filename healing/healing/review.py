@@ -57,9 +57,12 @@ class ReviewResult:
 
 def candidates(store: Store, strategy: str, only: set[str] | None = None) -> list:
     """Unreviewed clips with audio that `strategy` may show; `only` limits them to those ids."""
+    # A random review draws from every clip not yet sampled at random (an uncertain review is not a
+    # sample, so it doesn't shrink the frame) and never a clip you rejected.
+    seen = "r.strategy = 'random' OR r.action = 'reject'" if strategy == "random" else "1 = 1"
     base = (
         f"SELECT c.* FROM clips c WHERE {labels.HAS_AUDIO} AND c.kind = 'dictation' AND c.golden = 0"
-        " AND NOT EXISTS (SELECT 1 FROM reviews r WHERE r.clip_id = c.clip_id)"
+        f" AND NOT EXISTS (SELECT 1 FROM reviews r WHERE r.clip_id = c.clip_id AND ({seen}))"
     )
     if strategy == "uncertain":
         # The benchmark exposes no model confidence, so: the newest weak clips.
@@ -88,7 +91,6 @@ def review_clips(
 ) -> ReviewResult:
     """Show `rows` in order. `after(row, action)` runs once each answer is saved and returns True to stop."""
     result = ReviewResult(available=len(rows))
-    store.db.execute("PRAGMA busy_timeout = 60000")  # a scheduled collect may hold the file for a moment
     for index, row in enumerate(rows, 1):
         shown = row["reference_text"] or row["raw_text"]
         audio = store.audio_path(row["audio_sha256"])
@@ -135,7 +137,6 @@ def run(
     strategy: str = "random",
     since_cutoff: bool = False,
     cutoff_ms: int | None = None,
-    parent: str = "current",
     *,
     player: Player = afplay,
     ask: Ask = input,
@@ -150,7 +151,7 @@ def run(
     if since_cutoff:
         if strategy != "random":
             raise ReviewError("--since-cutoff fills the rolling set, which takes random reviews only")
-        cutoff = splits.ensure_cutoff(store, parent, cutoff_ms)
+        cutoff = splits.cutoff_for(cutoff_ms)
         only = splits.rolling_eligible_ids(store, cutoff)
     pool = candidates(store, strategy, only)
     if not pool:
@@ -164,6 +165,8 @@ def main(args) -> int:
     from healing.store import Store, StoreError
 
     try:
+        # No `process_lock`: a review is minutes of waiting on you, and holding the lock would stall the
+        # scheduled collect. Each answer is one short transaction; the store's busy timeout covers contention.
         store = Store(sweep=False)
         try:
             result = run(store, args.n, args.strategy, args.since_cutoff)

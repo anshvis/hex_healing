@@ -143,6 +143,11 @@ def _private_file(path: Path, data: bytes) -> None:
         file.write(data)
 
 
+def sidecar_digest(out: Path) -> str:
+    """The sha256 of the sidecar as it is on disk now."""
+    return hashlib.sha256((out / "clips.jsonl").read_bytes()).hexdigest()
+
+
 def sidecar_sha256(out: Path) -> str | None:
     """The sidecar hash the pin file records, or None for a set written before it was pinned."""
     for line in (out / "manifest.sha256").read_text().splitlines()[1:]:

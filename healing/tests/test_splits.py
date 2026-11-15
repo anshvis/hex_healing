@@ -155,14 +155,14 @@ def test_strong_and_weak_never_gate(store):
     build_at(store)
     assert splits.verify(store) == []
     rolling = store.db.execute("SELECT split_id FROM splits WHERE kind = 'rolling' AND manifest_path IS NOT NULL").fetchone()[0]
-    for bad, label in ((ids["strong"][0], "strong"), (ids["weak"][0], "weak")):
-        store.db.execute("UPDATE clips SET label = ? WHERE clip_id = (SELECT clip_id FROM split_members WHERE split_id = ? LIMIT 1)", (label, rolling))
+    member = store.db.execute("SELECT clip_id FROM split_members WHERE split_id = ? LIMIT 1", (rolling,)).fetchone()[0]
+    for label in ("strong", "weak"):
+        store.db.execute("UPDATE clips SET label = ? WHERE clip_id = ?", (label, member))
         problems = splits.verify(store)
         assert any(f"comes from a {label} label" in p for p in problems), problems
-        store.db.execute("UPDATE clips SET label = 'verified' WHERE label = ?", (label,))
-        store.db.execute("UPDATE clips SET label = 'verified' WHERE clip_id IN (SELECT clip_id FROM split_members WHERE split_id = ?)", (rolling,))
+        store.db.execute("UPDATE clips SET label = 'verified' WHERE clip_id = ?", (member,))
         store.db.commit()
-        assert bad
+        assert splits.verify(store) == []  # restored: the check follows the data, not a stale result
 
 
 def test_no_split_cluster_is_shared_and_the_kip_kit_pair_never_straddles(store):
@@ -173,14 +173,15 @@ def test_no_split_cluster_is_shared_and_the_kip_kit_pair_never_straddles(store):
     labels.label_all(store)
     verify_random(store, [kit])
     result = build_at(store)
-    assert row(store, kip)["split_cluster"] == row(store, kit)["split_cluster"]
+    clusters = splits.clip_clusters(store.db)
+    assert clusters[kip] == clusters[kit]
     rolling = {r[0] for r in store.db.execute("SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'rolling'")}
     train = {r[0] for r in store.db.execute("SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'train'")}
     assert kit in rolling and kip not in train
-    tests = {row(store, c)["split_cluster"] for c in rolling} | {
-        row(store, r[0])["split_cluster"] for r in store.db.execute(
+    tests = {clusters[c] for c in rolling} | {
+        clusters[r[0]] for r in store.db.execute(
             "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'edited'")}
-    assert train and not {row(store, c)["split_cluster"] for c in train} & tests
+    assert train and not {clusters[c] for c in train} & tests
     assert result.excluded_train > 0
     assert splits.verify(store) == []
 
@@ -226,13 +227,32 @@ def test_rebuild_replaces_the_previous_sets(store):
     assert len([k for k in kept if k.startswith("rolling-")]) == 1
 
 
-def test_cutoff_is_kept_between_builds(store):
-    assert splits.ensure_cutoff(store, "current", now=CUTOFF) == CUTOFF - 14 * DAY
-    assert splits.ensure_cutoff(store, "current", now=CUTOFF + 5 * DAY) == CUTOFF - 14 * DAY
-    assert splits.ensure_cutoff(store, "current", CUTOFF, now=CUTOFF + 5 * DAY) == CUTOFF
-    assert splits.ensure_cutoff(store, "current", now=CUTOFF + 9 * DAY) == CUTOFF
+def test_cutoff_slides_and_an_override_wins():
+    assert splits.cutoff_for(now=CUTOFF) == CUTOFF - 14 * DAY
+    assert splits.cutoff_for(now=CUTOFF + 5 * DAY) == CUTOFF - 9 * DAY  # D-40: not fixed at the first build
+    assert splits.cutoff_for(CUTOFF, now=CUTOFF + 5 * DAY) == CUTOFF
 
 
+def test_a_strong_clip_that_ages_past_the_window_becomes_trainable(store):
+    ids, _ = build_world(store)
+    strong = sorted(set(ids["strong"]) & set(ids["after"]))[0]
+    build_at(store)
+    assert strong in {r[0] for r in store.db.execute("SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'edited'")}
+    assert strong not in splits.train_ids(store)
+    later = store.db.execute("SELECT timestamp_ms FROM clips WHERE clip_id = ?", (strong,)).fetchone()[0] + 20 * DAY
+    splits.build(store, now=later + 14 * DAY)  # the clip's session is now older than the window
+    assert strong in splits.train_ids(store)
+    assert strong not in {r[0] for r in store.db.execute("SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind = 'edited'")}
+
+
+def test_train_ids_is_leak_free_where_trainable_is_not(store):
+    ids, _ = build_world(store)
+    build_at(store)
+    test_members = {r[0] for r in store.db.execute(
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind IN ('rolling', 'edited')")}
+    assert test_members & {r["clip_id"] for r in labels.trainable(store)}  # raw trainable holds test clips
+    assert not test_members & set(splits.train_ids(store))
+    assert splits.verify(store) == []
 def test_small_rolling_flagged_by_words(store):
     build_world(store)
     result = build_at(store)
@@ -288,7 +308,7 @@ def test_term_count_matches_the_benchmark_rules():
 
 @pytest.fixture
 def small_golden(monkeypatch):
-    monkeypatch.setattr(splits, "GOLDEN_SIZE", 5)
+    monkeypatch.setattr(golden, "GOLDEN_SIZE", 5)
 
 
 class Accept:
@@ -362,10 +382,11 @@ def test_golden_rejects_are_not_added(store, small_golden):
 def test_golden_clusters_are_excluded_from_rolling_and_train(store, small_golden):
     freeze_golden(store)
     result = build_at(store)
-    gold_clusters = {row(store, r[0])["split_cluster"] for r in store.db.execute("SELECT clip_id FROM split_members WHERE split_id = 'golden-v1'")}
+    clusters = splits.clip_clusters(store.db)
+    gold_clusters = {clusters[r[0]] for r in store.db.execute("SELECT clip_id FROM split_members WHERE split_id = 'golden-v1'")}
     other = store.db.execute(
         "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.kind IN ('rolling', 'train')").fetchall()
-    assert not {row(store, r[0])["split_cluster"] for r in other} & gold_clusters
+    assert not {clusters[r[0]] for r in other} & gold_clusters
     assert splits.verify(store) == [] and result.golden.n_clips == 5
 
 
@@ -446,3 +467,65 @@ def test_manifests_accepted_by_real_benchmark(store, home, small_golden):
         assert run.summary["clips"] == count
         checked += 1
     assert checked == 3
+
+
+# --- review-gate fixes ---------------------------------------------------------------------
+
+
+def test_general_references_are_in_the_leak_checks(store, home):
+    ids, phrases = build_world(store)
+    twin = sorted(set(ids["plain"]) - set(ids["after_plain"]) - set(ids["before_plain"]))[0]
+    text = store.db.execute("SELECT raw_text FROM clips WHERE clip_id = ?", (twin,)).fetchone()[0]
+    out = home / "sets" / "general"
+    manifest.write_set(out, [{"id": "g1", "expected": text.upper(), "terms": []}], lambda clip: np.zeros(8000, dtype="int16"))
+    build_at(store)
+    assert twin not in splits.train_ids(store)
+    train = store.db.execute("SELECT split_id FROM splits WHERE kind = 'train'").fetchone()[0]
+    assert splits.verify(store) == []
+    store.db.execute("INSERT OR IGNORE INTO split_members VALUES (?, ?)", (train, twin))
+    store.db.commit()
+    assert any("general-v1" in p for p in splits.verify(store))
+
+
+def test_train_overlap_is_checked_within_the_trains_own_parent(store):
+    ids, _ = build_world(store)
+    build_at(store)
+    # another parent's rolling set must not condemn this parent's train set
+    splits.build(store, parent="v2", cutoff_ms=CUTOFF - 40 * DAY, now=CUTOFF + 30 * DAY)
+    current = store.db.execute("SELECT split_id FROM splits WHERE kind = 'train' AND parent_version = 'current'").fetchone()[0]
+    assert not any(p.startswith(current) for p in splits.verify(store))
+
+
+def test_a_failed_freeze_is_retried(store, small_golden, monkeypatch):
+    build_world(store)
+    real = splits.write_and_pin
+    monkeypatch.setattr(splits, "write_and_pin", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    script = Accept()
+    with pytest.raises(OSError):
+        golden.run(store, 20, player=script.play, ask=script.ask, out=lambda *_: None, seed=3)
+    assert golden.row(store)["frozen"] == 0 and len(golden.member_ids(store)) == 5
+    monkeypatch.setattr(splits, "write_and_pin", real)
+    lines = []
+    with pytest.raises(golden.GoldenError, match="frozen"):  # the retry freezes first, then refuses more
+        golden.run(store, 20, player=script.play, ask=script.ask, out=lines.append, seed=3)
+    assert golden.row(store)["frozen"] == 1
+
+
+def test_golden_stratifies_across_skewed_apps_and_months():
+    import random
+    from datetime import datetime, timezone
+
+    rows = []
+    for i in range(90):
+        rows.append({"clip_id": f"a{i}", "application": "Notes", "timestamp_ms": 1_760_000_000_000 + i * 1000})
+    for i in range(6):
+        rows.append({"clip_id": f"b{i}", "application": "Slack", "timestamp_ms": 1_765_000_000_000 + i * 1000})
+    for i in range(4):
+        rows.append({"clip_id": f"c{i}", "application": "Mail", "timestamp_ms": 1_770_000_000_000 + i * 1000})
+    clusters = {r["clip_id"]: r["clip_id"] for r in rows}
+    from collections import Counter
+
+    picked = golden.stratified_pick(rows, Counter(), set(), clusters, 9, random.Random(1))
+    apps = Counter(r["application"] for r in picked)
+    assert apps == {"Notes": 3, "Slack": 3, "Mail": 3}, apps  # the 90-clip app doesn't take 90% of golden
+    assert len({golden._stratum(r) for r in picked}) == 3 and datetime.now(timezone.utc)
