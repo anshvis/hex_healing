@@ -45,11 +45,14 @@ shortcut listener saw after the paste (`dictation/key_counts`, a count the
 listener bumps, as for YOLO mode's Escape; no key-state poll, no event tap of
 its own) that left the field empty or shorter, or 30 s. The kept read is the
 last one in which the field still held the pasted text, so a chat field
-cleared by send still yields the edit: a blank read after a kept text ends the
-watch with it (a send button, Cmd+Return), and for a second after a Return the
-field shortening or holding other text does too, because the app clears the
-field a moment after the listener counts the Return. Past that, a read that
-finds other, non-empty text drops the kept read. A field with no string value
+cleared by send still yields the edit: for a second after a Return (Cmd+Return
+included) the field going blank, shorter, or holding other text ends the watch
+with the read kept at the Return, because the app clears the field a moment
+after the listener counts the Return. A field that goes blank with no Return
+(a send button, or select all and delete, which cannot be told apart) is
+`cleared_before_read`: a send button without a Return loses the observation,
+which is the training-safe side. Outside that second, a read that finds other,
+non-empty text drops the kept read. A field with no string value
 (a web view, a terminal) is `read_failed`, never an empty one, and a field over
 8,192 characters is read around the caret and can show the paste whole or not
 at all, never an edit of it. One gate (the lab with its managed lock,
@@ -62,24 +65,47 @@ starts when the paste completes, not after History's write. Outcome IDs:
 `return`, `timeout`. The log line carries those IDs, a character count and
 milliseconds only.
 
-Alignment (`locate.rs`) is a token-level local alignment of the pasted text
-against the field. A one-letter-off word of three or more letters is a near
-match, so "Kip" to "Kit" aligns in a longer text. The aligned core must cover
-half the pasted tokens (all of them below three) on its own, counting only
-exact and near pairs, with at least two exact words in a text of three or
-more, and at most one pasted token may be left over at either end; so an
-unrelated field that shares a word or a phrase ("go to bed" against "send to
-Kip", "to be honest the plan" against "to be honest I agree") is not found.
-Whole words only: "Yes" is not found in "Yesterday", and a one-word paste is an
-edit only when the field is that one word. Text without whitespace (CJK) is one
-token, so it is effectively unsupported; a caret anchor (accepting only spans
-near the caret recorded at the paste) is a known gap, not built.
-Given such a core, a replaced first or last word that is not near ("Hanks" to
-"Hex") scores below zero and sits outside it, so the span extends over at most
-one field token at each end that has a pasted token left over, and never across
-sentence punctuation or a line break; one pasted word replaced by one word is
-the whole field. It cannot tell a text pasted twice apart while one copy is
-intact.
+Where to look (`locate.rs`). Before the paste, Hex reads the field's caret
+(`AXSelectedTextRange`, `AXNumberOfCharacters`), so it knows the paste's offset
+and, with the selection it replaces, how long the field is with it in. That is
+the anchor.
+
+- Anchored. The anchor is trusted once a read shows the paste whole at that
+  offset (a read before that only reports the paste unchanged, never an edit:
+  with no position to trust there is no evidence of one). A paste found in the
+  field but not at the offset means the app counts differently, so the watch
+  falls back to the strict rules below. From then on only the field's region at
+  the anchor is judged, so text anywhere else in the field can never match, and
+  position is evidence enough to call a one-word replacement an edit ("Hanks" to
+  "Hex", "Yes" to "No", two words for two, a trailing word for three). The region
+  moves with the field's length: an edit before the paste shifts it and an edit
+  inside stretches it, both are tried, and the one that holds more of the paste
+  wins (a tie goes to the smaller region). Intact at the anchor is unchanged
+  whatever else the field says; the same text elsewhere does not count. An empty
+  region is the paste deleted, which is `span_not_found` (nothing to learn
+  from). Offsets are UTF-16 units, as Accessibility counts. A field read as a
+  window (over 8,192 characters) is judged only if the window holds the region.
+- Strict, with no anchor (the app reports no selection range) or one that did
+  not hold. A token-level local alignment of the pasted text against the whole
+  field: a one-letter-off word of three or more letters is a near match, so
+  "Kip" to "Kit" aligns in a longer text. The aligned core must cover half the
+  pasted tokens (all of them below three) on its own, counting only exact and
+  near pairs, with at least two exact words in a text of three or more, and at
+  most one pasted token may be left over at either end; so an unrelated field
+  that shares a word or a phrase ("go to bed" against "send to Kip", "to be
+  honest the plan" against "to be honest I agree") is not found. A replaced
+  first or last word that is not near scores below zero and sits outside the
+  core, so the span extends one field token over it, never across sentence
+  punctuation or a line break. Whole words only: "Yes" is not found in
+  "Yesterday", and a one-word paste is an edit only when the field is that one
+  word. It cannot tell a text pasted twice apart while one copy is intact.
+
+Precision, measured on a corpus of 36 unrelated chat sentences, every ordered
+pair (1,260): the strict rules store 14 as edits (1.1%); anchored, none, and an
+edit at the anchor never carries the neighbouring text (`locate::tests`,
+`the_unrelated_pair_corpus`). Text without whitespace (CJK) is one token, so
+it is effectively unsupported. A paste over 4,000,000 alignment cells (inserted
+tokens times field tokens) is not aligned.
 
 Storage (`history/corrections.rs`): the watcher thread calls
 `History::observe_correction` on the History carried by the paste target, which
