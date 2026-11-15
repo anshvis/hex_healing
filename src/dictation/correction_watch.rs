@@ -174,7 +174,10 @@ mod tests {
         let queue = Queue::default();
         submit_to(allowed(false, Policy::default()), &queue, target(1));
         assert_eq!(queue.len(), 0);
-        // The real gate reads the lab, which is off by default.
+        // The real gate reads the lab. Set it off here rather than read the
+        // saved settings, which are the machine's own (nextest gives each test
+        // its own process, so this can't leak into another test).
+        crate::labs::apply(&crate::app_settings::LabsSettings::default());
         let before = QUEUE.len();
         submit(target(2));
         assert_eq!(QUEUE.len(), before);

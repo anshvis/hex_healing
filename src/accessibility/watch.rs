@@ -129,8 +129,9 @@ unsafe extern "C" {
 unsafe extern "C" {
     static kCFRunLoopDefaultMode: CfStringRef;
     fn CFRunLoopGetCurrent() -> *mut c_void;
-    fn CFRunLoopAddSource(run_loop: *mut c_void, source: CfTypeRef, mode: CfStringRef);
-    fn CFRunLoopRemoveSource(run_loop: *mut c_void, source: CfTypeRef, mode: CfStringRef);
+    // `source` is `*mut` to match `suppression.rs`'s declaration of the same symbols.
+    fn CFRunLoopAddSource(run_loop: *mut c_void, source: *mut c_void, mode: CfStringRef);
+    fn CFRunLoopRemoveSource(run_loop: *mut c_void, source: *mut c_void, mode: CfStringRef);
     fn CFRunLoopRunInMode(mode: CfStringRef, seconds: f64, return_after_source: u8) -> i32;
 }
 
@@ -219,7 +220,7 @@ impl Observer {
             return None;
         }
         let run_loop = unsafe { CFRunLoopGetCurrent() };
-        unsafe { CFRunLoopAddSource(run_loop, source, kCFRunLoopDefaultMode) };
+        unsafe { CFRunLoopAddSource(run_loop, source.cast_mut(), kCFRunLoopDefaultMode) };
         this.source = source;
         this.run_loop = run_loop;
         Some(this)
@@ -237,7 +238,9 @@ impl Drop for Observer {
     fn drop(&mut self) {
         if !self.source.is_null() {
             // SAFETY: removed from the run loop it was added to, on its thread.
-            unsafe { CFRunLoopRemoveSource(self.run_loop, self.source, kCFRunLoopDefaultMode) };
+            unsafe {
+                CFRunLoopRemoveSource(self.run_loop, self.source.cast_mut(), kCFRunLoopDefaultMode)
+            };
         }
         for (target, name) in [
             (&self.element, c"AXValueChanged"),

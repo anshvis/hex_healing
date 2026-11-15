@@ -2376,8 +2376,10 @@ mod tests {
 
     #[test]
     fn learn_from_corrections_macos_only() {
-        let mut labs = LabsSettings::default();
-        labs.learn_from_corrections = true;
+        let labs = LabsSettings {
+            learn_from_corrections: true,
+            ..LabsSettings::default()
+        };
         assert_eq!(
             Feature::LearnFromCorrections.on_this_os(),
             cfg!(target_os = "macos")
