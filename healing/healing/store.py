@@ -201,9 +201,18 @@ class Store:
         if version > SCHEMA_VERSION:
             raise StoreError(f"dataset is schema {version}; this healing knows {SCHEMA_VERSION}")
         for step in range(version, SCHEMA_VERSION):
-            self.db.executescript(MIGRATIONS[step])
+            if not self._already_applied(step):
+                self.db.executescript(MIGRATIONS[step])
             self.db.execute(f"PRAGMA user_version = {step + 1}")
         self.db.commit()
+
+    def _already_applied(self, step: int) -> bool:
+        """Whether migration `step` was made by hand or by an earlier build of the branch that
+        added it before it had a version number (step 5 added `classified_at_ms` to schema 5)."""
+        if step != 5:
+            return False
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(clips)")}
+        return "classified_at_ms" in columns
 
     def close(self) -> None:
         self.db.close()

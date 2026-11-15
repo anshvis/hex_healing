@@ -247,3 +247,22 @@ def test_a_replace_in_hex_drops_the_stored_correction(world):  # noqa: F811
     assert row["label"] == "unlabelled" and row["classified_at_ms"] is None
     assert main(["label", "corrections"]) == 0
     assert world.db().execute("SELECT COUNT(*) FROM edits").fetchone()[0] == 0
+
+
+def test_a_v5_dataset_that_already_has_the_marker_column_still_migrates(tmp_path):
+    import sqlite3
+
+    from healing import store as store_module
+
+    root = tmp_path / "dataset"
+    root.mkdir()
+    db = sqlite3.connect(root / "dataset.sqlite")
+    for step in range(5):
+        db.executescript(store_module.MIGRATIONS[step])
+    db.execute("ALTER TABLE clips ADD COLUMN classified_at_ms INTEGER")  # an earlier build of this branch
+    db.execute("PRAGMA user_version = 5")
+    db.commit()
+    db.close()
+    store = Store(root)
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 6
+    store.close()
