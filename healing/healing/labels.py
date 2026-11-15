@@ -38,13 +38,24 @@ HAS_AUDIO = (
 USABLE = f"{HAS_AUDIO} AND c.kind = 'dictation' AND c.golden = 0"
 
 
+def _chunks(ids: list[str], size: int = 500):
+    for start in range(0, len(ids), size):
+        yield ids[start : start + size]
+
+
 def latest_reviews(db: sqlite3.Connection, clip_ids: list[str] | None = None) -> dict[str, sqlite3.Row]:
-    """clip_id -> its newest review (a later review replaces an earlier one)."""
-    rows = db.execute(
-        "SELECT * FROM reviews ORDER BY reviewed_at_ms, review_id"
-    ).fetchall()
-    wanted = set(clip_ids) if clip_ids is not None else None
-    return {r["clip_id"]: r for r in rows if wanted is None or r["clip_id"] in wanted}
+    """clip_id -> its newest review (a later review replaces an earlier one). With `clip_ids` only
+    those clips' reviews are read."""
+    if clip_ids is None:
+        rows = db.execute("SELECT * FROM reviews ORDER BY reviewed_at_ms, review_id").fetchall()
+    else:
+        rows = []
+        for chunk in _chunks(clip_ids):
+            rows += db.execute(
+                f"SELECT * FROM reviews WHERE clip_id IN ({','.join('?' * len(chunk))})"
+                " ORDER BY reviewed_at_ms, review_id", chunk,
+            ).fetchall()
+    return {r["clip_id"]: r for r in rows}
 
 
 def derive(row: sqlite3.Row, kinds: set[str], review: sqlite3.Row | None) -> tuple[str, str | None, str | None]:
@@ -77,24 +88,27 @@ def refresh(store: Store, clip_ids: list[str] | None = None) -> Counter:
     `edited_positions` is the classifier's (`label_corrections` and `collect` write it); this never
     touches it, and `split build` takes only strong clips' positions.
 
-    `clip_ids` limits it to those clips (all of them when None; none when empty).
+    `clip_ids` limits it to those clips (all of them when None; none when empty), and then reads only
+    those clips' edits and reviews, so a refresh after one review or one collect batch does not scan
+    everything.
     """
     db = store.db
     kinds: dict[str, set[str]] = {}
-    for edit in db.execute("SELECT clip_id, kind FROM edits"):
-        kinds.setdefault(edit["clip_id"], set()).add(edit["kind"])
-    reviews = latest_reviews(db, clip_ids)
-    counts: Counter = Counter()
     if clip_ids is None:
         rows = db.execute("SELECT * FROM clips").fetchall()
+        for edit in db.execute("SELECT clip_id, kind FROM edits"):
+            kinds.setdefault(edit["clip_id"], set()).add(edit["kind"])
     else:
         rows = []
-        for start in range(0, len(clip_ids), 500):
-            chunk = clip_ids[start : start + 500]
-            rows += db.execute(f"SELECT * FROM clips WHERE clip_id IN ({','.join('?' * len(chunk))})", chunk).fetchall()
+        for chunk in _chunks(clip_ids):
+            marks = ",".join("?" * len(chunk))
+            rows += db.execute(f"SELECT * FROM clips WHERE clip_id IN ({marks})", chunk).fetchall()
+            for edit in db.execute(f"SELECT clip_id, kind FROM edits WHERE clip_id IN ({marks})", chunk):
+                kinds.setdefault(edit["clip_id"], set()).add(edit["kind"])
+    reviews = latest_reviews(db, clip_ids)
+    counts: Counter = Counter()
     for row in rows:
-        review = reviews.get(row["clip_id"])
-        label, reference, strategy = derive(row, kinds.get(row["clip_id"], set()), review)
+        label, reference, strategy = derive(row, kinds.get(row["clip_id"], set()), reviews.get(row["clip_id"]))
         db.execute(
             "UPDATE clips SET label = ?, weight = ?, reference_text = ?, review_strategy = ? WHERE clip_id = ?",
             (label, WEIGHTS[label], reference, strategy, row["clip_id"]),

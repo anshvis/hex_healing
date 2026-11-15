@@ -334,27 +334,34 @@ def _last_run(world):
         store.close()
 
 
-def test_a_labelling_failure_still_writes_the_runs_row_and_is_raised(world, monkeypatch):
+def test_a_labelling_failure_ends_the_run_with_its_type_and_a_runs_row(world, monkeypatch):
     from healing import labels
 
     monkeypatch.setattr(labels, "refresh", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("derive broke")))
     with pytest.raises(RuntimeError, match="derive broke"):
         world.run()
     last = _last_run(world)
-    assert last["seen"] == 3 and last["new"] == 3 and last["error"] == "labelling: RuntimeError"
+    assert last["seen"] == 3 and last["new"] == 3 and last["error"] == "RuntimeError"
 
 
-def test_a_labelling_failure_does_not_mask_what_ended_the_run(world, monkeypatch):
+def test_a_run_cut_short_drops_its_partial_batch_and_still_writes_its_row(world, monkeypatch):
     from healing import collect as collect_module
-    from healing import labels
-    from healing.collect import CollectError
 
-    monkeypatch.setattr(labels, "refresh", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("derive broke")))
-    monkeypatch.setattr(collect_module, "_collect_pages", lambda *a, **k: (_ for _ in ()).throw(CollectError("hex is gone", 2)))
+    real = collect_module._store_entry
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 3:
+            raise OSError("history vanished")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(collect_module, "_store_entry", flaky)
     store = Store()
     try:
-        with pytest.raises(CollectError, match="hex is gone"):
-            collect_module.collect(store, Path("hex"))
+        with pytest.raises(OSError, match="history vanished"):
+            collect_module.collect(store, world.hex)
+        assert store.db.execute("SELECT COUNT(*) FROM clips").fetchone()[0] == 0  # the whole batch, never half
     finally:
         store.close()
-    assert _last_run(world)["error"] == "hex is gone"
+    assert _last_run(world)["error"] == "history vanished"

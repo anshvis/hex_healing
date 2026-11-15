@@ -173,6 +173,15 @@ def reference_text(raw_text: str, edits: list[Edit]) -> str | None:
     return reference_with_spans(raw_text, edits)[0]
 
 
+def forget(db, clip_id: str, changed: dict) -> None:
+    """Throw away a clip's classification: its edit rows go and `changed` gains the classifier's own
+    columns cleared (`acoustic_reference`, `edited_positions`, `classified_at_ms`), so the next
+    `label corrections` classifies it again and `labels.refresh` derives its label without it. The one
+    place that knows which columns the classifier owns."""
+    db.execute("DELETE FROM edits WHERE clip_id = ?", (clip_id,))
+    changed.update({"acoustic_reference": None, "edited_positions": None, "classified_at_ms": None})
+
+
 def label_corrections(store: Store, since_ms: int | None = None, recompute: bool = False) -> Counter:
     """Classify every edited, un-rewritten clip not yet classified. Counts by kind.
 
