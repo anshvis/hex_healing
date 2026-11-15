@@ -573,6 +573,25 @@ def _free_id(db: sqlite3.Connection, split_id: str) -> str:
     return candidate
 
 
+def why_empty(store: Store, kind: str, parent: str = "current") -> str:
+    """Why no `kind` ("rolling" or "edited") clip qualified: each candidate clip's reason from the
+    same `why_not` that `build` uses, counted."""
+    from collections import Counter
+
+    label = {"rolling": "verified", "edited": "strong"}[kind]
+    rows = store.db.execute(f"SELECT c.* FROM clips c WHERE {labels.USABLE} AND c.label = ?", (label,)).fetchall()
+    if not rows:
+        return (f"there are no {label} clips yet" + (
+            " (edits you made that sound like what Hex heard)" if kind == "edited"
+            else "; run `healing review --since-cutoff`"))
+    try:
+        zones = Zones.load(store.db, parent=parent)
+    except SplitError as error:
+        return str(error)
+    reasons = Counter(zones.why_not(kind, r["clip_id"], Facts.of(r)) or "qualifies (run `healing split build`)" for r in rows)
+    return f"{len(rows)} {label} clips: " + "; ".join(f"{reason} ({n})" for reason, n in reasons.most_common())
+
+
 def _unique_id(db: sqlite3.Connection, base: str) -> str:
     """`base`, or `base-2`, `base-3`... : an id no registered set uses and no folder holds, so a rebuild in
     the same second never rewrites the folder a still-registered set points at."""

@@ -30,6 +30,8 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("--model", dest="models", action="append", type=Path, metavar="GGUF",
                           help="a model to score; repeat to compare (interleaved per set)")
     evaluate.add_argument("--sets", default="rolling,golden,general,edited")
+    evaluate.add_argument("--parent", default="current",
+                          help="whose rolling and edited sets to score (each model version has its own holdout)")
     evaluate.add_argument("--runs", type=int, default=1, help="rounds per set (extra rounds only measure speed)")
     evaluate.add_argument("--vocabulary", choices=["current", "none"], default="current",
                           help="bias with Hex's saved vocabulary, as dictation does (needs the T3.4 hex)")

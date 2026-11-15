@@ -64,6 +64,10 @@ class EvalError(RuntimeError):
     pass
 
 
+class EvalUsageError(EvalError):
+    """The request itself is wrong (no models, a bad `--runs`, an unknown set): the CLI exits 2."""
+
+
 @dataclass(frozen=True)
 class SetRef:
     name: str
@@ -110,8 +114,9 @@ def current_vocabulary(settings_path: Path | None = None) -> tuple[list[dict], s
     return entries, boost, None if entries else "your vocabulary is empty"
 
 
-def resolve_set(name: str, store: Store | None) -> SetRef | Unavailable:
-    """The set's folder and pin, or why it isn't available."""
+def resolve_set(name: str, store: Store | None, parent: str = "current") -> SetRef | Unavailable:
+    """The set's folder and pin, or why it isn't available. Rolling and edited sets are `parent`'s own:
+    each model version has its holdout, and another parent's newer set is not a stand-in."""
     if name == "general":
         folder = general.folder()
         if not (folder / "manifest.json").is_file():
@@ -127,29 +132,17 @@ def resolve_set(name: str, store: Store | None) -> SetRef | Unavailable:
             have = row["n_clips"] if row else 0
             return Unavailable(f"golden is pending ({have} of {splits.GOLDEN_SIZE} confirmed): run `healing golden review`")
     else:
-        # The newest set of the kind, even when it's empty: an older one is a different cut-off and
-        # different clips, and quietly scoring it would be a different test.
+        # The parent's newest set of the kind, even when it's empty: an older one is a different cut-off
+        # and different clips, and quietly scoring it would be a different test.
         row = store.db.execute(
-            "SELECT * FROM splits WHERE kind = ? ORDER BY created_at_ms DESC, split_id DESC LIMIT 1", (name,)
+            "SELECT * FROM splits WHERE kind = ? AND parent_version = ? ORDER BY created_at_ms DESC, split_id DESC LIMIT 1",
+            (name, parent),
         ).fetchone()
         if row is None:
-            return Unavailable(f"no {name} set: run `healing split build`")
+            return Unavailable(f"no {name} set for parent {parent}: run `healing split build --parent {parent}`")
         if row["manifest_path"] is None:
-            return Unavailable(f"the latest {name} set ({row['split_id']}) has no clips: " + _why_empty(store, name))
+            return Unavailable(f"the latest {name} set ({row['split_id']}) has no clips: " + splits.why_empty(store, name, parent))
     return SetRef(name, row["split_id"], Path(row["manifest_path"]).parent, _verified(row), row["n_clips"])
-
-
-def _why_empty(store: Store, name: str) -> str:
-    if name == "rolling":
-        return "it needs random-verified clips in the window; run `healing review --since-cutoff`"
-    strong = store.db.execute(f"SELECT COUNT(*) FROM clips c WHERE c.label = 'strong' AND {labels.USABLE}").fetchone()[0]
-    if not strong:
-        return "there are no strong clips yet (edits you made that sound like what Hex heard)"
-    unplaced = store.db.execute(
-        f"SELECT COUNT(*) FROM clips c WHERE c.label = 'strong' AND c.edited_positions IS NULL AND {labels.USABLE}").fetchone()[0]
-    if unplaced:
-        return f"{unplaced} of {strong} strong clips have no edited positions; run `healing label all`"
-    return f"{strong} strong clips exist, but none is inside the window and outside the golden, general and trained clusters"
 
 
 def _verified(row) -> str:
@@ -171,8 +164,8 @@ def _sidecar(folder: Path) -> dict[str, dict]:
     return {r["id"]: r for r in map(json.loads, (folder / "clips.jsonl").read_text().splitlines())}
 
 
-def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict], dict | None]:
-    """(scores, per-clip records, edited-span totals) for one model on one set."""
+def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict]]:
+    """(scores, per-clip records) for one model on one set; an edited-span set's scores carry `edited_span`."""
     first = runs[0]
     manifest = json.loads(ref.manifest.read_text())
     definitions = {c["id"]: c for c in manifest["clips"]}
@@ -220,8 +213,9 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict], dict
     sources = {r["id"]: r["source"] for r in sidecar.values() if "source" in r}
     if sources and policy.whole_reference:
         scores["wer_by_source"] = wer_by_source(first, sources)
-    span = {"errors": span_errors, "positions": span_positions} if policy.edited_words else None
-    return scores, per_clip, span
+    if policy.edited_words:
+        scores["edited_span"] = {"errors": span_errors, "positions": span_positions}
+    return scores, per_clip
 
 
 def evaluate(
@@ -235,14 +229,22 @@ def evaluate(
     progress: Callable[[str], None] = lambda message: None,
     bench=run_benchmark,
     now: Callable[[], float] = time.time,
+    parent: str = "current",
 ) -> dict:
+    """Score `models` on `set_names`: the one place a request is validated (`EvalUsageError`) and its
+    set names deduplicated; the CLI only parses."""
+    if not models:
+        raise EvalUsageError("healing eval needs at least one --model <gguf>")
     if vocabulary not in VOCABULARY_MODES:
-        raise EvalError(f"--vocabulary is one of {', '.join(VOCABULARY_MODES)}")
+        raise EvalUsageError(f"--vocabulary is one of {', '.join(VOCABULARY_MODES)}")
     if runs < 1:
-        raise EvalError("--runs is at least 1")
+        raise EvalUsageError("--runs is at least 1")
+    unknown = [n for n in set_names if n not in SET_NAMES]
+    if unknown:
+        raise EvalUsageError(f"unknown set {unknown[0]!r}; sets are {', '.join(SET_NAMES)}")
     set_names = list(dict.fromkeys(set_names))  # a set named twice is scored once
-    if len({str(m) for m in models}) != len(models):
-        raise EvalError("the same model was named twice")
+    if len({m.resolve() for m in models}) != len(models):  # the same file under two spellings is one model
+        raise EvalUsageError("the same model was named twice")
     for model in models:
         if not model.is_file():
             raise EvalError(f"no model file at {model}")
@@ -251,7 +253,7 @@ def evaluate(
     refs: list[SetRef] = []
     missing: dict[str, str] = {}
     for name in set_names:
-        found = resolve_set(name, store)
+        found = resolve_set(name, store, parent)
         if isinstance(found, Unavailable):
             missing[name] = found.reason
             progress(f"{name}: n/a ({found.reason})")
@@ -272,10 +274,10 @@ def evaluate(
         "models": [{"gguf_path": str(m), "gguf_sha256": sha256(m)} for m in models],
         "sets": [{"set": r.name, "split_id": r.split_id, "manifest_sha256": r.manifest_sha256, "n": r.n} for r in refs],
         "unavailable_sets": missing,
+        "parent": parent,
         "vocabulary": {"mode": vocabulary, "terms": len(entries), "boost": boost if entries else None},
         "scores": {str(m): {} for m in models},
         "per_clip": {str(m): {} for m in models},
-        "edited_span": {},
         "started_at_ms": int(started * 1000),
     }
     with tempfile.TemporaryDirectory(prefix="healing-vocabulary-") as folder:
@@ -297,11 +299,9 @@ def evaluate(
                         raise EvalError(f"{model} on {ref.name}: {error}") from error
                     results[str(model)].append(run)
             for model in models:
-                scores, per_clip, span = score_set(ref, results[str(model)])
+                scores, per_clip = score_set(ref, results[str(model)])
                 document["scores"][str(model)][ref.name] = scores
                 document["per_clip"][str(model)][ref.name] = per_clip
-                if span is not None:
-                    document["edited_span"][str(model)] = span
     document["duration_ms"] = int((now() - started) * 1000)
     return document
 
@@ -340,7 +340,7 @@ def table(document: dict) -> str:
             continue
         for model in models:
             scores = document["scores"][model][name]
-            span = document["edited_span"].get(model) if SCORING[name].edited_words else None
+            span = scores.get("edited_span")
             edited = _percent(span["errors"] / span["positions"]) if span and span["positions"] else "n/a"
             lines.append(
                 f"{name:<10}{Path(model).name[:32]:<34}{shown[ref['split_id']]['n']:>6}{_percent(scores['wer']):>8}"
@@ -352,25 +352,15 @@ def table(document: dict) -> str:
 def main(args) -> int:
     import sys
 
-    if not args.models:
-        print("error: healing eval needs at least one --model <gguf>", file=sys.stderr)
-        return 2
-    if args.runs < 1:
-        print("error: --runs is at least 1", file=sys.stderr)
-        return 2
-    names = list(dict.fromkeys(n.strip() for n in args.sets.split(",") if n.strip()))
-    unknown = [n for n in names if n not in SET_NAMES]
-    if unknown:
-        print(f"error: unknown set {unknown[0]!r}; sets are {', '.join(SET_NAMES)}", file=sys.stderr)
-        return 2
+    names = [n.strip() for n in args.sets.split(",") if n.strip()]
     store = None
     try:
         if (dataset_root() / "dataset.sqlite").is_file():
             store = Store(sweep=False)
         try:
             document = evaluate(
-                [Path(m) for m in args.models], names, runs=args.runs, vocabulary=args.vocabulary,
-                store=store, progress=lambda message: print(message, file=sys.stderr),
+                [Path(m) for m in args.models or []], names, runs=args.runs, vocabulary=args.vocabulary,
+                store=store, progress=lambda message: print(message, file=sys.stderr), parent=args.parent,
             )
         finally:
             if store is not None:
@@ -380,6 +370,9 @@ def main(args) -> int:
             print("error: none of the requested sets could be scored", file=sys.stderr)
             return 1
         path = write(document)
+    except EvalUsageError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     except (EvalError, BenchError, StoreError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

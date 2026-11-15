@@ -161,7 +161,7 @@ def test_edited_span_scores_only_edited_positions(world):
     (world.tmp / "c.gguf").write_bytes(b"c")
     world.models["c.gguf"] = world.tmp / "c.gguf"
     document = evaluate(world, ["a.gguf", "b.gguf", "c.gguf"], ["edited"], vocabulary="none")
-    spans = {m: document["edited_span"][str(world.models[m])] for m in ("a.gguf", "b.gguf", "c.gguf")}
+    spans = {m: document["scores"][str(world.models[m])]["edited"]["edited_span"] for m in ("a.gguf", "b.gguf", "c.gguf")}
     assert spans["a.gguf"] == {"errors": 3, "positions": 3}   # the corrected word is wrong in all three clips
     assert spans["b.gguf"] == {"errors": 0, "positions": 3}
     assert spans["c.gguf"] == {"errors": 0, "positions": 3}   # extra words elsewhere don't count here
@@ -241,7 +241,7 @@ def test_the_eval_json_has_the_contract_fields(world):
     general_set(world.home)
     dataset(world.store)
     document = evaluate(world, ["a.gguf"], ["rolling", "general", "edited"], vocabulary="none")
-    assert set(document) >= {"eval_id", "hex_sha", "models", "sets", "scores", "per_clip", "edited_span", "started_at_ms", "duration_ms"}
+    assert set(document) >= {"eval_id", "hex_sha", "models", "sets", "scores", "per_clip", "parent", "started_at_ms", "duration_ms"}
     assert document["models"][0]["gguf_sha256"] and document["models"][0]["gguf_path"].endswith("a.gguf")
     assert all(set(s) == {"set", "split_id", "manifest_sha256", "n"} for s in document["sets"])
     score = document["scores"][str(world.models["a.gguf"])]["rolling"]
@@ -369,7 +369,7 @@ def test_a_swapped_wav_with_a_rewritten_sidecar_and_pin_is_refused(world):
 
 def test_an_empty_latest_split_is_na_not_an_older_one(world):
     dataset(world.store)
-    splits.build(world.store, parent="v2", cutoff_ms=CUTOFF + 100 * DAY, now=CUTOFF + 31 * DAY)
+    splits.build(world.store, cutoff_ms=CUTOFF + 100 * DAY, now=CUTOFF + 31 * DAY)
     document = evaluate(world, ["a.gguf"], ["rolling"], vocabulary="none")
     assert document["sets"] == [] and "has no clips" in document["unavailable_sets"]["rolling"]
 
@@ -406,7 +406,7 @@ def test_an_empty_edited_set_with_unplaced_strong_clips_says_so(world):
     world.store.db.execute("UPDATE splits SET manifest_path = NULL, n_clips = 0 WHERE kind = 'edited'")
     world.store.db.commit()
     document = evaluate(world, ["a.gguf"], ["edited"], vocabulary="none")
-    assert "strong clips have no edited positions" in document["unavailable_sets"]["edited"]
+    assert "has no edited positions (3)" in document["unavailable_sets"]["edited"]
 
 
 def test_the_general_set_has_no_format_counts(world):
@@ -467,3 +467,44 @@ def test_repeated_words_in_the_edited_span_are_not_double_credited():
     assert [matched[0], matched[4]].count(True) == 1
     both = matched_positions(normalized_words("kit kit"), normalized_words("kit"), {0, 1})
     assert both.count(True) == 1
+
+
+def test_a_second_parent_over_the_same_window_holds_the_same_clips_and_eval_picks_each_its_own(world):
+    dataset(world.store)
+    splits.build(world.store, parent="v1", cutoff_ms=CUTOFF, now=CUTOFF + 30 * DAY)  # the same window
+    members = lambda parent, kind: {r[0] for r in world.store.db.execute(  # noqa: E731
+        "SELECT clip_id FROM split_members m JOIN splits s USING (split_id) WHERE s.parent_version = ? AND s.kind = ?", (parent, kind))}
+    assert members("current", "rolling") and members("current", "rolling") == members("v1", "rolling")  # a clip may sit in two parents' sets
+    assert members("current", "edited") == members("v1", "edited") and splits.verify(world.store) == []
+    current = evaluate(world, ["a.gguf"], ["rolling", "edited"], vocabulary="none")
+    other = evaluate(world, ["a.gguf"], ["rolling", "edited"], vocabulary="none", parent="v1")
+    ids = lambda document: {s["set"]: s["split_id"] for s in document["sets"]}  # noqa: E731
+    assert ids(current)["rolling"].startswith("rolling-current-") and ids(other)["rolling"].startswith("rolling-v1-")
+    assert ids(current)["edited"].startswith("edited-current-") and ids(other)["edited"].startswith("edited-v1-")
+    assert other["parent"] == "v1"
+    missing = evaluate(world, ["a.gguf"], ["rolling"], vocabulary="none", parent="v9")
+    assert missing["sets"] == [] and "parent v9" in missing["unavailable_sets"]["rolling"]
+
+
+def test_the_cli_scores_the_parent_it_is_given(world, capsys):
+    dataset(world.store)
+    splits.build(world.store, parent="v1", cutoff_ms=CUTOFF, now=CUTOFF + 30 * DAY)
+    world.store.close()
+    assert main(["eval", "--model", str(world.models["a.gguf"]), "--sets", "rolling", "--parent", "v1", "--vocabulary", "none"]) == 0
+    document = json.loads(next((world.home / "evals").glob("eval-*.json")).read_text())
+    assert document["parent"] == "v1" and document["sets"][0]["split_id"].startswith("rolling-v1-")
+    world.store = Store()  # the fixture closes it
+
+
+def test_one_model_under_two_spellings_is_named_twice(world):
+    alias = world.tmp / "alias.gguf"
+    alias.symlink_to(world.models["a.gguf"])
+    with pytest.raises(eval_run.EvalUsageError, match="named twice"):
+        eval_run.evaluate([world.models["a.gguf"], alias], ["general"], vocabulary="none")
+
+
+def test_the_edited_span_lives_in_the_set_scores(world):
+    dataset(world.store)
+    document = evaluate(world, ["a.gguf"], ["edited", "rolling"], vocabulary="none")
+    scores = document["scores"][str(world.models["a.gguf"])]
+    assert "edited_span" in scores["edited"] and "edited_span" not in scores["rolling"] and "edited_span" not in document
