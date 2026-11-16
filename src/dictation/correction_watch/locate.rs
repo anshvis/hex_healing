@@ -799,10 +799,13 @@ impl Followed {
             });
         }
         if self.open.start && at <= from && is_gap(&b[at..from]) {
-            // Keys glued to the word after it are typed outside the region, as
-            // before an edge that is not open, or are the replacement run on to
-            // it: which is not known.
-            if typed.last().is_some_and(|u| !is_ws(u)) && b.get(at).is_some_and(|u| !is_ws(u)) {
+            // While no replacement word is typed there, keys glued to the word
+            // after it are typed outside the region, as before an edge that is
+            // not open, or are the replacement run on to it: which is not known.
+            if self.room.start > 0
+                && typed.last().is_some_and(|u| !is_ws(u))
+                && b.get(at).is_some_and(|u| !is_ws(u))
+            {
                 return None;
             }
             let full = self.room.start == 0;
