@@ -287,6 +287,82 @@ fn text_that_could_have_been_typed_past_the_separator_is_not_stored() {
     );
 }
 
+// Found by the long property run, with one-character words.
+
+/// No read of the sequence stores an edit.
+fn never_edited(paste: &str, anchor: Option<usize>, before: &str, sequence: &[&str]) {
+    let seen = reads(paste, anchor, Some(before), sequence);
+    assert!(
+        seen.iter()
+            .all(|read| !matches!(read, Alignment::Edited(_))),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn keys_typed_glued_to_a_word_at_an_open_start_are_not_stored() {
+    // "idea " was typed before the paste was first read, the paste's first
+    // word then deleted, the space after it too, and "a" typed against what
+    // is left: the "a" is not the paste's.
+    let seen = reads(
+        "I will be there in ten minutes",
+        Some(0),
+        Some(" It works"),
+        &[
+            "idea I will be there in ten minutes It works",
+            "idea  will be there in ten minutes It works",
+            "idea will be there in ten minutes It works",
+            "idea awill be there in ten minutes It works",
+            "idea a will be there in ten minutes It works",
+        ],
+    );
+    for read in seen {
+        if let Alignment::Edited(span) = read {
+            assert!(!span.starts_with('a'), "{span:?}");
+        }
+    }
+}
+
+#[test]
+fn a_paste_edited_before_it_was_read_is_not_found_in_the_same_word_typed_later() {
+    let typed = [
+        "please send it to Kip tomorrow Rune",
+        "please send it to Kip tomorrow Rune thanks I will look",
+        "please send it to Kip tomorrow Rune thanks I will look a",
+        "please send it to Kip tomorrow Rune thanks I will look at",
+    ];
+    let before = "please send it to Kip tomorrow ";
+    // A character cannot be told from a keystroke, caret or not, however far
+    // the caret was off.
+    never_edited("a", None, before, &typed);
+    never_edited("a", Some(31), before, &typed);
+    never_edited("a", Some(32), before, &typed);
+    // More than a character, typed key by key, is no arrival of it.
+    never_edited(
+        "Kip",
+        Some(5),
+        "ok. ",
+        &[
+            "ok. Kit",
+            "ok. Kit and K",
+            "ok. Kit and Ki",
+            "ok. Kit and Kip",
+            "ok. Kit and Kips",
+        ],
+    );
+}
+
+#[test]
+fn a_paste_that_arrives_late_still_lands() {
+    let seen = reads(
+        "send it to Kip",
+        Some(4),
+        Some("ok. "),
+        &["ok. ", "ok. send it to Kip", "ok. send it to Kit"],
+    );
+    assert_eq!(seen[2], edited("send it to Kit"));
+}
+
 // The fuzzers.
 
 struct Rng(u64);
@@ -546,9 +622,9 @@ fn words(cases: u64, first: u64) -> Vec<String> {
             .map(|_| BEFORE_WORDS[rng.below(BEFORE_WORDS.len())])
             .collect();
         let mut base = spaced(&before);
-        for at in 0..base.len() {
-            if rng.below(40) == 0 && base[at].0 == ' ' {
-                base[at].0 = '\n';
+        for cell in &mut base {
+            if rng.below(40) == 0 && cell.0 == ' ' {
+                cell.0 = '\n';
             }
         }
         let mut caret = rng.below(base.len() + 1);

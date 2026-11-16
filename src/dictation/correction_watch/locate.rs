@@ -799,6 +799,12 @@ impl Followed {
             });
         }
         if self.open.start && at <= from && is_gap(&b[at..from]) {
+            // Keys glued to the word after it are typed outside the region, as
+            // before an edge that is not open, or are the replacement run on to
+            // it: which is not known.
+            if typed.last().is_some_and(|u| !is_ws(u)) && b.get(at).is_some_and(|u| !is_ws(u)) {
+                return None;
+            }
             let full = self.room.start == 0;
             if !full && !breaks && (lead > 0 || tail < typed.len() || at < from) {
                 return None;
@@ -976,6 +982,8 @@ enum Tracking {
         /// start now (moved through every change since): never the paste.
         old: Vec<usize>,
         last: Option<String>,
+        /// Whether a read has been seen without the paste in place.
+        seen: bool,
     },
     /// Followed: `text` is the read the region was last placed in.
     Following { followed: Followed, text: String },
@@ -1023,6 +1031,7 @@ impl Tracker {
                 known,
                 old,
                 last: before.map(str::to_string),
+                seen: false,
             }
         };
         Self {
@@ -1071,12 +1080,17 @@ impl Tracker {
         if is_blank(text) {
             let state = match state {
                 Tracking::Waiting {
-                    expect, known, old, ..
+                    expect,
+                    known,
+                    old,
+                    seen,
+                    ..
                 } => Tracking::Waiting {
                     expect,
                     known,
                     old,
                     last: None,
+                    seen,
                 },
                 _ => Tracking::Lost,
             };
@@ -1089,7 +1103,8 @@ impl Tracker {
                 known,
                 old,
                 last,
-            } => self.wait(expect, known, old, last, text, have),
+                seen,
+            } => self.wait(expect, known, old, (last, seen), text, have),
             Tracking::Following {
                 followed,
                 text: before,
@@ -1113,7 +1128,7 @@ impl Tracker {
         expect: Option<usize>,
         known: Option<usize>,
         old: Vec<usize>,
-        last: Option<String>,
+        (last, seen): (Option<String>, bool),
         text: &str,
         have: &[Token],
     ) -> (Tracking, Alignment) {
@@ -1130,6 +1145,7 @@ impl Tracker {
             known,
             old,
             last: Some(text.to_string()),
+            seen: true,
         };
         let landing = match (expect, known) {
             (Some(start), _) => {
@@ -1171,6 +1187,15 @@ impl Tracker {
             // No caret: the text twice, or held before, or unknown.
             (None, _) => return (Tracking::Lost, Alignment::Unchanged),
         };
+        // A paste not in place at the first read, then found, may be the same
+        // words typed: it lands only as one change that brings in more than a
+        // character of them (a keystroke of one cannot be told from it).
+        let arrived = last
+            .as_deref()
+            .is_none_or(|last| arrival(last, text, have, &self.want));
+        if seen && (!arrived || self.inserted.trim().chars().count() < 2) {
+            return (Tracking::Lost, unchanged_only(&found));
+        }
         let region = Region {
             from: have[landing].u16_start,
             to: have[landing + self.want.len() - 1].u16_end,

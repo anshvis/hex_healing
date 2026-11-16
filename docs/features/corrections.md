@@ -66,9 +66,13 @@ starts when the paste completes, not after History's write. Outcome IDs:
 `return`, `timeout`. The log line carries those IDs, a character count and
 milliseconds only.
 
-**Invariant: fail closed.** Hex stores an edit only from a region it is
-following, only text inside that region (what now occupies the place the pasted
-text occupied), and never text from before or after it. When unsure the answer is "not found" or "unchanged". A region
+**Invariant: fail closed.** Hex never stores text that is not the user's edit of
+the paste. It stores an edit only from a region it is following, only text
+inside that region (what now occupies the place the pasted text occupied), and
+never text from before or after it. When unsure, and whenever two keystroke
+histories give the same reads and one of them stores outside text, the answer is
+"not found" or "unchanged": real corrections are lost rather than a wrong one
+stored. A region
 once lost stays lost, and no edit is stored before the paste has been seen
 whole. There is no whole-field edit path: the old strict search for the edit
 anywhere in the field is gone, because it trades precision for recall (about 1%
@@ -76,7 +80,7 @@ of unrelated chat sentences were stored as edits).
 
 How the region is found (`locate.rs`, `Tracker`):
 
-- With a caret. Before the paste, Hex reads the caret (`AXSelectedTextRange`'s
+- With a caret and the field read before the paste. Hex reads the caret (`AXSelectedTextRange`'s
   location, in UTF-16 units, which is where a paste starts) and the field's
   text. Hex lands only on a read where exactly one copy of the paste's words
   starts within 8 units of the anchor that was not already in the field before
@@ -91,7 +95,11 @@ How the region is found (`locate.rs`, `Tracker`):
   or two off, cannot leave it hanging past the paste. The paste found only
   elsewhere (another copy; the app has not applied it yet) is not a landing; it
   waits. A blank read before it lands only notes the blank and goes on waiting;
-  it retires the tracker only while a region is followed.
+  it retires the tracker only while a region is followed. If the field could
+  not be read before the paste (a failed read, a window), nothing is followed,
+  caret or not: without the field as it stood, a copy of the paste's words near
+  the caret cannot be told from the paste (the old text, with the paste undone,
+  would be taken for it).
 - With no caret (the app reports no selection range). Hex reads the field's
   text before the paste. The first read where the paste's words occur exactly
   once, having occurred nowhere before it, adopts that occurrence. Occurring
@@ -107,35 +115,66 @@ text typed after an edit is never part of it). A change that crosses an edge
 loses the region, and so does one that could as well have been made on either
 side of an edge (text typed before the paste that begins with the paste's first
 letters), on every path, an open edge included. Whitespace deleted just outside
-the region as "word " or " word" is not a crossing.
+the region as "word " or " word" is not a crossing, but it is another reading of
+the change that must agree with the rest (R3).
 
 Two changes in one read lose the region, however far apart: the words of the
 two reads are diffed, and more than one hunk (an edit inside and text typed
 before it, a word edited and another word after it) is two changes.
 
-The rules that bound what an edge can take in (R1 to R5, D-8):
+The rule: **never store text that is not the user's edit of the paste; any
+ambiguous read stores nothing.** Where two keystroke histories give the same
+reads and one of them stores text from outside the paste, the answer is lost.
+Real corrections are lost with them, and that is accepted: a missed correction
+costs one training example, a wrong one teaches the model text the person never
+meant. The rules that bound what a region can take in (R1 to R9, D-8):
 
-- **R1, the word budget.** A followed region never holds more words than the
-  paste had, counting the words in the region's current text. Any change that
-  would make it hold more loses the region. So one word replaced by two is lost
-  ("Hanks" to "Hank Smith", "Kip" to "Kit my password is hunter2", "Kit chen"
-  to "Kitchen and then"), and so is a one-character edge word typed over with
-  more ("call me at 5" to "call me at six pm").
-- **R2, edges.** An edge opens when a change takes or replaces its whole edge
-  word (backspace, a selection, typing over, forward delete); a change that
-  keeps it does not close it. Keys typed right at an open edge are inside, as
-  far as R1 allows. Whitespace typed there closes the edge and is never part
-  of the region (a space, once the paste's words are used up; a line break
-  always), so a fixed last word is kept and what is typed after it is not. Keys
-  glued to an edge word are that word, longer. An edge beside words typed
-  right outside it, on the same line, can never open: which of the words around
-  it is the replacement is not known (a new first word, then the old first word
+- **R1, the word budget, per edge.** A followed region never holds more words
+  than the paste had, and the words put back at an open edge never exceed the
+  whole words taken away at that edge (a room per edge, spent by words typed
+  at it or a little in from it, refilled by whole words deleted there). So one
+  word replaced by two is lost ("Hanks" to "Hank Smith", "Kip" to "Kit my
+  password is hunter2", "Kit chen" to "Kitchen and then"), words taken at the
+  start do not let words be put at the end ("one two three four five six" with
+  "one two" deleted and "six" typed over by "seven and Sarah"; "Hanks Smith"
+  with "Hanks" deleted and "Smith" typed over by "Jones and"), and the same
+  text gives the same answer typed key by key or in one read.
+- **R2, edges.** An edge opens when a change took or replaced its whole edge
+  word (backspace, a selection, typing over, forward delete), as the characters
+  of the change say, not as the words of the diff do: deleting the last letter
+  of a word, or fixing one, edits it and opens nothing. Keys typed right at an
+  open edge are inside, as far as R1 allows. Whitespace typed there closes the
+  edge and is never part of the region, for typing and for a replacement that
+  ends in it ("Smith" typed over by "Rune "): a space, once the words taken
+  there are back (before that it is lost); a line break always. Keys glued to
+  an edge word are that word, longer. An edge beside words typed right outside
+  it, on the same line, can never open: which of the words around it is the
+  replacement is not known (a new first word, then the old first word
   forward-deleted, is lost).
 - **R3.** The ambiguity check (which side of an edge a change was made) runs
-  on every path, an open edge included.
-- **R4.** Landing provenance, above.
+  on every path, an open edge included, and includes the readings of a window
+  that crosses an edge only over whitespace: each is clipped to the region and
+  must put it where the others do, and one that deletes all of a region (or
+  puts text in its place) disagrees with every other reading. A one-character
+  region deleted with its space ("great idea a" to "great idea") is lost, not
+  moved onto "idea".
+- **R4.** Landing provenance, above. The field must have been read before the
+  paste: without it (a failed or windowed read) nothing is followed, since a
+  copy of the paste's words near the caret cannot be told from the paste. An
+  old copy's start moves on when text is inserted at it, which the start of a
+  paste not yet seen does not.
 - **R5.** A window is checked before a blank read, so a blank window retires a
   waiting tracker.
+- **R6, words that run out of the region.** A word that overlaps the region
+  and extends outside it (the paste's last word glued to the text after it by
+  deleting the space, or typed against the text before it) is joined text, none
+  of it known to be the paste's: the region is lost, never stored with the
+  word's whole span.
+- **R7, a separator the region keeps.** A change inside the region that reaches
+  its edge and puts in words beginning with the separator beside it (or ending
+  with the one before it) could as well have been typed past that separator,
+  outside the region ("Hanks Smith tail" to "Hanks  secret tail": "Smith"
+  taken out and "secret " typed before "tail"): it is lost.
 
 A region that has lost every word (replaced by attachments, an emoji) has no
 edge to open: what is typed beside it is outside.
