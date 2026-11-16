@@ -383,6 +383,18 @@ fn is_ws_unit(unit: u16) -> bool {
     char::from_u32(u32::from(unit)).is_some_and(is_space)
 }
 
+/// Whether a line break sits among the words `typed` puts in: what follows it
+/// is a new line, not the words before it carried on.
+fn breaks_within(typed: &[u16]) -> bool {
+    let Some(first) = typed.iter().position(|&u| !is_ws_unit(u)) else {
+        return false;
+    };
+    let last = typed.iter().rposition(|&u| !is_ws_unit(u)).unwrap_or(first);
+    typed[first..=last]
+        .iter()
+        .any(|&u| u == u16::from(b'\n') || u == u16::from(b'\r'))
+}
+
 fn is_blank_units(units: &[u16]) -> bool {
     units.iter().all(|&u| is_ws_unit(u))
 }
@@ -435,6 +447,9 @@ impl Followed {
         }
         let edge = tokens_in(before_words, self.region);
         let diff = Diff::new(before, after);
+        if self.coalesced_ambiguously(&diff, (before_words, words)) {
+            return None;
+        }
         // Where no word is left (attachments, emoji), only more keys at an
         // open edge are followed: a change that takes anything away is not
         // known to be the paste's.
@@ -474,6 +489,138 @@ impl Followed {
             open,
             ..followed
         })
+    }
+
+    /// Whether the change could have been made another way that puts the
+    /// region elsewhere, or that moves text from outside it in: a change of
+    /// words that, slid along equal words, sits on both sides of an edge; one
+    /// whose words begin or end like the words kept beside it (a replacement
+    /// that is the neighbouring text, "Yes No" to "No No"); one that types a
+    /// copy of the region's own text among other keys (which of the two is the
+    /// paste is not known). A change of one key is read only for the first.
+    fn coalesced_ambiguously(self, diff: &Diff, (before, after): (&[Token], &[Token])) -> bool {
+        let (a, b) = (&diff.a, &diff.b);
+        let text = {
+            let (mut from, mut to) = (self.region.from.min(b.len()), self.region.to.min(b.len()));
+            while from < to && is_ws_unit(b[from]) {
+                from += 1;
+            }
+            while to > from && is_ws_unit(b[to - 1]) {
+                to -= 1;
+            }
+            &b[from..to]
+        };
+        let held = tokens_in(before, self.region);
+        let (Some(r0), Some(r1)) = (
+            before
+                .iter()
+                .position(|t| t.u16_end > self.region.from && t.u16_start < self.region.to),
+            before
+                .iter()
+                .rposition(|t| t.u16_end > self.region.from && t.u16_start < self.region.to),
+        ) else {
+            return false;
+        };
+        let (nb, na) = (before.len(), after.len());
+        let fold_eq = |x: &Token, y: &Token| x.fold == y.fold;
+        let p = before
+            .iter()
+            .zip(after)
+            .take_while(|(x, y)| fold_eq(x, y))
+            .count();
+        let tail = before
+            .iter()
+            .rev()
+            .zip(after.iter().rev())
+            .take_while(|(x, y)| fold_eq(x, y))
+            .count();
+        let one_key = diff.base.len() <= 1 && diff.new_len(diff.base) <= 1;
+        if p == nb && p == na {
+            // No word changed. If letters were typed and taken out in the
+            // same read, which of the equal words is the paste's is not known.
+            let lettered = |units: &[u16]| {
+                units
+                    .iter()
+                    .any(|&u| char::from_u32(u32::from(u)).is_none_or(char::is_alphanumeric))
+            };
+            return !one_key
+                && (lettered(&b[diff.base.from..diff.base.to])
+                    || lettered(&a[diff.base.from..diff.base.from + diff.new_len(diff.base)]));
+        }
+        let shorter = nb.min(na);
+        let s = tail.min(shorter - p);
+        let slide = (p + tail).saturating_sub(shorter);
+        // The window of words `[w0, w1)` of the old read, and its place
+        // against the region's `[r0, r1 + 1)`.
+        let place = |w0: usize, w1: usize| -> u8 {
+            if w0 == w1 {
+                match w0 {
+                    g if g < r0 => 0,
+                    g if g == r0 => 1,
+                    g if g <= r1 => 2,
+                    g if g == r1 + 1 => 3,
+                    _ => 4,
+                }
+            } else if w1 <= r0 {
+                10
+            } else if w0 > r1 {
+                11
+            } else if w0 >= r0 && w1 <= r1 + 1 {
+                12
+            } else {
+                13
+            }
+        };
+        let touches = |w0: usize, w1: usize| w1 + 1 >= r0 && w0 <= r1 + 2;
+        let first = (p, nb - s);
+        if (0..=slide).any(|k| place(p - k, nb - s - k) != place(first.0, first.1)) {
+            return true;
+        }
+        // A region that begins or ends as the text beside it does could as
+        // well be that text, once the field has changed.
+        let equal_beside =
+            |x: Option<&Token>, y: Option<&Token>| x.zip(y).is_some_and(|(x, y)| fold_eq(x, y));
+        if equal_beside(held.first(), r0.checked_sub(1).map(|at| &before[at]))
+            || equal_beside(held.last(), before.get(r1 + 1))
+        {
+            return true;
+        }
+        // Words put in or taken out that are the words kept beside them could
+        // as well sit on the other side of the region's edge.
+        if touches(first.0, first.1) {
+            let (old, new) = (&before[first.0..first.1], &after[first.0..na - s]);
+            let kept_before = first.0.checked_sub(1).map(|at| &before[at]);
+            let kept_after = before.get(first.1);
+            if equal_beside(new.first(), kept_before)
+                || equal_beside(old.first(), kept_before)
+                || equal_beside(new.last(), kept_after)
+                || equal_beside(old.last(), kept_after)
+            {
+                return true;
+            }
+        }
+        // One key is one change: only text that may be several keys' is read
+        // for a copy of the region's text typed among other keys, or one of
+        // its words put in again: the copy could as well be the paste.
+        let copied = |typed: &[u16]| {
+            !text.is_empty()
+                && typed.len() >= text.len()
+                && typed.windows(text.len()).any(|w| w == text)
+        };
+        let more = |t: &Token| {
+            let count = |words: &[Token]| words.iter().filter(|w| alike(w, t)).count();
+            count(after) > count(before)
+        };
+        // (A word of the region typed over is its own edit, not a copy.)
+        let beside_region = diff
+            .slid()
+            .any(|w| w.to <= self.region.from || w.from >= self.region.to);
+        !one_key
+            && (held.len().saturating_mul(na) > MAX_CELLS
+                || (beside_region && held.iter().any(more))
+                || diff
+                    .slid()
+                    .any(|w| copied(&a[w.from..w.from + diff.new_len(w)])))
     }
 
     /// Where `diff` puts the region, read every way it could have been made.
@@ -620,6 +767,9 @@ impl Followed {
             end: is_blank_units(&b[change.to..to]),
         };
         let words = !is_blank_units(typed);
+        if (abut.start || abut.end) && breaks_within(typed) {
+            return None;
+        }
         // Blanks put over a word of an edge (a line break typed over a
         // selection) leave nothing that says where the replacement ends.
         if !typed.is_empty() && !words && (touch.start || touch.end) {
@@ -763,6 +913,9 @@ impl Followed {
         // break, or whitespace once they are, closes the edge and is never
         // part of the region.
         if self.open.end && at >= to && is_gap(&b[to..at]) {
+            if breaks_within(typed) {
+                return None;
+            }
             let full = self.room.end == 0;
             // Spaces before the words taken are back: whether the replacement
             // goes on is not known.
@@ -804,6 +957,9 @@ impl Followed {
             });
         }
         if self.open.start && at <= from && is_gap(&b[at..from]) {
+            if breaks_within(typed) {
+                return None;
+            }
             // While no replacement word is typed there, keys glued to the word
             // after it are typed outside the region, as before an edge that is
             // not open, or are the replacement run on to it: which is not known.
@@ -1528,23 +1684,31 @@ mod tests {
     }
 
     #[test]
-    fn a_first_word_retyped_as_the_word_before_the_paste_is_still_followed() {
+    fn a_first_word_retyped_up_to_the_word_before_the_paste_is_followed_until_it_is_that_word() {
         // "I" backspaced and "Friday" typed where it was, right after the
-        // "Friday" that sits before the paste: as many words in as out is one
-        // change however the words line up.
+        // "Friday" that sits before the paste: every key but the last is the
+        // paste's word being retyped; the last makes it the very text beside
+        // the paste, which could as well be that text (round 11, H).
         let base = "ok. Friday I will be there in ten minutes";
         let tail = " will be there in ten minutes";
         let mut reads = vec![format!("ok. Friday {tail}")];
         reads.extend(
-            typing("ok. Friday ", "Friday")
+            typing("ok. Friday ", "Frida")
                 .into_iter()
                 .map(|r| format!("{r}{tail}")),
         );
         let reads: Vec<&str> = reads.iter().map(String::as_str).collect();
         assert_eq!(
             edited(base, "I will be there in ten minutes", &reads),
-            "Friday will be there in ten minutes"
+            "Frida will be there in ten minutes"
         );
+        let mut all = reads.clone();
+        let whole = format!("ok. Friday Friday{tail}");
+        all.push(&whole);
+        assert!(!matches!(
+            last(base, "I will be there in ten minutes", &all),
+            Alignment::Edited(_)
+        ));
     }
 
     #[test]
@@ -2601,6 +2765,10 @@ mod tests {
                 pairs += 1;
                 let base = format!("{field_text} {pasted}");
                 let words: Vec<&str> = pasted.split(' ').collect();
+                let same_word_beside = field_text
+                    .rsplit(' ')
+                    .next()
+                    .is_some_and(|last| last.eq_ignore_ascii_case(words[0]));
                 let edited_base =
                     format!("{field_text} {} Hex", words[..words.len() - 1].join(" "));
                 let trackers = [
@@ -2624,6 +2792,9 @@ mod tests {
                             !span.contains(field_text) && span.ends_with("Hex"),
                             "{field_text:?} leaked into {span:?}"
                         ),
+                        // The paste's first word is the one the field ends
+                        // with: which of the two is the paste's is not known.
+                        Alignment::NotFound if same_word_beside => {}
                         other => panic!("{field_text:?} / {pasted:?}: {other:?}"),
                     }
                 }
@@ -2729,6 +2900,105 @@ mod tests {
             "no world",
             &["no no noworld", "yes no noworld"],
         ));
+    }
+
+    #[test]
+    fn round_11_g_a_line_break_among_words_put_in_at_an_open_edge_is_not_the_paste() {
+        // "Rune" typed, a new paragraph, then "secret": one read, and the
+        // words after the break are a line of their own.
+        let a = replay(
+            "send it to Kip Jones",
+            Some(0),
+            "",
+            &[
+                "send it to Kip Jones",
+                "send it to ",
+                "send it to Rune\nsecret",
+            ],
+        );
+        assert_eq!(a[1], Alignment::Edited("send it to".into()));
+        assert!(!matches!(a[2], Alignment::Edited(_)), "{a:?}");
+        let a = replay(
+            "Kip Jones said",
+            Some(0),
+            "",
+            &["Kip Jones said", " said", "secret\nRune said"],
+        );
+        assert!(!matches!(a[2], Alignment::Edited(_)), "{a:?}");
+        // Over a selection, in one read, likewise.
+        stores_nothing(&replay(
+            "send it to Kip Jones",
+            Some(0),
+            "",
+            &["send it to Kip Jones", "send it to Rune\nsecret"],
+        ));
+    }
+
+    #[test]
+    fn round_11_h_a_replacement_that_is_the_text_beside_the_paste_is_not_the_paste() {
+        // "Yes " deleted and " No" typed again, or "No" over "Yes": the same text.
+        stores_nothing(&replay("Yes", Some(0), " No", &["Yes No", "No No"]));
+        stores_nothing(&replay("No", Some(3), "Yes ", &["Yes No", "Yes Yes"]));
+        // A different word over it is the edit.
+        let a = replay("Yes", Some(0), " No", &["Yes No", "Hex No"]);
+        assert_eq!(a[1], Alignment::Edited("Hex".into()));
+    }
+
+    #[test]
+    fn round_11_i_a_copy_of_the_paste_typed_among_other_keys_is_not_it() {
+        stores_nothing(&replay(
+            "kip hanks",
+            Some(0),
+            "",
+            &["kip hanks", "Ikip hanks kip hanks", "Ikip hanks kip\u{df}"],
+        ));
+        // The copy typed with a key inside it, before the paste's own words.
+        stores_nothing(&replay(
+            "north south east",
+            Some(0),
+            " tail",
+            &[
+                "north south east tail",
+                "north south east north soxuth east tail",
+                "north south east north soxuth eas tail",
+            ],
+        ));
+    }
+
+    #[test]
+    fn round_11_j_a_word_taken_out_of_equal_words_could_be_any_of_them() {
+        stores_nothing(&replay("a a", None, "a ", &["a a a", "a a ", "a a g"]));
+        stores_nothing(&replay(
+            "Kip Kip",
+            Some(3),
+            "Kip ",
+            &["Kip Kip Kip", "Kip Kip ", "Kip Kip Rune"],
+        ));
+    }
+
+    #[test]
+    fn round_11_k_keys_glued_to_the_paste_and_a_space_in_one_read_are_not_it() {
+        stores_nothing(&replay(
+            "oscar",
+            Some(0),
+            "",
+            &[
+                "oscar",
+                "\u{df}oscar ",
+                "\u{df}osca ",
+                "\u{df}o ",
+                "\u{df} ",
+            ],
+        ));
+        // Keys one at a time, glued, are the word run on: still it.
+        let a = replay("Kip", Some(0), "", &["Kip", "Kips"]);
+        assert_eq!(a[1], Alignment::Edited("Kips".into()));
+    }
+
+    #[test]
+    fn round_11_letters_typed_and_taken_out_in_one_read_leave_the_equal_words_unplaced() {
+        // "a" taken from the front and typed at the end: the same words.
+        stores_nothing(&replay("a", Some(1), "a", &["a a", " a\ta", " a\tab"]));
     }
 
     #[test]
