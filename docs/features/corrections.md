@@ -211,27 +211,43 @@ word typed before the first and the first then deleted, a wipe and refill, a
 second paste of the same words, a Return then a fix, a cleared field, a
 pre-existing copy brought near a shifted anchor, and a window that crosses
 8,192 characters mid-run. The oracle is provenance: every word of a stored span
-must overlap the paste's own region (words are unique, so a copy elsewhere
-cannot pass for it), an edge edit stores exactly the region, or the replacement
+must lie wholly inside the paste's own region (a word that touches it or is
+joined to the text beside it is not inside; words are unique, so a copy
+elsewhere cannot pass for it), an edge edit stores exactly the region, or the replacement
 as far as the paste's words were used (a prefix, never a longer span), or
 nothing, a deleted paste stores nothing, and the edits a person would call one
 change are all stored. A reviewer's independent fuzz (`fuzz_tests.rs`, its own
 model of the region) and recall measurement (`recall_tests.rs`) run beside it.
 
 The default run is a fast subset (about 2,400 runs). The ignored
-`what_is_stored_holds_over_a_long_run` is 858,981 runs (180,622 stored, 45,396
-known-good, all stored exactly): 0 outside the region, 0 from a deleted paste,
-0 inexact, 0 missed (counted separately: 42 waived, where words alone cannot
-tell two readings apart: an edit beside typed text that one word diff reads as
-one change, two identical copies at the anchor before the first read, a
+`what_is_stored_holds_over_a_long_run` is 857,700 runs (155,665 stored, 44,911
+known-good): 0 outside the region, 0 from a deleted paste, 0 inexact, 0
+known-good missed (counted separately: 16 waived, where words alone cannot tell
+two readings apart: an edit beside typed text that one word diff reads as one
+change, two identical copies at the anchor before the first read, a
 whole-paste replacement followed by keys at its edge, a typed line break an app
-collapses). The previous design (round 7) under the same 858,981 runs: 4,529
-outside the region, 21 from a deleted paste, 2 missed. The reviewer's fuzz is
-300,000 cases with 0 outside. `recall_tests.rs` measures every way of fixing
-each word of 12 pastes (64,701 fixes): 64,080 (99.0%) are stored exactly and
-none is stored as anything but the fix; the round 7 design stored 62,405
-(96.5%) and 357 as something else, and only 37.7% of the fixes to a last word
-that was then typed on after.
+collapses; each waiver applies only to the step at which its case first leaks,
+and 14 known-good edits lost where the old and new word share an edge character
+and the text has a second reading, 0.03%). `origin_tests.rs` judges a stored
+span by the origin of each character (before the paste, the paste, typed) and
+runs the reviewer's four fuzzers, 300,000 cases each, 0 leaks (the round 8
+code: 224 to 307 per 300,000), beside a named regression for each case in the
+rules above. `recall_tests.rs` measures every way of fixing each word of 12
+pastes (64,701 fixes): 64,059 (99.0%) are stored exactly and none is stored as
+anything but the fix; the round 8 design stored 64,080 (99.03%), and the round 7
+design 62,405 (96.5%) and 357 as something else.
+
+The recall cost of round 9, stated plainly: 21 fewer fixes of 64,701, all a first
+word backspaced to part of a word and retyped two keys at a time ("the", "t",
+then "tht": which reads the same as "th" typed before the "t"), and in the
+property generator 14 of 44,911 known-good edits (an edit whose old and new word
+share an edge letter). Beyond what those measure: words typed at an edge are
+limited to the words taken there, a replacement that ends in whitespace before
+its words are back is lost, text typed against the word after a start edge
+whose word was deleted is lost, and a paste not in place at the first read
+lands later only as one change bringing in more than one character of it. A
+missed correction costs one training example; a stored wrong one teaches the
+model text the person never meant.
 
 Known limits, stated plainly: a send button without a Return loses the
 observation (the field going blank looks like delete-all); a keystroke that
