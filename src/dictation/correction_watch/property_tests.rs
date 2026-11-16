@@ -1691,7 +1691,7 @@ fn what_is_stored_is_the_pastes_own_region_and_nothing_else() {
 fn what_is_stored_holds_over_a_long_run() {
     let report = report(1_000_000, 1_290_000);
     print(&report);
-    check(&report, 800_000, 40_000);
+    check(&report, 800_000, 30_000);
 }
 
 /// Before the paste has been seen whole, nothing is an edit: not anchored,

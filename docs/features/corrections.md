@@ -80,31 +80,27 @@ of unrelated chat sentences were stored as edits).
 
 How the region is found (`locate.rs`, `Tracker`):
 
-- With a caret and the field read before the paste. Hex reads the caret (`AXSelectedTextRange`'s
-  location, in UTF-16 units, which is where a paste starts) and the field's
-  text. Hex lands only on a read where exactly one copy of the paste's words
-  starts within 8 units of the anchor that was not already in the field before
-  the paste. A copy that was there is tracked through every change since, so a
-  pre-existing copy brought near the anchor (the text between deleted) never
-  lands; two new copies near it, or an old one next to the new, lose the
-  tracker. Text typed before the paste arrives moves the anchor first, through
-  the same change locator the region uses; the paste's own arrival does not.
-  The region is then snapped to the field's own tokens (first matched word's
-  start to the last one's end), so an app that stores fewer units than were
-  inserted (blank lines collapsed, a dropped edge space), or an anchor a unit
-  or two off, cannot leave it hanging past the paste. The paste found only
-  elsewhere (another copy; the app has not applied it yet) is not a landing; it
-  waits. A blank read before it lands only notes the blank and goes on waiting;
-  it retires the tracker only while a region is followed. If the field could
-  not be read before the paste (a failed read, a window), nothing is followed,
-  caret or not: without the field as it stood, a copy of the paste's words near
-  the caret cannot be told from the paste (the old text, with the paste undone,
-  would be taken for it).
-- With no caret (the app reports no selection range). Hex reads the field's
-  text before the paste. The first read where the paste's words occur exactly
-  once, having occurred nowhere before it, adopts that occurrence. Occurring
-  before it, twice, or the field before it unread: the watch can only report
-  unchanged or lost.
+- By proof of arrival (round 10). Hex reads the field before the paste
+  (`before`) and the caret (`AXSelectedTextRange`'s location, in UTF-16 units,
+  which is where a paste starts). It lands only on a read that is `before` with
+  exactly the paste's characters put in at one place (within 8 units of the
+  caret when there is one, anywhere without one), where the paste's words stand
+  apart from the text on both sides: the paste's first character is not
+  against a word before it, nor its last against a word after it (a paste glued
+  to a neighbour is lost, since the glued word's own letters could be either's).
+  The region is the paste's words in that inserted span. More than one place
+  that fits (a periodic text: "no " put in "no world") loses the tracker; so
+  does a one-character paste that shows up after a read of the field as it
+  was, which a typed key cannot be told from. A read that is `before` unchanged
+  keeps waiting (the app has not applied the paste yet); any other read, a
+  blank one included, loses the tracker, so text typed before the paste arrives,
+  an app that rewrites what it pasted (blank lines collapsed, a dropped edge
+  space), a paste that arrives elsewhere than the caret, and a field cleared
+  and refilled all store nothing. No copy of the paste's words found in the
+  field decides anything: the insertion is the only proof, which is why an old
+  copy brought near the caret, one typed afterwards, and one glued to a
+  neighbour cannot be taken for the paste. If the field could not be read
+  before the paste (a failed read, a window), nothing is followed, caret or not.
 - A window (a field over 8,192 characters) retires the tracker, also while it
   is still waiting, and also when the window is blank.
 
@@ -158,13 +154,19 @@ meant. The rules that bound what a region can take in (R1 to R9, D-8):
   puts text in its place) disagrees with every other reading. A one-character
   region deleted with its space ("great idea a" to "great idea") is lost, not
   moved onto "idea".
-- **R4.** Landing provenance, above. The field must have been read before the
-  paste: without it (a failed or windowed read) nothing is followed, since a
-  copy of the paste's words near the caret cannot be told from the paste. An
-  old copy's start moves on when text is inserted at it, which the start of a
-  paste not yet seen does not.
+- **R4.** Landing is by proof of arrival, above: the read is the field as it
+  was with exactly the paste's characters put in at one place near the caret,
+  not glued to a word beside it. The old machinery (old-copy offsets, `seen`,
+  the arrival test, the anchor moving with typed text) is gone. The field must
+  have been read before the paste: without it nothing is followed.
 - **R5.** A window is checked before a blank read, so a blank window retires a
-  waiting tracker.
+  waiting tracker, and so does any blank read that is not the field as it was.
+- **R10.** Blanks put over a word at a region's edge (a line break typed over a
+  selection of the last word) lose the region: nothing says where the
+  replacement ends, and text typed after the break is a new paragraph's.
+  Keys with a blank among them, glued to the last word in one read, lose it
+  too: they are "pple pie Hanks" typed after the pasted "a", or "apple pie "
+  put before it and the "a" typed over.
 - **R6, words that run out of the region.** A word that overlaps the region
   and extends outside it (the paste's last word glued to the text after it by
   deleting the space, or typed against the text before it) is joined text, none
@@ -219,23 +221,26 @@ nothing, a deleted paste stores nothing, and the edits a person would call one
 change are all stored. A reviewer's independent fuzz (`fuzz_tests.rs`, its own
 model of the region) and recall measurement (`recall_tests.rs`) run beside it.
 
-The default run is a fast subset (about 2,400 runs). The ignored
-`what_is_stored_holds_over_a_long_run` is 857,700 runs (155,665 stored, 44,911
+The default run is a fast subset (about 3,600 runs). The ignored
+`what_is_stored_holds_over_a_long_run` is 857,508 runs (128,698 stored, 32,024
 known-good): 0 outside the region, 0 from a deleted paste, 0 inexact, 0
-known-good missed (counted separately: 16 waived, where words alone cannot tell
-two readings apart: an edit beside typed text that one word diff reads as one
-change, two identical copies at the anchor before the first read, a
-whole-paste replacement followed by keys at its edge, a typed line break an app
-collapses; each waiver applies only to the step at which its case first leaks,
-and 14 known-good edits lost where the old and new word share an edge character
-and the text has a second reading, 0.03%). `origin_tests.rs` judges a stored
-span by the origin of each character (before the paste, the paste, typed) and
-runs the reviewer's four fuzzers, 300,000 cases each, 0 leaks (the round 8
-code: 224 to 307 per 300,000), beside a named regression for each case in the
-rules above. `recall_tests.rs` measures every way of fixing each word of 12
-pastes (64,701 fixes): 64,059 (99.0%) are stored exactly and none is stored as
-anything but the fix; the round 8 design stored 64,080 (99.03%), and the round 7
-design 62,405 (96.5%) and 357 as something else.
+known-good missed, 5 known-good edits lost where the old and new word share an
+edge character and the text has a second reading, and 14 waived. The one
+waiver left is a typed line break an app that collapses blank lines shows as
+nothing (each waiver applies only to the step at which its case first leaks,
+and a deleted paste's leak is never waived). Round 10 deleted the three other
+waiver clauses (two changes in one read, an edit before the paste was first
+read, keys after a replaced paste): they were dead over 857,700 runs, and the
+one case that did reach the first of them with the new generators ("apple pie
+Hanks a" after pasting "a") is now lost by the tracker instead. The generator
+gained glued pastes (no separator on one side or both) and repeated or
+periodic pastes beside the same words. `origin_tests.rs` judges a stored span
+by the origin of each character and runs the reviewer's four fuzzers, and
+`glue_fuzz_tests.rs` the glued-paste fuzzers (unfiltered: a leak counts
+whether or not the tracker landed), 300,000 cases each, 0 leaks (the round 9
+code leaks in them within 20,000 cases). `recall_tests.rs` measures every way
+of fixing each word of 12 pastes (64,701 fixes): 64,059 (99.0%) stored
+exactly, none stored as anything but the fix: the same as round 9.
 
 The recall cost of round 9, stated plainly: 21 fewer fixes of 64,701, all a first
 word backspaced to part of a word and retyped two keys at a time ("the", "t",
@@ -245,8 +250,14 @@ share an edge letter). Beyond what those measure: words typed at an edge are
 limited to the words taken there, a replacement that ends in whitespace before
 its words are back is lost, text typed against the word after a start edge
 whose word was deleted is lost, and a paste not in place at the first read
-lands later only as one change bringing in more than one character of it. A
-missed correction costs one training example; a stored wrong one teaches the
+lands later only as one change bringing in more than one character of it.
+Round 10 adds: a paste glued to a word beside it, one the app rewrote, one that
+arrives away from the caret, and a periodic text that fits two places are never
+followed; a one-character paste into a field read empty first is lost (a typed
+key looks the same); keys with a blank among them glued to the paste in one
+read are lost. The generator's known-good count fell (44,911 to 32,024)
+because glued and periodic cases are excluded from it; recall on the 64,701
+fixes did not change. A missed correction costs one training example; a stored wrong one teaches the
 model text the person never meant.
 
 Known limits, stated plainly: a send button without a Return loses the
@@ -263,9 +274,9 @@ not stored); two words typed over two key by key are lost at the space, not cut
 short, while the same two in one read are stored; a word typed before the paste
 and then the paste's first word forward-deleted is lost, as is a word typed
 into the first word (no space) and the old letters then deleted; a paste's
-replacement typed at the exact spot before the paste arrives (the anchor does
-not move past text typed at it) loses the landing; two identical copies at the
-anchor are never told apart; an app whose selection offsets are not UTF-16
+replacement typed before the paste arrives loses the landing (any change but
+the paste's own arrival does); two places the paste could fit are never told
+apart; an app whose selection offsets are not UTF-16
 units gets unchanged or lost only (the paste is never adopted from elsewhere);
 an app that clears the field a tick after Return with the next message typed in
 the same tick cannot be told from an edit.
