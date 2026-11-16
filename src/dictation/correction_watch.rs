@@ -24,6 +24,8 @@ use crate::history::History;
 mod fuzz_tests;
 mod locate;
 #[cfg(test)]
+mod origin_tests;
+#[cfg(test)]
 mod property_tests;
 #[cfg(test)]
 mod recall_tests;

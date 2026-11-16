@@ -5,8 +5,9 @@
 //! every case comes from a seed.
 //!
 //! The oracle is by provenance, with no slack: every word of a stored span
-//! must overlap the model's region (a word that touches it counts, as it is
-//! one token), and the unique-word cases make every word's place exact. Edge
+//! must lie wholly inside the model's region (a word that merely touches it,
+//! or is joined to the text beside it, is not inside), and the unique-word
+//! cases make every word's place exact. Edge
 //! edits that come a key at a time must store exactly the region or nothing.
 //!
 //! Every case runs with the caret known, and with no caret, and with one more
@@ -63,7 +64,15 @@ const CHAT: [&str; 36] = [
 ];
 
 /// Text around a paste that is not plain English words.
-const ODD: [&str; 6] = [
+const ODD: [&str; 14] = [
+    "great idea",
+    "It works",
+    "apple pie",
+    "ok. my secret is hunter2",
+    "tail",
+    "I a",
+    "a",
+    "I",
     "see \u{FFFC} attached",
     "ok \u{1F600} great",
     "\u{597d}\u{7684}\u{8c22}\u{8c22}",
@@ -72,8 +81,20 @@ const ODD: [&str; 6] = [
     "to the it",
 ];
 
-/// Pastes of one or two words, with emoji or CJK, and with blank lines.
-const SHORT: [&str; 10] = [
+/// Pastes of one or two words, with emoji or CJK, and with blank lines; a one
+/// character word or region, and words that share a first or last letter with
+/// the text around them.
+const SHORT: [&str; 20] = [
+    "a",
+    "I",
+    "buy a",
+    "I a",
+    "Hanks tail",
+    "idea",
+    "It",
+    "a idea",
+    "send it to Kip",
+    "Kip kip",
     "Hanks",
     "Yes",
     "Kip",
@@ -86,7 +107,9 @@ const SHORT: [&str; 10] = [
     "alpha beta\n\ngamma delta",
 ];
 
-const WORDS: [&str; 7] = ["Hex", "Rune", "Friday", "banana", "Sarah", "Monday", "Kit"];
+const WORDS: [&str; 12] = [
+    "Hex", "Rune", "Friday", "banana", "Sarah", "Monday", "Kit", "a", "I", "idea", "Hanks", "tail",
+];
 
 /// Words no two of which are alike (never one letter apart), so that every
 /// word in a case has a place of its own.
@@ -176,7 +199,7 @@ impl Gen {
                 let n = 2 + self.rng.below(5);
                 self.words(n)
             }
-            None if self.rng.below(10) == 0 => self.rng.pick(&ODD).to_string(),
+            None if self.rng.below(5) == 0 => self.rng.pick(&ODD).to_string(),
             None => self.words(0),
         }
     }
@@ -395,6 +418,7 @@ fn session_for<'a>(
 }
 
 /// One generated case: the field, the actions, each with the reads it made.
+#[derive(Clone)]
 struct Case {
     paste: String,
     initial: Model,
@@ -1129,25 +1153,6 @@ fn hunks_between(before: &str, after: &str, most: bool) -> usize {
     usize::try_from(best[0][0][0].1 * step).unwrap_or(0)
 }
 
-/// Whether an edit and text typed beside it, in one read, can also be read as
-/// one change: the typed words share a word with the paste's boundary ("I"
-/// kept, then "can't make it ... Monday" typed after it). A word diff cannot
-/// tell the two readings apart, so what it stores then may hold the typed
-/// text; the run is counted in `waived`, not as a leak.
-fn one_hunk_reading(case: &Case) -> bool {
-    let mut before = &case.initial;
-    let mut ambiguous = false;
-    for (action, reads) in &case.steps {
-        let Some(after) = reads.last() else { continue };
-        ambiguous |= matches!(
-            action,
-            Action::MultiHunk | Action::EditAndAppend | Action::PrependAndEdit
-        ) && fewest_hunks(&before.text, &after.text) == 1;
-        before = after;
-    }
-    ambiguous
-}
-
 /// How a stored span leaks, if it does: from a deleted paste, or from outside
 /// the region of every read of the field.
 fn leak(
@@ -1181,32 +1186,82 @@ fn kept_the_fixed_words(span: &str, expected: &str, paste: &str) -> bool {
         && words_of(span).len() == words_of(paste.trim()).len()
 }
 
-/// An edit made before the paste was first read that shows the same words
-/// twice at the anchor: which copy is the paste cannot be known from the field.
-fn two_copies_before_the_first_read(case: &Case) -> bool {
-    case.setup == Setup::EditedBeforeSeen
-        && case.steps.first().is_some_and(|(action, _)| {
-            matches!(action, Action::PasteBefore | Action::WsThenInsertBefore)
-        })
+/// Whether step `k` of the case is one whose stored text the words cannot tell
+/// from the paste's own, so that a leak that first shows at it is counted in
+/// `waived`, not as a leak. A waiver belongs to its step alone: a leak that
+/// first shows at any other step is never waived.
+///
+/// - An edit and text typed beside it, in one read, can also be read as one
+///   change: the typed words share a word with the paste's boundary ("I"
+///   kept, then "can't make it ... Monday" typed after it).
+/// - An edit made before the paste was first read that shows the same words
+///   twice at the anchor: which copy is the paste cannot be known.
+/// - The whole paste replaced, then keys typed at its edge: the replacement's
+///   edges are open, so those keys are taken for more of it while the paste's
+///   words are not all used.
+/// - An app that collapses blank lines shows a typed line break as nothing at
+///   all: what is typed after it cannot be told from typing at the edge.
+fn waivable_step(case: &Case, k: usize, mode: Mode) -> bool {
+    let (action, reads) = &case.steps[k];
+    let before = match k {
+        0 => &case.initial,
+        _ => case.steps[k - 1].1.last().unwrap_or(&case.initial),
+    };
+    let after = reads.last().unwrap_or(before);
+    (matches!(
+        action,
+        Action::MultiHunk | Action::EditAndAppend | Action::PrependAndEdit
+    ) && fewest_hunks(&before.text, &after.text) == 1)
+        || (k == 0
+            && case.setup == Setup::EditedBeforeSeen
+            && matches!(action, Action::PasteBefore | Action::WsThenInsertBefore))
+        || (matches!(action, Action::KeysBefore | Action::KeysAfter)
+            && case.steps[..k]
+                .iter()
+                .any(|(earlier, _)| *earlier == Action::ReplaceAll))
+        || (mode == Mode::Collapsing && *action == Action::WsThenInsertBefore)
 }
 
-/// The whole paste replaced in one read, then keys typed at its edge: the
-/// replacement's edges are open, so those keys are taken for more of it while
-/// the paste's words are not all used.
-fn replaced_then_typed_at_the_edge(case: &Case) -> bool {
-    let mut replaced = false;
-    for (action, _) in &case.steps {
-        match action {
-            Action::ReplaceAll => replaced = true,
-            Action::KeysBefore | Action::KeysAfter if replaced => return true,
-            _ => {}
-        }
+/// The case cut after its first `steps` steps.
+fn cut(case: &Case, steps: usize) -> Case {
+    Case {
+        steps: case.steps[..steps].to_vec(),
+        ..case.clone()
     }
-    false
 }
 
-/// Whether `span` sits in the final field with every word of it overlapping
-/// the region. With `every` (unique words) all its places must, else one.
+/// How the case's stored text leaks after its first `steps` steps, if it does.
+fn leak_after(case: &Case, steps: usize, mode: Mode) -> Option<&'static str> {
+    let case = cut(case, steps);
+    let run = run(&case, mode);
+    let Outcome::Edited(span) = &run.outcome else {
+        return None;
+    };
+    let every_read: Vec<&Model> = std::iter::once(&case.initial)
+        .chain(case.steps.iter().flat_map(|(_, reads)| reads))
+        .collect();
+    leak(
+        &run,
+        &every_read,
+        span,
+        mode == Mode::Collapsing,
+        case.unique && case.setup != Setup::DuplicateShort,
+    )
+}
+
+/// Whether the leak the whole case ends with first showed at a step that is
+/// waivable: the first step after which the case, cut there, already leaks.
+fn leak_is_waived(case: &Case, mode: Mode) -> bool {
+    let first = (1..=case.steps.len())
+        .find(|&steps| leak_after(case, steps, mode).is_some())
+        .unwrap_or(case.steps.len());
+    first > 0 && waivable_step(case, first - 1, mode)
+}
+
+/// Whether `span` sits in the final field with every word of it wholly inside
+/// the region: a word that only touches it, or runs out of it into the text
+/// beside it, is not. With `every` (unique words) all its places must, else
+/// one.
 fn inside(text: &str, from: usize, to: usize, span: &str, every: bool) -> bool {
     let words = words_of(text);
     let mut ok = Vec::new();
@@ -1216,7 +1271,7 @@ fn inside(text: &str, from: usize, to: usize, span: &str, every: bool) -> bool {
         let all = words
             .iter()
             .filter(|(a, b)| *a < end && *b > start)
-            .all(|(a, b)| *b > from && *a < to);
+            .all(|(a, b)| *a >= from && *b <= to);
         ok.push(all);
         at = start + text[start..].chars().next().map_or(1, char::len_utf8);
     }
@@ -1338,19 +1393,7 @@ fn report(first: u64, last: u64) -> Report {
             .iter()
             .flat_map(|(_, reads)| reads.iter())
             .any(|m| m.text.to_lowercase().contains(&case.paste.to_lowercase()));
-        let waivable = one_hunk_reading(&case)
-            || two_copies_before_the_first_read(&case)
-            || replaced_then_typed_at_the_edge(&case);
         for mode in modes(seed) {
-            // An app that collapses blank lines shows a typed line break as
-            // nothing at all: what is typed after it cannot be told from typing
-            // at the edge.
-            let waivable = waivable
-                || (mode == Mode::Collapsing
-                    && case
-                        .steps
-                        .iter()
-                        .any(|(action, _)| *action == Action::WsThenInsertBefore));
             let run = run(&case, mode);
             let collapses = mode == Mode::Collapsing;
             let mut mine = Counts {
@@ -1381,7 +1424,7 @@ fn report(first: u64, last: u64) -> Report {
                     collapses,
                     case.unique && case.setup != Setup::DuplicateShort,
                 ) {
-                    if waivable {
+                    if leak_is_waived(&case, mode) {
                         mine.waived += 1;
                     } else if leak == "deleted" {
                         mine.deleted_stored += 1;
