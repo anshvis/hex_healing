@@ -13,7 +13,13 @@
 //! Every case runs with the caret known, and with no caret, and with one more
 //! of: the caret a few units off, an app that collapses blank lines, and a
 //! field too large to read whole. A field that grows past what a read takes
-//! turns to windows mid-run.
+//! turns to windows mid-run. Some cases paste with no separator from the text
+//! on one side or both (`Setup::Glued`), and some paste a repeated or periodic
+//! text beside the same words (`Setup::Periodic`).
+//!
+//! The one waiver is a leak that first shows at a typed line break in an app
+//! that collapses blank lines (`waivable_step`); a deleted paste's is never
+//! waived.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -381,6 +387,12 @@ enum Setup {
     StartsEmpty,
     /// The paste's own words sit right next to it already.
     DuplicateShort,
+    /// The paste is put in with no separator from the text on one side or
+    /// both: its edge words run into the words beside it.
+    Glued,
+    /// A repeated (or periodic) paste with the same words beside it, sometimes
+    /// glued: the same text can be read as inserted at more than one place.
+    Periodic,
 }
 
 struct Live {
@@ -448,12 +460,15 @@ fn generate(seed: u64) -> Case {
             None => words_gen.rng.pick(&CHAT).to_string(),
         }
     };
-    let setup = match words_gen.rng.below(10) {
+    let setup = match words_gen.rng.below(14) {
         0 => Setup::EditedBeforeSeen,
         1 => Setup::StartsEmpty,
         2 if short => Setup::DuplicateShort,
+        3 | 4 => Setup::Glued,
+        5 | 6 => Setup::Periodic,
         _ => Setup::Normal,
     };
+    let mut paste = paste;
     let (mut prefix, mut suffix) = (String::new(), String::new());
     if setup != Setup::StartsEmpty {
         if words_gen.rng.below(4) != 0 {
@@ -468,6 +483,44 @@ fn generate(seed: u64) -> Case {
             prefix = format!("{paste} ");
         } else {
             suffix = format!(" {paste}");
+        }
+    }
+    if setup == Setup::Glued {
+        // At least one side runs straight into the text beside it.
+        let sides = 1 + words_gen.rng.below(3);
+        prefix = words_gen.sentence();
+        suffix = words_gen.sentence();
+        if sides & 1 == 0 {
+            prefix.push(' ');
+        }
+        if sides & 2 == 0 {
+            suffix.insert(0, ' ');
+        }
+    }
+    if setup == Setup::Periodic {
+        let word = words_gen.word();
+        let unit = if words_gen.rng.below(2) == 0 {
+            word.clone()
+        } else {
+            format!("{word} {}", words_gen.word())
+        };
+        let times = |n: usize| vec![unit.as_str(); n].join(" ");
+        paste = times(2 + words_gen.rng.below(2));
+        let around = |rng: &mut Rng, joined: String, space_first: bool| {
+            let joiner = if rng.below(3) == 0 { "" } else { " " };
+            if space_first {
+                format!("{joiner}{joined}")
+            } else {
+                format!("{joined}{joiner}")
+            }
+        };
+        let count = words_gen.rng.below(3);
+        if count > 0 {
+            prefix = around(&mut words_gen.rng, times(count), false);
+        }
+        let count = words_gen.rng.below(3);
+        if count > 0 {
+            suffix = around(&mut words_gen.rng, times(count), true);
         }
     }
     let text = format!("{prefix}{paste}{suffix}");
@@ -491,7 +544,7 @@ fn generate(seed: u64) -> Case {
         initial,
         before,
         setup,
-        unique: words_gen.unique.is_some(),
+        unique: words_gen.unique.is_some() && setup != Setup::Periodic,
         steps,
     }
 }
@@ -1189,37 +1242,16 @@ fn kept_the_fixed_words(span: &str, expected: &str, paste: &str) -> bool {
 /// Whether step `k` of the case is one whose stored text the words cannot tell
 /// from the paste's own, so that a leak that first shows at it is counted in
 /// `waived`, not as a leak. A waiver belongs to its step alone: a leak that
-/// first shows at any other step is never waived.
+/// first shows at any other step is never waived, and a deleted paste's leak
+/// is never waived (the caller checks it first).
 ///
-/// - An edit and text typed beside it, in one read, can also be read as one
-///   change: the typed words share a word with the paste's boundary ("I"
-///   kept, then "can't make it ... Monday" typed after it).
-/// - An edit made before the paste was first read that shows the same words
-///   twice at the anchor: which copy is the paste cannot be known.
-/// - The whole paste replaced, then keys typed at its edge: the replacement's
-///   edges are open, so those keys are taken for more of it while the paste's
-///   words are not all used.
-/// - An app that collapses blank lines shows a typed line break as nothing at
-///   all: what is typed after it cannot be told from typing at the edge.
+/// The one waiver: an app that collapses blank lines shows a typed line break
+/// as nothing at all, so what is typed after it cannot be told from typing at
+/// the edge. (The clauses for two changes in one read, an edit before the paste
+/// was first read, and keys after a replaced paste were each measured dead over
+/// 857,700 cases and removed in round 10.)
 fn waivable_step(case: &Case, k: usize, mode: Mode) -> bool {
-    let (action, reads) = &case.steps[k];
-    let before = match k {
-        0 => &case.initial,
-        _ => case.steps[k - 1].1.last().unwrap_or(&case.initial),
-    };
-    let after = reads.last().unwrap_or(before);
-    (matches!(
-        action,
-        Action::MultiHunk | Action::EditAndAppend | Action::PrependAndEdit
-    ) && fewest_hunks(&before.text, &after.text) == 1)
-        || (k == 0
-            && case.setup == Setup::EditedBeforeSeen
-            && matches!(action, Action::PasteBefore | Action::WsThenInsertBefore))
-        || (matches!(action, Action::KeysBefore | Action::KeysAfter)
-            && case.steps[..k]
-                .iter()
-                .any(|(earlier, _)| *earlier == Action::ReplaceAll))
-        || (mode == Mode::Collapsing && *action == Action::WsThenInsertBefore)
+    mode == Mode::Collapsing && case.steps[k].0 == Action::WsThenInsertBefore
 }
 
 /// The case cut after its first `steps` steps.
@@ -1468,11 +1500,11 @@ fn report(first: u64, last: u64) -> Report {
                     collapses,
                     case.unique && case.setup != Setup::DuplicateShort,
                 ) {
-                    if leak_is_waived(&case, mode) {
-                        mine.waived += 1;
-                    } else if leak == "deleted" {
+                    if leak == "deleted" {
                         mine.deleted_stored += 1;
                         note(leak, format!("{span:?}"));
+                    } else if leak_is_waived(&case, mode) {
+                        mine.waived += 1;
                     } else {
                         mine.outside += 1;
                         note(leak, format!("{span:?}"));
@@ -1523,7 +1555,10 @@ fn report(first: u64, last: u64) -> Report {
                     && matches!(mode, Mode::Anchored | Mode::Drifting(_) | Mode::NoCaret)
                     && !held_before
                     && !blanked
-                    && case.setup != Setup::DuplicateShort;
+                    && !matches!(
+                        case.setup,
+                        Setup::DuplicateShort | Setup::Glued | Setup::Periodic
+                    );
                 let n = case.initial.words().len();
                 // One read, one word or two for as many: stored exactly.
                 let good_one = reads.len() == 1
@@ -1641,7 +1676,7 @@ fn check(report: &Report, runs: usize, good: usize) {
 #[test]
 fn what_is_stored_is_the_pastes_own_region_and_nothing_else() {
     // The fast subset: it fits nextest's 30 s limit in a debug build.
-    let report = report(1, 800);
+    let report = report(1, 1_200);
     print(&report);
     check(&report, 2_000, 100);
 }
