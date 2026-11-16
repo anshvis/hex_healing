@@ -6,8 +6,9 @@
 //!
 //! The oracle is by provenance, with no slack: every word of a stored span
 //! must lie wholly inside the model's region (a word that merely touches it,
-//! or is joined to the text beside it, is not inside), and the unique-word
-//! cases make every word's place exact. Edge
+//! or is joined to the text beside it, is not inside), and every place the
+//! span's words stand in a read must be inside: a span that also stands
+//! outside the region is not known to be the paste's, and stores nothing. Edge
 //! edits that come a key at a time must store exactly the region or nothing.
 //!
 //! Every case runs with the caret known, and with no caret, and with one more
@@ -18,7 +19,8 @@
 //! text beside the same words (`Setup::Periodic`).
 //!
 //! The one waiver is a leak that first shows at a typed line break in an app
-//! that collapses blank lines (`waivable_step`); a deleted paste's is never
+//! that collapses blank lines (`waivable_step`) whose stored words are none of
+//! the text from before the paste (`words_from_before`); a deleted paste's is never
 //! waived.
 
 use std::cell::RefCell;
@@ -312,9 +314,14 @@ enum Action {
     SpaceMerge,
     MergeDeleteTyped,
     TailCutThenSpace,
+    CopyAndEdit,
+    GlueAndSpace,
+    SwapContext,
+    BreakWithin,
+    Coalesced,
 }
 
-const ALL: [Action; 36] = [
+const ALL: [Action; 41] = [
     Action::EditWord,
     Action::EditTwo,
     Action::TrailingTwo,
@@ -351,6 +358,11 @@ const ALL: [Action; 36] = [
     Action::SpaceMerge,
     Action::MergeDeleteTyped,
     Action::TailCutThenSpace,
+    Action::CopyAndEdit,
+    Action::GlueAndSpace,
+    Action::SwapContext,
+    Action::BreakWithin,
+    Action::Coalesced,
 ];
 
 /// A word that sounds nearly like `word`: one letter changed.
@@ -436,7 +448,6 @@ struct Case {
     initial: Model,
     before: String,
     setup: Setup,
-    unique: bool,
     steps: Vec<(Action, Vec<Model>)>,
 }
 
@@ -544,7 +555,6 @@ fn generate(seed: u64) -> Case {
         initial,
         before,
         setup,
-        unique: words_gen.unique.is_some() && setup != Setup::Periodic,
         steps,
     }
 }
@@ -1019,6 +1029,97 @@ fn apply(model: &mut Model, action: Action, words_gen: &mut Gen) -> Vec<Model> {
             reads.push(model.clone());
             reads
         }
+        Action::CopyAndEdit => {
+            // A copy of the paste typed among other keys, in one read: a key
+            // glued to the paste's first word, and one of its words changed.
+            let copy = model.region().to_string();
+            if copy.trim().is_empty() {
+                return Vec::new();
+            }
+            if !words.is_empty() && words_gen.rng.below(2) == 0 {
+                let k = words_gen.rng.below(words.len());
+                replace_word(model, words_gen, k);
+            }
+            let glue = ["", "I", "x"][words_gen.rng.below(3)];
+            if words_gen.rng.below(2) == 0 {
+                let to = model.to;
+                model.splice(to, to, &format!(" {copy}"));
+                let from = model.from;
+                model.splice(from, from, glue);
+                model.from += glue.len();
+                model.to += glue.len();
+            } else {
+                let put = format!("{copy} {glue}");
+                let from = model.from;
+                model.splice(from, from, &put);
+                model.from += put.len();
+                model.to += put.len();
+            }
+            one(model)
+        }
+        Action::GlueAndSpace => {
+            // Keys glued before the paste's first word and a blank after its
+            // last, in one read.
+            let glue = ["\u{df}", "I", "x"][words_gen.rng.below(3)];
+            let from = model.from;
+            model.splice(from, from, glue);
+            model.from += glue.len();
+            model.to += glue.len();
+            let blank = if words_gen.rng.below(4) == 0 {
+                "\n"
+            } else {
+                " "
+            };
+            let to = model.to;
+            model.splice(to, to, blank);
+            one(model)
+        }
+        Action::SwapContext => {
+            // The paste replaced by the very word beside it.
+            let after = model.text[model.to..].split_whitespace().next();
+            let before = model.text[..model.from].split_whitespace().next_back();
+            let Some(word) = after.or(before).map(str::to_string) else {
+                return Vec::new();
+            };
+            if word == model.region() {
+                return Vec::new();
+            }
+            let (from, to) = (model.from, model.to);
+            model.splice(from, to, &word);
+            model.to = from + word.len();
+            one(model)
+        }
+        Action::BreakWithin if words.len() >= 2 => {
+            // The last two words deleted, then "word\nword" typed in their
+            // place in one read: what follows the line break is a new line.
+            let (a, _) = words[words.len() - 2];
+            let (_, b) = words[words.len() - 1];
+            model.splice(a, b, "");
+            model.to -= b - a;
+            let mut reads = vec![model.clone()];
+            let (first, second) = (words_gen.word(), words_gen.word());
+            model.splice(a, a, &format!("{first}\n{second}"));
+            model.to = a + first.len();
+            reads.push(model.clone());
+            reads
+        }
+        Action::Coalesced => {
+            // Two ordinary changes in one read.
+            // (Not DeleteBefore, which takes the paste's own words with it: typed
+            // over, that is the same text as a replacement.)
+            const POOL: [Action; 6] = [
+                Action::EditWord,
+                Action::TypeAfter,
+                Action::TypeBefore,
+                Action::AppendWord,
+                Action::SecondDictation,
+                Action::PasteBefore,
+            ];
+            let (first, second) = (POOL[words_gen.rng.below(6)], POOL[words_gen.rng.below(6)]);
+            let made = !apply(model, first, words_gen).is_empty();
+            let made = !apply(model, second, words_gen).is_empty() || made;
+            if made { one(model) } else { Vec::new() }
+        }
         _ => Vec::new(),
     }
 }
@@ -1208,13 +1309,7 @@ fn hunks_between(before: &str, after: &str, most: bool) -> usize {
 
 /// How a stored span leaks, if it does: from a deleted paste, or from outside
 /// the region of every read of the field.
-fn leak(
-    run: &Run,
-    every_read: &[&Model],
-    span: &str,
-    collapses: bool,
-    unique: bool,
-) -> Option<&'static str> {
+fn leak(run: &Run, every_read: &[&Model], span: &str, collapses: bool) -> Option<&'static str> {
     if run.from == run.to {
         return Some("deleted");
     }
@@ -1224,7 +1319,6 @@ fn leak(
             stored(collapses, &m.text[..m.from]).len(),
             stored(collapses, &m.text[..m.to]).len(),
             span,
-            unique,
         )
     });
     (!inside_a_read).then_some("outside")
@@ -1263,7 +1357,7 @@ fn cut(case: &Case, steps: usize) -> Case {
 }
 
 /// How the case's stored text leaks after its first `steps` steps, if it does.
-fn leak_after(case: &Case, steps: usize, mode: Mode) -> Option<&'static str> {
+fn leak_after(case: &Case, steps: usize, mode: Mode) -> Option<String> {
     let case = cut(case, steps);
     let run = run(&case, mode);
     let Outcome::Edited(span) = &run.outcome else {
@@ -1272,22 +1366,30 @@ fn leak_after(case: &Case, steps: usize, mode: Mode) -> Option<&'static str> {
     let every_read: Vec<&Model> = std::iter::once(&case.initial)
         .chain(case.steps.iter().flat_map(|(_, reads)| reads))
         .collect();
-    leak(
-        &run,
-        &every_read,
-        span,
-        mode == Mode::Collapsing,
-        case.unique && case.setup != Setup::DuplicateShort,
-    )
+    leak(&run, &every_read, span, mode == Mode::Collapsing).map(|_| span.clone())
 }
 
 /// Whether the leak the whole case ends with first showed at a step that is
 /// waivable: the first step after which the case, cut there, already leaks.
 fn leak_is_waived(case: &Case, mode: Mode) -> bool {
-    let first = (1..=case.steps.len())
-        .find(|&steps| leak_after(case, steps, mode).is_some())
-        .unwrap_or(case.steps.len());
-    first > 0 && waivable_step(case, first - 1, mode)
+    let Some((first, span)) = (1..=case.steps.len())
+        .find_map(|steps| leak_after(case, steps, mode).map(|span| (steps, span)))
+    else {
+        return false;
+    };
+    waivable_step(case, first - 1, mode) && !words_from_before(case, &span)
+}
+
+/// Whether a word of the stored span stands in the text from before the paste
+/// and is not one of the paste's own words: that is not typing at an edge but
+/// text that was already there.
+fn words_from_before(case: &Case, span: &str) -> bool {
+    let fold =
+        |text: &str| -> Vec<String> { text.split_whitespace().map(str::to_lowercase).collect() };
+    let (before, paste) = (fold(&case.before), fold(&case.paste));
+    fold(span)
+        .iter()
+        .any(|w| before.contains(w) && !paste.contains(w))
 }
 
 /// Whether the first or last word of the paste, taken out by an edit, shares
@@ -1332,11 +1434,11 @@ fn edge_ambiguous(before: &str, after: &str, paste: &str) -> bool {
 
 /// Whether `span` sits in the final field with every word of it wholly inside
 /// the region: a word that only touches it, or runs out of it into the text
-/// beside it, is not. With `every` (unique words) all its places must, else
-/// one.
-fn inside(text: &str, from: usize, to: usize, span: &str, every: bool) -> bool {
+/// beside it, is not. Every place the span's words stand must be inside.
+fn inside(text: &str, from: usize, to: usize, span: &str) -> bool {
     let words = words_of(text);
     let mut ok = Vec::new();
+    let mut aligned = Vec::new();
     let mut at = 0;
     while let Some(found) = text[at..].find(span) {
         let (start, end) = (at + found, at + found + span.len());
@@ -1345,13 +1447,18 @@ fn inside(text: &str, from: usize, to: usize, span: &str, every: bool) -> bool {
             .filter(|(a, b)| *a < end && *b > start)
             .all(|(a, b)| *a >= from && *b <= to);
         ok.push(all);
+        // The span as words of its own, not a run of letters inside others.
+        let on_words =
+            words.iter().any(|(a, _)| *a == start) && words.iter().any(|(_, b)| *b == end);
+        if on_words {
+            aligned.push(all);
+        }
         at = start + text[start..].chars().next().map_or(1, char::len_utf8);
     }
-    if every {
-        !ok.is_empty() && ok.iter().all(|&all| all)
-    } else {
-        ok.iter().any(|&all| all)
-    }
+    // Every place the words stand must be the region's: otherwise which of the
+    // places is the paste's is not known.
+    let places = if aligned.is_empty() { &ok } else { &aligned };
+    !places.is_empty() && places.iter().all(|&all| all)
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -1493,13 +1600,7 @@ fn report(first: u64, last: u64) -> Report {
                 if mode == Mode::Windowed {
                     mine.outside += 1;
                     note("windowed", format!("{span:?}"));
-                } else if let Some(leak) = leak(
-                    &run,
-                    &every_read,
-                    span,
-                    collapses,
-                    case.unique && case.setup != Setup::DuplicateShort,
-                ) {
+                } else if let Some(leak) = leak(&run, &every_read, span, collapses) {
                     if leak == "deleted" {
                         mine.deleted_stored += 1;
                         note(leak, format!("{span:?}"));
@@ -1680,7 +1781,7 @@ fn check(report: &Report, runs: usize, good: usize) {
 #[test]
 fn what_is_stored_is_the_pastes_own_region_and_nothing_else() {
     // The fast subset: it fits nextest's 30 s limit in a debug build.
-    let report = report(1, 1_200);
+    let report = report(1, 1_800);
     print(&report);
     check(&report, 2_000, 100);
 }
@@ -1709,7 +1810,6 @@ fn nothing_is_an_edit_before_the_paste_was_seen() {
                 },
                 before: String::new(),
                 setup: Setup::Normal,
-                unique: false,
                 steps: Vec::new(),
             };
             let outcome = run(&case, mode).outcome;
