@@ -7,23 +7,17 @@
 //! pasted text occupied), never text from before or after it. When unsure the
 //! answer is `NotFound` or `Unchanged`, and a region once lost stays lost.
 //!
-//! How a region is found:
-//!
-//! - **Anchored**: the caret was read before the paste, so the paste's offset
-//!   is known. The first read that shows exactly one copy of the paste's words
-//!   starting within [`DRIFT`] units of it lands there, provided no other near
-//!   copy was ever seen (two near copies, or one from before the paste, lose
-//!   the tracker). Text typed before the paste arrives moves the anchor first,
-//!   through the change locator the region uses. The region is snapped to the
-//!   field's own tokens (first matched token's start to the last one's end),
-//!   so an app that stores fewer units than were inserted, or an anchor a
-//!   little off, cannot leave it hanging past the paste. The paste found
-//!   elsewhere only (another copy; the app has not applied it yet) is not a
-//!   landing, and waits.
-//! - **No caret**: the field was read before the paste. When it held the
-//!   paste's text nowhere, the first read with it exactly once adopts that
-//!   occurrence. Held before, or twice now, or unknown: the watch can only
-//!   report `Unchanged` or `NotFound`.
+//! How a region is found: by proof that the paste arrived. The field was read
+//! before the paste (`before`); a read lands the tracker only when it is
+//! `before` with exactly the paste's characters put in at one place, within
+//! [`DRIFT`] units of the caret's offset when there is one (any one place
+//! without a caret), and the paste's words stand apart from the text on both
+//! sides (a paste glued to a word beside it is never followed). The region is
+//! the paste's words in that span. A read that is `before` unchanged keeps
+//! waiting (the app has not applied the paste yet); any other read, blank
+//! ones included, loses the tracker, since nothing then says what is the
+//! paste's. Without `before` nothing is ever followed. No copy of the paste's
+//! words in the field decides anything: only the insertion does.
 //!
 //! How a region is followed (`Followed::after`): every read is diffed against
 //! the last. Text inserted or removed before the region moves it, a change
@@ -35,8 +29,7 @@
 //! selection) leaves that edge open: typing right at it counts as inside only
 //! as far as the words deleted there; one more word loses the region. A blank
 //! read, or one too large to follow (a window around the caret), retires the
-//! region; before the paste lands a blank read is only noted, a window retires
-//! the tracker at once. Only the field's text in the region is judged
+//! region, or the tracker still waiting. Only the field's text in the region is judged
 //! ([`judge`]): for a paste of one or two words position is evidence enough to
 //! call whatever sits there what it became; a longer paste must still
 //! resemble itself.
@@ -627,6 +620,11 @@ impl Followed {
             end: is_blank_units(&b[change.to..to]),
         };
         let words = !is_blank_units(typed);
+        // Blanks put over a word of an edge (a line break typed over a
+        // selection) leave nothing that says where the replacement ends.
+        if !typed.is_empty() && !words && (touch.start || touch.end) {
+            return None;
+        }
         // Typed words that begin with the separator the region keeps after it
         // (or end with the one before it) could as well have been typed past
         // that separator, outside the region: which it was is not known.
@@ -892,36 +890,6 @@ impl Followed {
     }
 }
 
-/// Where `start` of `before` is in `after`, text inserted or removed before it
-/// moving it. `None` when a change crosses it, or could as well have been made
-/// on either side of it. Text inserted exactly at `start` goes after it for
-/// the start of a paste not yet seen (the paste itself arrives there) and
-/// before it for the start of a copy already in the field (`copy`): that copy
-/// moves on.
-fn shift_start(before: &str, after: &str, start: usize, copy: bool) -> Option<usize> {
-    if before == after {
-        return Some(start);
-    }
-    let diff = Diff::new(before, after);
-    let place = |change: Change| {
-        if change.len() == 0 {
-            Some(if change.from < start || (copy && change.from == start) {
-                diff.shift(start)
-            } else {
-                start
-            })
-        } else if change.to <= start {
-            Some(diff.shift(start))
-        } else if change.from >= start {
-            Some(start)
-        } else {
-            None
-        }
-    };
-    let base = place(diff.base)?;
-    diff.slid().all(|c| place(c) == Some(base)).then_some(base)
-}
-
 /// What `text` says of the paste now, from its region alone. An empty region
 /// is the paste deleted: nothing to learn from.
 fn judge(text: &str, have: &[Token], want: &[Token], inserted: &str, region: Region) -> Alignment {
@@ -985,19 +953,13 @@ fn in_order(want: &[Token], have: &[Token], matches: impl Fn(&Token, &Token) -> 
 }
 
 enum Tracking {
-    /// The paste has not been seen where it will be followed. `expect` is
-    /// where it should start (moved through every change since the paste),
-    /// `known` how many times the field held its text before it (no caret
-    /// only), `last` the read before.
+    /// The paste has not been seen to arrive. `before` is the field as it
+    /// stood before it, `anchor` where the caret was, `waited` whether a read
+    /// has since found the field as it was.
     Waiting {
-        expect: Option<usize>,
-        known: Option<usize>,
-        /// Where copies of the paste's words that the field held before it
-        /// start now (moved through every change since): never the paste.
-        old: Vec<usize>,
-        last: Option<String>,
-        /// Whether a read has been seen without the paste in place.
-        seen: bool,
+        before: String,
+        anchor: Option<usize>,
+        waited: bool,
     },
     /// Followed: `text` is the read the region was last placed in.
     Following { followed: Followed, text: String },
@@ -1015,38 +977,16 @@ pub struct Tracker {
 
 impl Tracker {
     /// `before` is the field's text before the paste, when it could be read.
+    /// Without it nothing proves what arrived, and nothing is followed.
     pub fn new(inserted: String, anchor: Option<Anchor>, before: Option<&str>) -> Self {
-        let want = tokens(inserted.trim());
-        let before_words = before.map(tokens);
-        let known = before_words
-            .as_ref()
-            .map(|words| occurrences(words, &want).len());
-        // The paste's text already within reach of where it went: which copy
-        // is the paste could never be told.
-        let old = before_words
-            .as_ref()
-            .map(|words| {
-                occurrences(words, &want)
-                    .into_iter()
-                    .map(|at| words[at].u16_start)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let ambiguous = anchor
-            .zip(before_words.as_ref())
-            .is_some_and(|(anchor, words)| !near(words, &want, anchor.start).is_empty());
-        // Without the field as it stood, no copy of the paste's words nearby
-        // can be told from the paste: nothing is followed.
-        let state = if ambiguous || before.is_none() {
-            Tracking::Lost
-        } else {
-            Tracking::Waiting {
-                expect: anchor.map(|anchor| anchor.start),
-                known,
-                old,
-                last: before.map(str::to_string),
-                seen: false,
-            }
+        let want = tokens(&inserted);
+        let state = match before {
+            Some(before) => Tracking::Waiting {
+                before: before.to_string(),
+                anchor: anchor.map(|anchor| anchor.start),
+                waited: false,
+            },
+            None => Tracking::Lost,
         };
         Self {
             inserted,
@@ -1064,8 +1004,8 @@ impl Tracker {
     }
 
     /// What the field says of the paste now. A blank field retires a
-    /// followed region (before the paste lands it is only noted), and so does
-    /// a window, which cannot be followed.
+    /// followed region and a tracker still waiting (unless the field is still
+    /// what it was), and so does a window, which cannot be followed.
     pub fn read(&mut self, field: &FieldText) -> Alignment {
         if self.want.is_empty() {
             return Alignment::NotFound;
@@ -1091,34 +1031,31 @@ impl Tracker {
         if *windowed {
             return (Tracking::Lost, unchanged_only());
         }
-        if is_blank(text) {
-            let state = match state {
-                Tracking::Waiting {
-                    expect,
-                    known,
-                    old,
-                    seen,
-                    ..
-                } => Tracking::Waiting {
-                    expect,
-                    known,
-                    old,
-                    last: None,
-                    seen,
-                },
-                _ => Tracking::Lost,
-            };
-            return (state, Alignment::NotFound);
-        }
         match state {
-            Tracking::Lost => (Tracking::Lost, unchanged_only()),
             Tracking::Waiting {
-                expect,
-                known,
-                old,
-                last,
-                seen,
-            } => self.wait(expect, known, old, (last, seen), text, have),
+                before,
+                anchor,
+                waited,
+            } => {
+                // The field as it stood: the paste has not been applied yet.
+                if *text == before {
+                    let state = Tracking::Waiting {
+                        before,
+                        anchor,
+                        waited: true,
+                    };
+                    return (state, unchanged_only());
+                }
+                if is_blank(text) {
+                    return (Tracking::Lost, Alignment::NotFound);
+                }
+                self.land(&before, anchor, waited, text)
+                    .map_or((Tracking::Lost, unchanged_only()), |state| {
+                        (state, Alignment::Unchanged)
+                    })
+            }
+            _ if is_blank(text) => (Tracking::Lost, Alignment::NotFound),
+            Tracking::Lost => (Tracking::Lost, unchanged_only()),
             Tracking::Following {
                 followed,
                 text: before,
@@ -1136,85 +1073,52 @@ impl Tracker {
         }
     }
 
-    /// A read while the paste is waited for.
-    fn wait(
+    /// The paste's place, once `text` is `before` with exactly the paste's
+    /// characters put in at one place (within [`DRIFT`] of the anchor, when
+    /// there is one), and the paste is a run of words apart from the text on
+    /// both sides. Anything else proves nothing of what arrived: `None`.
+    fn land(
         &self,
-        expect: Option<usize>,
-        known: Option<usize>,
-        old: Vec<usize>,
-        (last, seen): (Option<String>, bool),
+        before: &str,
+        anchor: Option<usize>,
+        waited: bool,
         text: &str,
-        have: &[Token],
-    ) -> (Tracking, Alignment) {
-        let found = occurrences(have, &self.want);
-        let unchanged_only = |found: &[usize]| {
-            if found.is_empty() {
-                Alignment::NotFound
-            } else {
-                Alignment::Unchanged
-            }
-        };
-        let waiting = |expect, old| Tracking::Waiting {
-            expect,
-            known,
-            old,
-            last: Some(text.to_string()),
-            seen: true,
-        };
-        let landing = match (expect, known) {
-            (Some(start), _) => {
-                // The anchor, and the copies the field held before the paste,
-                // move with text typed before the paste arrived. The change
-                // that brought the paste in is not typing before it, wherever
-                // the anchor put it.
-                let moved = match last.as_deref() {
-                    None => Some((start, old)),
-                    Some(last) => {
-                        let start = if arrival(last, text, have, &self.want) {
-                            Some(start)
-                        } else {
-                            shift_start(last, text, start, false)
-                        };
-                        let old: Option<Vec<usize>> = old
-                            .iter()
-                            .map(|&at| shift_start(last, text, at, true))
-                            .collect();
-                        start.zip(old)
-                    }
-                };
-                let Some((start, old)) = moved else {
-                    return (Tracking::Lost, unchanged_only(&found));
-                };
-                let (near, copies): (Vec<usize>, Vec<usize>) = near(have, &self.want, start)
-                    .into_iter()
-                    .partition(|&at| !old.contains(&have[at].u16_start));
-                match (near.as_slice(), copies.is_empty()) {
-                    // Nothing new there: a copy brought near is never the paste.
-                    ([], _) => return (waiting(Some(start), old), unchanged_only(&found)),
-                    ([only], true) => *only,
-                    // Two copies within reach: which is the paste?
-                    _ => return (Tracking::Lost, Alignment::Unchanged),
-                }
-            }
-            (None, Some(0)) if found.len() == 1 => found[0],
-            (None, _) if found.is_empty() => return (waiting(None, old), Alignment::NotFound),
-            // No caret: the text twice, or held before, or unknown.
-            (None, _) => return (Tracking::Lost, Alignment::Unchanged),
-        };
-        // A paste not in place at the first read, then found, may be the same
-        // words typed: it lands only as one change that brings in more than a
-        // character of them (a keystroke of one cannot be told from it).
-        let arrived = last
-            .as_deref()
-            .is_none_or(|last| arrival(last, text, have, &self.want));
-        if seen && (!arrived || self.inserted.trim().chars().count() < 2) {
-            return (Tracking::Lost, unchanged_only(&found));
+    ) -> Option<Tracking> {
+        let units = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        let (b, a, ins) = (units(before), units(text), units(&self.inserted));
+        let n = ins.len();
+        if n == 0 || a.len() != b.len() + n {
+            return None;
         }
+        // The same words typed after a read that found the field as it was
+        // cannot be told from a paste, unless they are more than a keystroke.
+        if waited && self.inserted.trim().chars().count() < 2 {
+            return None;
+        }
+        let prefix = b.iter().zip(&a).take_while(|(x, y)| x == y).count();
+        let suffix = b
+            .iter()
+            .rev()
+            .zip(a.iter().rev())
+            .take_while(|(x, y)| x == y)
+            .count();
+        let mut at = (b.len().saturating_sub(suffix)..=prefix)
+            .filter(|&p| a[p..p + n] == ins[..])
+            .filter(|&p| anchor.is_none_or(|anchor| p.abs_diff(anchor) <= DRIFT));
+        let at = at.next().filter(|_| at.next().is_none())?;
+        // Glued to a word beside it, the paste's own words are not known.
+        let glued_left = at > 0 && !is_ws_unit(ins[0]) && !is_ws_unit(b[at - 1]);
+        let glued_right = at < b.len() && !is_ws_unit(ins[n - 1]) && !is_ws_unit(b[at]);
+        if glued_left || glued_right {
+            return None;
+        }
+        let words = tokens(&self.inserted);
+        let (first, last) = (words.first()?, words.last()?);
         let region = Region {
-            from: have[landing].u16_start,
-            to: have[landing + self.want.len() - 1].u16_end,
+            from: at + first.u16_start,
+            to: at + last.u16_end,
         };
-        let state = Tracking::Following {
+        Some(Tracking::Following {
             followed: Followed {
                 region,
                 open: Edges::default(),
@@ -1222,31 +1126,8 @@ impl Tracker {
                 fringed: Edges::default(),
             },
             text: text.to_string(),
-        };
-        (state, Alignment::Unchanged)
+        })
     }
-}
-
-/// Whether the change from `before` to `after` is the paste arriving: a copy
-/// of its words starts inside what the change put there.
-fn arrival(before: &str, after: &str, words: &[Token], want: &[Token]) -> bool {
-    if before == after {
-        return false;
-    }
-    let diff = Diff::new(before, after);
-    let (from, to) = (diff.base.from, diff.base.from + diff.new_len(diff.base));
-    occurrences(words, want)
-        .into_iter()
-        .any(|at| (from..to).contains(&words[at].u16_start))
-}
-
-/// Where in `have` the words `want` occur starting within [`DRIFT`] units of
-/// `start`.
-fn near(have: &[Token], want: &[Token], start: usize) -> Vec<usize> {
-    occurrences(have, want)
-        .into_iter()
-        .filter(|&at| have[at].u16_start.abs_diff(start) <= DRIFT)
-        .collect()
 }
 
 #[cfg(test)]
@@ -1913,25 +1794,17 @@ mod tests {
 
     #[test]
     fn the_region_is_snapped_to_the_fields_own_tokens() {
-        // The app kept one newline of two: the paste is a unit shorter than
-        // inserted, and what is typed after it is not part of it.
+        // The app kept one newline of two: what arrived is not the paste's
+        // characters, so nothing proves where the paste is, and nothing is
+        // followed.
         let pasted = "alpha beta\n\ngamma delta";
         let base = "ok. alpha beta\ngamma delta";
-        let mut tracker = Tracker::new(
-            pasted.to_string(),
-            Some(anchor_of("ok. alpha beta\n\ngamma delta", pasted)),
-            Some("ok. "),
-        );
-        assert_eq!(tracker.read(&field(base)), Alignment::Unchanged);
-        assert_eq!(
+        let mut tracker = Tracker::new(pasted.to_string(), Some(Anchor { start: 4 }), Some("ok. "));
+        assert!(!matches!(tracker.read(&field(base)), Alignment::Edited(_)));
+        assert!(!matches!(
             tracker.read(&field("ok. alpha beta\ngamma Rune")),
-            Alignment::Edited("alpha beta\ngamma Rune".into())
-        );
-        // Typing on after a space is outside the region.
-        assert_eq!(
-            tracker.read(&field("ok. alpha beta\ngamma Rune typed after text")),
-            Alignment::Edited("alpha beta\ngamma Rune".into())
-        );
+            Alignment::Edited(_)
+        ));
         // An anchor a few units off still lands, on the paste.
         for drift in [-3_i32, -2, -1, 1, 2, 3] {
             let mut anchor = anchor_of("ok. send it to Kip", "send it to Kip");
@@ -1950,21 +1823,29 @@ mod tests {
     }
 
     #[test]
-    fn a_paste_only_found_elsewhere_does_not_land_until_it_is_at_the_anchor() {
+    fn a_paste_only_found_elsewhere_never_lands() {
         // The first read comes before the app applied the paste, in a field
         // with another copy: nothing lands, nothing is an edit.
-        let before = "send it to Kip. ok";
+        let before = "send it to Kip. ok ";
         let after = "send it to Kip. ok send it to Kip";
+        let mut tracker = Tracker::new(
+            "send it to Kip".into(),
+            Some(Anchor { start: 0 }),
+            Some(before),
+        );
+        assert_eq!(tracker.read(&field(before)), Alignment::Unchanged);
+        assert_eq!(tracker.read(&field(after)), Alignment::Unchanged);
+        assert!(!matches!(
+            tracker.read(&field("send it to Kip. ok send it to Kit")),
+            Alignment::Edited(_)
+        ));
+        // At its anchor it lands, in the same field.
         let mut tracker = Tracker::new(
             "send it to Kip".into(),
             Some(Anchor { start: 19 }),
             Some(before),
         );
         assert_eq!(tracker.read(&field(before)), Alignment::Unchanged);
-        assert_eq!(
-            tracker.read(&field("send it to Kit. ok")),
-            Alignment::NotFound
-        );
         assert_eq!(tracker.read(&field(after)), Alignment::Unchanged);
         assert_eq!(
             tracker.read(&field("send it to Kip. ok send it to Kit")),
@@ -1991,7 +1872,7 @@ mod tests {
 
     #[test]
     fn without_a_caret_the_one_new_copy_is_adopted() {
-        let before = "ok. thanks";
+        let before = "ok. thanks ";
         let mut tracker = Tracker::new("send it to Kip".into(), None, Some(before));
         assert_eq!(tracker.read(&field(before)), Alignment::NotFound);
         assert_eq!(
@@ -2010,7 +1891,8 @@ mod tests {
 
     #[test]
     fn without_a_caret_a_copy_held_before_or_twice_or_unknown_is_never_an_edit() {
-        // Held before the paste: the new one cannot be told from the old.
+        // Held before the paste, and the field then is not that field with the
+        // paste put in: nothing is proved, and the old copy is never one.
         let mut tracker = Tracker::new("send it to Kip".into(), None, Some("send it to Kip. ok"));
         assert_eq!(
             tracker.read(&field("send it to Kip. ok send it to Kip")),
@@ -2300,14 +2182,29 @@ mod tests {
     }
 
     #[test]
-    fn without_a_caret_a_copy_held_once_before_is_not_adopted_when_the_old_one_goes() {
-        // Held once before the paste: even when only one copy is left, which
-        // one it is is not known.
+    fn without_a_caret_a_copy_held_before_is_not_the_paste_but_does_not_hide_it() {
+        // Held once before the paste: the paste is proved by the insertion, so
+        // an edit of the old copy beside it is never the paste's.
+        let mut tracker = Tracker::new("Hanks".into(), None, Some("Hanks x "));
+        assert_eq!(tracker.read(&field("Hanks x Hanks")), Alignment::Unchanged);
+        assert_eq!(
+            tracker.read(&field("Hex x Hanks")),
+            Alignment::Unchanged,
+            "the old copy edited is outside the paste"
+        );
+        let mut tracker = Tracker::new("Hanks".into(), None, Some("Hanks x "));
+        assert_eq!(tracker.read(&field("Hanks x Hanks")), Alignment::Unchanged);
+        assert_eq!(
+            tracker.read(&field("Hanks x Hex")),
+            Alignment::Edited("Hex".into())
+        );
+        // A paste the app put anywhere else than the field plus the paste (the
+        // old copy gone) is not proved.
         let mut tracker = Tracker::new("Hanks".into(), None, Some("Hanks x"));
         assert_eq!(tracker.read(&field("x Hanks")), Alignment::Unchanged);
         assert_eq!(tracker.read(&field("x Hex")), Alignment::NotFound);
         // Held nowhere before: the one new copy is adopted.
-        let mut tracker = Tracker::new("Hanks".into(), None, Some("x"));
+        let mut tracker = Tracker::new("Hanks".into(), None, Some("x "));
         assert_eq!(tracker.read(&field("x Hanks")), Alignment::Unchanged);
         assert_eq!(
             tracker.read(&field("x Hex")),
@@ -2332,9 +2229,9 @@ mod tests {
     }
 
     #[test]
-    fn the_anchor_moves_by_text_typed_before_the_paste_arrives_beyond_the_drift() {
-        // Nothing within reach of the anchor before the paste, so only the shift
-        // of the anchor through the typed text lets the paste land.
+    fn text_typed_before_the_paste_arrives_loses_the_tracker() {
+        // The field changed some other way than the paste coming in: nothing
+        // says what came from where, and nothing is followed from then on.
         let before = "aaaa bbbb cccc dddd eeee ";
         let mut tracker = Tracker::new(
             "Hanks".into(),
@@ -2348,10 +2245,7 @@ mod tests {
         let pasted = format!("{typed}Hanks");
         assert_eq!(tracker.read(&field(&pasted)), Alignment::Unchanged);
         let fixed = format!("{typed}Hex");
-        assert_eq!(
-            tracker.read(&field(&fixed)),
-            Alignment::Edited("Hex".into())
-        );
+        assert_eq!(tracker.read(&field(&fixed)), Alignment::NotFound);
     }
 
     /// The tracker anchored `offset` units off where `pasted` lands in `base`.
@@ -2709,7 +2603,7 @@ mod tests {
                         Some(anchor_of(&base, pasted)),
                         Some(&format!("{field_text} ")),
                     ),
-                    Tracker::new(pasted.into(), None, Some(field_text)),
+                    Tracker::new(pasted.into(), None, Some(&format!("{field_text} "))),
                 ];
                 for mut tracker in trackers {
                     // The field alone, without the paste: nothing.
@@ -2730,6 +2624,95 @@ mod tests {
             }
         }
         assert_eq!(pairs, 1260);
+    }
+
+    /// Every answer to `reads` of a paste made at `anchor` into `before`.
+    fn replay(pasted: &str, anchor: Option<usize>, before: &str, reads: &[&str]) -> Vec<Alignment> {
+        let mut tracker = Tracker::new(
+            pasted.to_string(),
+            anchor.map(|start| Anchor { start }),
+            Some(before),
+        );
+        reads
+            .iter()
+            .map(|read| tracker.read(&field(read)))
+            .collect()
+    }
+
+    fn stores_nothing(answers: &[Alignment]) {
+        assert!(
+            !answers.iter().any(|a| matches!(a, Alignment::Edited(_))),
+            "{answers:?}"
+        );
+    }
+
+    #[test]
+    fn round_10_a_blanks_typed_over_an_edge_word_leave_nothing_to_type_after() {
+        stores_nothing(&replay(
+            "Hanks Smith",
+            Some(0),
+            "",
+            &["Hanks Smith", "Hanks\n", "Hanks\nhunter2"],
+        ));
+        stores_nothing(&replay(
+            "Hanks Smith",
+            Some(0),
+            "",
+            &["Hanks Smith", "\nSmith", "hunter2\nSmith"],
+        ));
+    }
+
+    #[test]
+    fn round_10_b_a_suffix_that_was_already_there_is_not_the_paste() {
+        stores_nothing(&replay(
+            "Hanks Smith",
+            Some(0),
+            " Smith",
+            &["Hanks Smith", "Hanks hunter2"],
+        ));
+    }
+
+    #[test]
+    fn round_10_c_a_blank_read_retires_a_tracker_that_is_waiting() {
+        stores_nothing(&replay(
+            "Hanks",
+            Some(0),
+            "          Hanks",
+            &["", "Hanks", "Hex"],
+        ));
+        // A field that was blank before the paste and still is, waits on.
+        let a = replay("Hanks", Some(0), "", &["", "Hanks", "Hex"]);
+        assert_eq!(a[2], Alignment::Edited("Hex".into()));
+    }
+
+    #[test]
+    fn round_10_d_a_paste_glued_to_a_neighbour_is_never_followed() {
+        stores_nothing(&replay(
+            "Bob",
+            Some(11),
+            "send it to Kip",
+            &[
+                "send it to BobKip",
+                "send it to BobKip Bob",
+                "send it to BobKip Rob",
+            ],
+        ));
+        stores_nothing(&replay(
+            "up",
+            Some(3),
+            "end.",
+            &["endup .", "endup  up.", "endup  \u{df}"],
+        ));
+    }
+
+    #[test]
+    fn round_10_e_a_glued_paste_of_a_repeated_word_does_not_land_on_an_old_neighbour() {
+        stores_nothing(&replay(
+            "no no",
+            Some(3),
+            "no world",
+            &["no no noworld", "yes no noworld"],
+        ));
     }
 
     #[test]

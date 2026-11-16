@@ -560,7 +560,22 @@ mod tests {
         t0: Instant,
         anchor: Option<Anchor>,
     ) -> Session<F> {
-        Session::new(field, t0, Tracker::new(inserted.into(), anchor, Some("")))
+        anchored_over(field, inserted, t0, anchor, "")
+    }
+
+    /// As [`anchored`], over a field that held `before` ahead of the paste.
+    fn anchored_over<F: Field>(
+        field: F,
+        inserted: impl Into<String>,
+        t0: Instant,
+        anchor: Option<Anchor>,
+        before: &str,
+    ) -> Session<F> {
+        Session::new(
+            field,
+            t0,
+            Tracker::new(inserted.into(), anchor, Some(before)),
+        )
     }
 
     /// The first read of a watch: the paste, whole. No edit is called before.
@@ -969,11 +984,12 @@ mod tests {
     fn an_anchored_watch_judges_the_region_at_the_anchor() {
         let t0 = Instant::now();
         let base = "Hi team. send it to Kip";
-        let mut session = anchored(
+        let mut session = anchored_over(
             Script::new(&[base, "Hi team. send it to Hex"]),
             "send it to Kip",
             t0,
             Some(anchor(base, "send it to Kip")),
+            "Hi team. ",
         );
         assert_eq!(session.step(at(t0, 50), Event::Tick, OPEN), Step::Wait);
         session.step(at(t0, 200), Event::ValueChanged, OPEN);
@@ -1011,17 +1027,37 @@ mod tests {
     }
 
     #[test]
-    fn a_paste_found_elsewhere_before_the_app_applied_it_still_lands() {
+    fn a_paste_that_arrives_elsewhere_than_its_anchor_is_never_followed() {
         let t0 = Instant::now();
-        // The field has another copy of the text; the first read comes before
-        // the paste is applied, and the paste then lands at its anchor.
-        let before = "send it to Kip. ok";
+        // The field has another copy of the text, and the paste shows up away
+        // from the caret: which copy is the paste's is not proved.
+        let before = "send it to Kip. ok ";
         let after = "send it to Kip. ok send it to Kip";
-        let mut session = anchored(
+        let mut session = anchored_over(
+            Script::new(&[before, after, "send it to Kip. ok send it to Kit"]),
+            "send it to Kip",
+            t0,
+            Some(Anchor { start: 0 }),
+            before,
+        );
+        baseline(&mut session, t0);
+        session.step(at(t0, 150), Event::ValueChanged, OPEN);
+        session.step(at(t0, 300), Event::ValueChanged, OPEN);
+        let seen = done(session.step(at(t0, 500), Event::FocusOut, OPEN));
+        assert!(!matches!(seen.outcome, Outcome::Edited(_)));
+    }
+
+    #[test]
+    fn a_paste_applied_after_a_read_of_the_old_field_lands_at_its_anchor() {
+        let t0 = Instant::now();
+        let before = "send it to Kip. ok ";
+        let after = "send it to Kip. ok send it to Kip";
+        let mut session = anchored_over(
             Script::new(&[before, after, "send it to Kip. ok send it to Kit"]),
             "send it to Kip",
             t0,
             Some(Anchor { start: 19 }),
+            before,
         );
         baseline(&mut session, t0);
         session.step(at(t0, 150), Event::ValueChanged, OPEN);
