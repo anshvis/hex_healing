@@ -1558,7 +1558,11 @@ fn report(first: u64, last: u64) -> Report {
                     && !matches!(
                         case.setup,
                         Setup::DuplicateShort | Setup::Glued | Setup::Periodic
-                    );
+                    )
+                    // A single character that shows up after a read of the
+                    // empty field cannot be told from a key typed.
+                    && !(case.setup == Setup::StartsEmpty
+                        && case.paste.trim().chars().count() < 2);
                 let n = case.initial.words().len();
                 // One read, one word or two for as many: stored exactly.
                 let good_one = reads.len() == 1

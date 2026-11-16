@@ -851,8 +851,14 @@ impl Followed {
                 }),
             });
         }
-        // Keys glued to the last word are that word, longer: inside.
+        // Keys glued to the last word are that word, longer: inside. Keys with
+        // a blank among them, in one read, could as well be words typed or
+        // put before the paste with the first one's key run on to it: which is
+        // not known.
         if at == to && to > from && to > 0 && !is_ws(&b[to - 1]) && lead == 0 && !typed.is_empty() {
+            if typed.iter().any(is_ws) {
+                return None;
+            }
             let run = typed.iter().take_while(|u| !is_ws(u)).count();
             return Some(Self {
                 region: Region { from, to: to + run },
@@ -2703,6 +2709,16 @@ mod tests {
             "end.",
             &["endup .", "endup  up.", "endup  \u{df}"],
         ));
+    }
+
+    #[test]
+    fn round_10_f_words_glued_to_the_paste_in_one_read_are_not_taken_for_its_own() {
+        // "apple pie Hanks a" is "pple pie Hanks" typed after the pasted "a",
+        // or "apple pie " put before it and the "a" typed over: the same read.
+        stores_nothing(&replay("a", Some(0), " a", &["a a", "apple pie Hanks a"]));
+        // A word run on to it, key by key or in one read, is still it.
+        let a = replay("Kip", Some(0), "", &["Kip", "Kips"]);
+        assert_eq!(a[1], Alignment::Edited("Kips".into()));
     }
 
     #[test]
