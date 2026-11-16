@@ -60,14 +60,8 @@ pub enum Alignment {
 /// How far, in UTF-16 units, the paste may sit from the caret the app
 /// reported (a dropped space or newline, an anchor a unit or two off).
 const DRIFT: usize = 8;
-/// A paste of one or two words that grew to more than this many extra words
-/// is no longer the paste's place.
-const SHORT_PASTE_GROWTH: usize = 4;
 /// The most comparisons (inserted tokens x region tokens) worth making.
 const MAX_CELLS: usize = 4_000_000;
-/// Words of the unchanged text either side of a change that `most_hunks` reads
-/// too: the old tail may match inside the new text.
-const CONTEXT_WORDS: usize = 32;
 /// The most words (before x after, once their common ends are set aside) a
 /// diff of two reads is worth working out: past it the change is called
 /// several.
@@ -214,26 +208,6 @@ fn tokens_in(have: &[Token], region: Region) -> &[Token] {
     }
 }
 
-/// One edge of a region that a change shortened: typing right at it is still
-/// the replacement, for `allow` words (the words deleted there, no more). For
-/// the end edge `mark` is where the typed text starts; for the start edge,
-/// where it ends so far.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Edge {
-    allow: usize,
-    mark: usize,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct Open {
-    start: Option<Edge>,
-    end: Option<Edge>,
-}
-
-fn words_in(units: &[u16]) -> usize {
-    tokens(&String::from_utf16_lossy(units)).len()
-}
-
 /// A window of the old text: what a change replaced, `[from, to)`.
 #[derive(Clone, Copy, Debug)]
 struct Change {
@@ -301,11 +275,9 @@ impl Diff {
     }
 }
 
-/// What one hunk of a word diff replaced: `old` words of the read before by
-/// `new` words of the read after.
+/// What one hunk of a word diff replaced: `old` words of the read before.
 struct Hunk {
     old: std::ops::Range<usize>,
-    new: std::ops::Range<usize>,
 }
 
 /// The separate word-level hunks that turn `before` into `after`: edits in
@@ -327,59 +299,44 @@ fn hunks(before: &[Token], after: &[Token]) -> Vec<Hunk> {
         &before[prefix..before.len() - suffix],
         &after[prefix..after.len() - suffix],
     );
-    let shifted = |old: std::ops::Range<usize>, new: std::ops::Range<usize>| Hunk {
+    let shifted = |old: std::ops::Range<usize>| Hunk {
         old: prefix + old.start..prefix + old.end,
-        new: prefix + new.start..prefix + new.end,
     };
     if b.is_empty() && a.is_empty() {
         return Vec::new();
     }
     if b.is_empty() || a.is_empty() {
-        return vec![shifted(0..b.len(), 0..a.len())];
+        return vec![shifted(0..b.len())];
     }
     if b.len().saturating_mul(a.len()) > MAX_HUNK_CELLS {
-        return vec![shifted(0..b.len(), 0..a.len()), shifted(0..0, 0..0)];
+        return vec![shifted(0..b.len()), shifted(0..0)];
     }
     let width = a.len() + 1;
     let lcs = lcs_table(b, a);
     let (mut i, mut j) = (0, 0);
     let mut found: Vec<Hunk> = Vec::new();
-    let mut open: Option<(usize, usize)> = None;
+    let mut open: Option<usize> = None;
     while i < b.len() || j < a.len() {
         let same = i < b.len()
             && j < a.len()
             && b[i].fold == a[j].fold
             && lcs[i * width + j] == lcs[(i + 1) * width + j + 1] + 1;
         if same {
-            if let Some((i0, j0)) = open.take() {
-                found.push(shifted(i0..i, j0..j));
+            if let Some(i0) = open.take() {
+                found.push(shifted(i0..i));
             }
             (i, j) = (i + 1, j + 1);
             continue;
         }
-        open.get_or_insert((i, j));
+        open.get_or_insert(i);
         if j == a.len() || (i < b.len() && lcs[(i + 1) * width + j] >= lcs[i * width + j + 1]) {
             i += 1;
         } else {
             j += 1;
         }
     }
-    if let Some((i0, j0)) = open {
-        found.push(shifted(i0..b.len(), j0..a.len()));
-    }
-    // One replacement of words that could as well have been two changes (a
-    // word edited, then more typed after it that ends as the old words did)
-    // is not known to be one.
-    if found.len() == 1 && found[0].new.len() > found[0].old.len() {
-        // The words either side of the change count too, a few of them: the
-        // old tail may match inside the new text instead. (Words swapped for
-        // as many are one change however they line up.)
-        let (ep, es) = (prefix.min(CONTEXT_WORDS), suffix.min(CONTEXT_WORDS));
-        let wide_b = &before[prefix - ep..before.len() - suffix + es];
-        let wide_a = &after[prefix - ep..after.len() - suffix + es];
-        if most_hunks(wide_b, wide_a) > 1 {
-            found.push(shifted(0..0, 0..0));
-        }
+    if let Some(i0) = open {
+        found.push(shifted(i0..b.len()));
     }
     found
 }
@@ -400,40 +357,6 @@ fn lcs_table(b: &[Token], a: &[Token]) -> Vec<u16> {
     lcs
 }
 
-/// The most separate hunks any alignment keeping as many words as possible
-/// makes of `b` and `a`.
-fn most_hunks(b: &[Token], a: &[Token]) -> usize {
-    let width = a.len() + 1;
-    let lcs = lcs_table(b, a);
-    // most[(i * width + j) * 2 + open]: from b[i..], a[j..], where `open` is
-    // whether the step before was already inside a hunk.
-    let mut most = vec![0_usize; (b.len() + 1) * width * 2];
-    for i in (0..=b.len()).rev() {
-        for j in (0..=a.len()).rev() {
-            for open in 0..2 {
-                let here = lcs[i * width + j];
-                let mut best = 0;
-                if i < b.len()
-                    && j < a.len()
-                    && b[i].fold == a[j].fold
-                    && here == lcs[(i + 1) * width + j + 1] + 1
-                {
-                    best = best.max(most[((i + 1) * width + j + 1) * 2]);
-                }
-                let starts = 1 - open;
-                if i < b.len() && here == lcs[(i + 1) * width + j] {
-                    best = best.max(starts + most[((i + 1) * width + j) * 2 + 1]);
-                }
-                if j < a.len() && here == lcs[i * width + j + 1] {
-                    best = best.max(starts + most[(i * width + j + 1) * 2 + 1]);
-                }
-                most[(i * width + j) * 2 + open] = best;
-            }
-        }
-    }
-    most[0]
-}
-
 /// The indices of the words of `have` that overlap `region`.
 fn word_range(have: &[Token], region: Region) -> std::ops::Range<usize> {
     let overlaps = |t: &Token| t.u16_end > region.from && t.u16_start < region.to;
@@ -446,33 +369,65 @@ fn word_range(have: &[Token], region: Region) -> std::ops::Range<usize> {
     }
 }
 
-/// Which edge words a change replaced, and how many words it deleted: what
-/// the read of the words says of the change the units say.
-#[derive(Clone, Copy, Debug, Default)]
-struct Touch {
+/// The edges of a region, one flag each.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Edges {
     start: bool,
     end: bool,
-    deleted: usize,
 }
 
-/// A region and the edges of it left open: what is followed.
+impl Edges {
+    fn or(self, other: Self) -> Self {
+        Self {
+            start: self.start || other.start,
+            end: self.end || other.end,
+        }
+    }
+}
+
+/// A region and what is known of its edges: what is followed.
+///
+/// An edge is `open` once a change took or replaced its whole edge word, by
+/// backspace, selection, typing over or forward delete: the keys typed right
+/// at it are the replacement, so they are inside, while the region's word
+/// count stays within the paste's. Whitespace typed at an open edge closes it
+/// and is never part of the region. An edge is `fringed` when words were typed
+/// right outside it (on the same line): it can never open, since which of the
+/// words around it is the replacement is not known.
 #[derive(Clone, Copy)]
 struct Followed {
     region: Region,
-    open: Open,
+    open: Edges,
+    fringed: Edges,
+}
+
+fn is_blank_units(units: &[u16]) -> bool {
+    units
+        .iter()
+        .all(|&u| char::from_u32(u32::from(u)).is_some_and(is_space))
+}
+
+/// Blank without a line break: words typed this far from the region are right
+/// beside it.
+fn is_gap(units: &[u16]) -> bool {
+    units.iter().all(|&u| {
+        char::from_u32(u32::from(u)).is_some_and(|c| is_space(c) && c != '\n' && c != '\r')
+    })
 }
 
 impl Followed {
     /// Where the region of `before` is in `after`, from the one change
     /// between them. See the module doc. `None` when it is lost: edits in
-    /// more than one place, a change that crosses an edge, could as well sit
-    /// on either side of one (text typed before the paste that begins with
-    /// what the paste begins with is also an insertion a few characters in),
-    /// or grows an edge by more than the words deleted there.
+    /// more than one place, a change that crosses an edge, one that could as
+    /// well sit on either side of one (text typed before the paste that begins
+    /// with what the paste begins with is also an insertion a few characters
+    /// in), an edge that opens beside words typed there, or a region that
+    /// would hold more words than the paste did (`budget`).
     fn after(
         self,
         (before, before_words): (&str, &[Token]),
         (after, words): (&str, &[Token]),
+        budget: usize,
     ) -> Option<Self> {
         if before == after {
             return Some(self);
@@ -481,76 +436,63 @@ impl Followed {
         if changes.len() > 1 {
             return None;
         }
-        // At an edge a replacement may put back as many words as it deleted,
-        // no more: more is the replacement and what is typed after it, and
-        // which is which is not known. (Inside, a replacement may grow.)
         let edge = word_range(before_words, self.region);
+        // Which edge words the change replaced or deleted, as the words say.
         let touch = changes
             .first()
             .filter(|hunk| !hunk.old.is_empty())
-            .map(|hunk| Touch {
+            .map_or_else(Edges::default, |hunk| Edges {
                 start: hunk.old.start <= edge.start && hunk.old.end > edge.start,
                 end: hunk.old.end >= edge.end && hunk.old.start < edge.end,
-                deleted: hunk.old.len(),
             });
-        if let (Some(hunk), Some(touch)) = (changes.first(), touch)
-            && hunk.new.len() > hunk.old.len()
-            && (touch.start || touch.end)
-        {
-            return None;
-        }
         let diff = Diff::new(before, after);
         // Where no word is left (attachments, emoji), only more keys at an
         // open edge are followed: a change that takes anything away is not
         // known to be the paste's.
-        if diff.base.len() > 0 && word_range(before_words, self.region).is_empty() {
+        if diff.base.len() > 0 && edge.is_empty() {
             return None;
         }
-        let followed = self.placed(&diff, touch.unwrap_or_default())?;
+        let full = tokens_in(before_words, self.region).len() >= budget;
+        let followed = self.placed(&diff, touch, full)?;
         // The region starts at its first word: whitespace and attachments a
         // coalesced change brought in before it are not the paste's, and text
         // typed before it must land outside. While the start is open, typing
         // goes where the old word was, so it stays where it is.
         let region = followed.region;
         let from = match (followed.open.start, tokens_in(words, region).first()) {
-            (None, Some(first)) => region.from.max(first.u16_start),
+            (false, Some(first)) => region.from.max(first.u16_start),
             _ => region.from,
         };
-        Some(Self {
-            region: Region { from, ..region },
-            open: followed.open,
+        let region = Region { from, ..region };
+        let held = tokens_in(words, region).len();
+        // A region of attachments or emoji alone has no word to replace: what
+        // is typed beside it is not the replacement.
+        let open = if held == 0 && from < region.to {
+            Edges::default()
+        } else {
+            followed.open
+        };
+        (held <= budget).then_some(Self {
+            region,
+            open,
+            ..followed
         })
     }
 
     /// Where `diff` puts the region, read every way it could have been made.
-    fn placed(self, diff: &Diff, touch: Touch) -> Option<Self> {
+    fn placed(self, diff: &Diff, touch: Edges, full: bool) -> Option<Self> {
         let Region { from, to } = self.region;
-        let base = diff.base;
-        // Typing at an edge a change left open goes on being the replacement,
-        // a space either side of the first key notwithstanding.
-        let continues = base.len() == 0
-            && (self.open.end.is_some() && base.from == to
-                || self.open.start.is_some_and(|edge| base.from == edge.mark));
-        if continues {
-            return self.place(diff, base, touch);
-        }
-        // Every way the change could have been made: slid earlier, as well.
-        let windows: Vec<Change> = diff.slid().collect();
         // A window that crosses an edge only over whitespace deletes nothing of
         // the paste's on that side: the same text gone as "word " or " word".
-        let blank = |units: &[u16]| {
-            units
-                .iter()
-                .all(|&u| char::from_u32(u32::from(u)).is_some_and(is_space))
-        };
         let crosses_only_blanks = |c: Change| {
             (c.from < from || c.to > to)
-                && (c.from >= from || blank(&diff.b[c.from..from.min(c.to)]))
-                && (c.to <= to || blank(&diff.b[to.max(c.from)..c.to]))
+                && (c.from >= from || is_blank_units(&diff.b[c.from..from.min(c.to)]))
+                && (c.to <= to || is_blank_units(&diff.b[to.max(c.from)..c.to]))
         };
+        // Every way the change could have been made: slid earlier, as well.
         let mut placements = Vec::new();
-        for window in windows {
-            match self.place(diff, window, touch) {
+        for window in diff.slid() {
+            match self.place(diff, window, touch, full) {
                 None if crosses_only_blanks(window) => {}
                 placed => placements.push(placed),
             }
@@ -560,23 +502,32 @@ impl Followed {
             .iter()
             .all(|placed| placed.map(|p| p.region) == Some(first.region))
             .then(|| {
-                // An edge any reading left open is open: the keys typed there
-                // next are the replacement, as far as the words deleted.
-                let open = |pick: fn(&Open) -> Option<Edge>| {
-                    placements.iter().flatten().find_map(|p| pick(&p.open))
+                // An edge is open only if every reading leaves it open (a
+                // line break typed where it could as well have gone either
+                // side of another closes it), and fringed if any reading
+                // fringes it.
+                let both = Edges {
+                    start: true,
+                    end: true,
                 };
+                let open = placements.iter().flatten().fold(both, |all, p| Edges {
+                    start: all.start && p.open.start,
+                    end: all.end && p.open.end,
+                });
+                let fringed = placements
+                    .iter()
+                    .flatten()
+                    .fold(Edges::default(), |all, p| all.or(p.fringed));
                 Self {
                     region: first.region,
-                    open: Open {
-                        start: open(|o| o.start),
-                        end: open(|o| o.end),
-                    },
+                    open,
+                    fringed,
                 }
             })
     }
 
     /// Where one window of the change puts the region.
-    fn place(self, diff: &Diff, change: Change, touch: Touch) -> Option<Self> {
+    fn place(self, diff: &Diff, change: Change, touch: Edges, full: bool) -> Option<Self> {
         let Region { from, to } = self.region;
         let (a, b) = (&diff.a, &diff.b);
         let new_len = diff.new_len(change);
@@ -584,76 +535,155 @@ impl Followed {
             from: diff.shift(from),
             to: diff.shift(to),
         };
-        let unchanged = |region: Region| Self {
-            region,
-            open: Open::default(),
-        };
         if change.len() == 0 {
-            // Pure insertion. Typing at an open edge goes on being inside.
-            if let Some(edge) = self.open.end.filter(|_| change.from == to) {
-                let new_to = to + new_len;
-                // Typing past the words deleted loses the region: whether it
-                // is the replacement or what comes after is not known.
-                if words_in(&a[edge.mark..new_to]) > edge.allow {
-                    return None;
-                }
-                return Some(Self {
-                    region: Region { from, to: new_to },
-                    open: Open {
-                        start: None,
-                        end: Some(edge),
-                    },
-                });
-            }
-            if let Some(edge) = self.open.start.filter(|e| change.from == e.mark) {
-                let typed_to = change.from + new_len;
-                if from > typed_to || words_in(&a[from..typed_to]) > edge.allow {
-                    return None;
-                }
-                return Some(Self {
-                    region: Region { from, to: moved.to },
-                    open: Open {
-                        start: Some(Edge {
-                            mark: typed_to,
-                            ..edge
-                        }),
-                        end: None,
-                    },
-                });
-            }
-            return Some(unchanged(match change.from {
-                at if at <= from => moved,
-                at if at >= to => self.region,
-                _ => Region { from, to: moved.to },
-            }));
+            return self.inserted(
+                change.from,
+                &a[change.from..change.from + new_len],
+                b,
+                moved,
+                full,
+            );
         }
         if change.to <= from {
-            Some(unchanged(moved))
-        } else if change.from >= to {
-            Some(unchanged(self.region))
-        } else if from <= change.from && change.to <= to {
-            let deleted = words_in(&b[change.from..change.to]).max(touch.deleted);
-            let at_start = change.from == from || touch.start;
-            let at_end = change.to == to || touch.end;
-            let shortened = new_len < change.len();
-            let allow = |old: Option<Edge>| old.map_or(0, |e| e.allow).max(deleted);
-            let new_to = to + new_len - change.len();
-            Some(Self {
-                region: Region { from, to: new_to },
-                open: Open {
-                    start: (at_start && shortened).then(|| Edge {
-                        allow: allow(self.open.start),
-                        mark: from + new_len,
-                    }),
-                    end: (at_end && shortened).then(|| Edge {
-                        allow: allow(self.open.end),
-                        mark: new_to - new_len,
-                    }),
-                },
-            })
-        } else {
-            None
+            return Some(Self {
+                region: moved,
+                ..self
+            });
         }
+        if change.from >= to {
+            return Some(self);
+        }
+        if change.from < from || change.to > to {
+            return None;
+        }
+        // Inside, edge words included.
+        // (An edge words were typed beside is never open, so a fringed edge
+        // that a change takes the word of is one that would open.)
+        if (touch.start && self.fringed.start) || (touch.end && self.fringed.end) {
+            return None;
+        }
+        Some(Self {
+            region: Region {
+                from,
+                to: to + new_len - change.len(),
+            },
+            open: self.open.or(touch),
+            ..self
+        })
+    }
+
+    /// `typed` put in at `at` of the old text `b`. `full` is whether the
+    /// region already holds as many words as the paste had.
+    fn inserted(
+        self,
+        at: usize,
+        typed: &[u16],
+        b: &[u16],
+        moved: Region,
+        full: bool,
+    ) -> Option<Self> {
+        let Region { from, to } = self.region;
+        let is_ws = |u: &u16| char::from_u32(u32::from(*u)).is_some_and(is_space);
+        let words = !is_blank_units(typed);
+        let lead = typed.iter().take_while(|u| is_ws(u)).count();
+        let tail = typed.len() - typed.iter().rev().take_while(|u| is_ws(u)).count();
+        let breaks = !is_gap(&typed[..lead]);
+        let tail_breaks = !is_gap(&typed[tail..]);
+        let fringed = |edges: Edges| Edges {
+            start: self.fringed.start || edges.start,
+            end: self.fringed.end || edges.end,
+        };
+        // Typing at an open edge, across spaces on its line, goes on being the
+        // replacement while the paste's words are not all used; a line break,
+        // or whitespace once they are, closes the edge and is never part of
+        // the region.
+        if self.open.end && at >= to && is_gap(&b[to..at]) {
+            // Spaces before the paste's words are used up: whether the
+            // replacement goes on is not known.
+            if !full && !breaks && (lead > 0 || tail < typed.len() || at > to) {
+                return None;
+            }
+            let closing = breaks || (full && (lead > 0 || at > to));
+            let region = if closing || !words {
+                self.region
+            } else {
+                Region {
+                    from,
+                    to: at + tail,
+                }
+            };
+            return Some(Self {
+                region,
+                open: Edges {
+                    end: !closing,
+                    ..self.open
+                },
+                fringed: fringed(Edges {
+                    end: closing && words,
+                    ..Edges::default()
+                }),
+            });
+        }
+        if self.open.start && at <= from && is_gap(&b[at..from]) {
+            if !full && !breaks && (lead > 0 || tail < typed.len() || at < from) {
+                return None;
+            }
+            let closing = breaks || (full && (lead > 0 || tail < typed.len()));
+            let region = if closing || !words {
+                moved
+            } else {
+                Region {
+                    from: at + lead,
+                    to: moved.to,
+                }
+            };
+            return Some(Self {
+                region,
+                open: Edges {
+                    start: !closing,
+                    ..self.open
+                },
+                fringed: fringed(Edges {
+                    start: closing && words,
+                    ..Edges::default()
+                }),
+            });
+        }
+        // Keys glued to the last word are that word, longer: inside.
+        if at == to && to > from && to > 0 && !is_ws(&b[to - 1]) && lead == 0 && !typed.is_empty() {
+            let run = typed.iter().take_while(|u| !is_ws(u)).count();
+            return Some(Self {
+                region: Region { from, to: to + run },
+                ..self
+            });
+        }
+        // Keys right before the first word, glued to it or across spaces, are
+        // typed outside the region and fringe it.
+        let beside_start = words && !tail_breaks && at <= from && is_gap(&b[at..from]);
+        let beside_end = words && !breaks && at >= to && is_gap(&b[to..at]);
+        if at <= from {
+            return Some(Self {
+                region: moved,
+                fringed: fringed(Edges {
+                    start: beside_start,
+                    ..Edges::default()
+                }),
+                ..self
+            });
+        }
+        if at >= to {
+            return Some(Self {
+                fringed: fringed(Edges {
+                    end: beside_end,
+                    ..Edges::default()
+                }),
+                ..self
+            });
+        }
+        Some(Self {
+            region: Region { from, to: moved.to },
+            ..self
+        })
     }
 }
 
@@ -708,12 +738,9 @@ fn judge(text: &str, have: &[Token], want: &[Token], inserted: &str, region: Reg
     };
     if want.len() <= 2 {
         // Position is evidence: one or two words now sitting where the paste
-        // went are what it became, if they did not grow far past it.
-        return if found.len() <= want.len() + SHORT_PASTE_GROWTH {
-            edited()
-        } else {
-            Alignment::NotFound
-        };
+        // went are what it became (the region holds no more words than the
+        // paste did).
+        return edited();
     }
     if resembles(want, found) {
         edited()
@@ -758,6 +785,9 @@ enum Tracking {
     Waiting {
         expect: Option<usize>,
         known: Option<usize>,
+        /// Where copies of the paste's words that the field held before it
+        /// start now (moved through every change since): never the paste.
+        old: Vec<usize>,
         last: Option<String>,
     },
     /// Followed: `text` is the read the region was last placed in.
@@ -784,6 +814,15 @@ impl Tracker {
             .map(|words| occurrences(words, &want).len());
         // The paste's text already within reach of where it went: which copy
         // is the paste could never be told.
+        let old = before_words
+            .as_ref()
+            .map(|words| {
+                occurrences(words, &want)
+                    .into_iter()
+                    .map(|at| words[at].u16_start)
+                    .collect()
+            })
+            .unwrap_or_default();
         let ambiguous = anchor
             .zip(before_words.as_ref())
             .is_some_and(|(anchor, words)| !near(words, &want, anchor.start).is_empty());
@@ -793,6 +832,7 @@ impl Tracker {
             Tracking::Waiting {
                 expect: anchor.map(|anchor| anchor.start),
                 known,
+                old,
                 last: before.map(str::to_string),
             }
         };
@@ -834,33 +874,37 @@ impl Tracker {
                 Alignment::NotFound
             }
         };
+        // A window's offsets are not the field's: nothing is followed or
+        // landed from one.
+        if *windowed {
+            return (Tracking::Lost, unchanged_only());
+        }
         if is_blank(text) {
             let state = match state {
-                Tracking::Waiting { expect, known, .. } => Tracking::Waiting {
+                Tracking::Waiting {
+                    expect, known, old, ..
+                } => Tracking::Waiting {
                     expect,
                     known,
+                    old,
                     last: None,
                 },
                 _ => Tracking::Lost,
             };
             return (state, Alignment::NotFound);
         }
-        // A window's offsets are not the field's: nothing is followed or
-        // landed from one.
-        if *windowed {
-            return (Tracking::Lost, unchanged_only());
-        }
         match state {
             Tracking::Lost => (Tracking::Lost, unchanged_only()),
             Tracking::Waiting {
                 expect,
                 known,
+                old,
                 last,
-            } => self.wait(expect, known, last, text, have),
+            } => self.wait(expect, known, old, last, text, have),
             Tracking::Following {
                 followed,
                 text: before,
-            } => match followed.after((&before, &tokens(&before)), (text, have)) {
+            } => match followed.after((&before, &tokens(&before)), (text, have), self.want.len()) {
                 None => (Tracking::Lost, unchanged_only()),
                 Some(next) => {
                     let alignment = judge(text, have, &self.want, &self.inserted, next.region);
@@ -879,6 +923,7 @@ impl Tracker {
         &self,
         expect: Option<usize>,
         known: Option<usize>,
+        old: Vec<usize>,
         last: Option<String>,
         text: &str,
         have: &[Token],
@@ -891,35 +936,47 @@ impl Tracker {
                 Alignment::Unchanged
             }
         };
-        let waiting = |expect| Tracking::Waiting {
+        let waiting = |expect, old| Tracking::Waiting {
             expect,
             known,
+            old,
             last: Some(text.to_string()),
         };
         let landing = match (expect, known) {
-            // The anchor moves with text typed before the paste arrived.
             (Some(start), _) => {
-                // The change that brought the paste in is not typing before it,
-                // wherever the anchor put it.
-                let arrived = |last: &str| arrival(last, text, have, &self.want);
-                let Some(start) = last.as_deref().map_or(Some(start), |last| {
-                    if arrived(last) {
-                        Some(start)
-                    } else {
-                        shift_start(last, text, start)
+                // The anchor, and the copies the field held before the paste,
+                // move with text typed before the paste arrived. The change
+                // that brought the paste in is not typing before it, wherever
+                // the anchor put it.
+                let moved = match last.as_deref() {
+                    None => Some((start, old)),
+                    Some(last) => {
+                        let start = if arrival(last, text, have, &self.want) {
+                            Some(start)
+                        } else {
+                            shift_start(last, text, start)
+                        };
+                        let old: Option<Vec<usize>> =
+                            old.iter().map(|&at| shift_start(last, text, at)).collect();
+                        start.zip(old)
                     }
-                }) else {
+                };
+                let Some((start, old)) = moved else {
                     return (Tracking::Lost, unchanged_only(&found));
                 };
-                match near(have, &self.want, start).as_slice() {
-                    [] => return (waiting(Some(start)), unchanged_only(&found)),
-                    [only] => *only,
+                let (near, copies): (Vec<usize>, Vec<usize>) = near(have, &self.want, start)
+                    .into_iter()
+                    .partition(|&at| !old.contains(&have[at].u16_start));
+                match (near.as_slice(), copies.is_empty()) {
+                    // Nothing new there: a copy brought near is never the paste.
+                    ([], _) => return (waiting(Some(start), old), unchanged_only(&found)),
+                    ([only], true) => *only,
                     // Two copies within reach: which is the paste?
                     _ => return (Tracking::Lost, Alignment::Unchanged),
                 }
             }
             (None, Some(0)) if found.len() == 1 => found[0],
-            (None, _) if found.is_empty() => return (waiting(None), Alignment::NotFound),
+            (None, _) if found.is_empty() => return (waiting(None, old), Alignment::NotFound),
             // No caret: the text twice, or held before, or unknown.
             (None, _) => return (Tracking::Lost, Alignment::Unchanged),
         };
@@ -930,7 +987,8 @@ impl Tracker {
         let state = Tracking::Following {
             followed: Followed {
                 region,
-                open: Open::default(),
+                open: Edges::default(),
+                fringed: Edges::default(),
             },
             text: text.to_string(),
         };
@@ -1087,15 +1145,19 @@ mod tests {
             last(base, base, &["send it to Kit and Sarah"]),
             Alignment::NotFound
         );
-        // Key by key: past the words deleted the region is lost, not cut short.
+        // Key by key: the space after "Kit" closes the edge, so what is typed
+        // on is outside the region and the fixed word is kept.
         let keys = typing("send it to ", "Kit and Sarah");
         let mut reads = vec!["send it to Ki", "send it to K", "send it to "];
         reads.extend(refs(&keys));
-        assert_eq!(last(base, base, &reads), Alignment::NotFound);
-        // Two words typed over two words are stored.
+        assert_eq!(edited(base, base, &reads), "send it to Kit");
+        // Two words typed over two words are stored in one read. Key by key
+        // the space after the first is lost, not cut short: with a word of the
+        // paste still unused, whether the replacement goes on is not known.
         let base = "report. ok thanks";
+        assert_eq!(edited(base, "ok thanks", &["report. yes sure"]), "yes sure");
         let keys = typing("report. ", "yes sure");
-        assert_eq!(edited(base, "ok thanks", &refs(&keys)), "yes sure");
+        assert_eq!(last(base, "ok thanks", &refs(&keys)), Alignment::NotFound);
     }
 
     #[test]
@@ -1110,7 +1172,7 @@ mod tests {
         let mut reads = vec![
             "ok. anks Smith said hi",
             "ok. nks Smith said hi",
-            "ok. Smith said hi",
+            "ok.  Smith said hi",
         ];
         let keys: Vec<String> = typing("ok. ", "Hex")
             .into_iter()
@@ -1122,8 +1184,6 @@ mod tests {
             "Hex Smith said hi"
         );
         // A lone word.
-        let mut reads = vec!["Hank", "Han", "Ha", "H", ""[..0].trim()];
-        let _ = &mut reads;
         let base = "ok. Hanks";
         let keys = typing("ok. ", "Hex");
         let mut reads = vec!["ok. Hank", "ok. Han", "ok. Ha", "ok. H", "ok. "];
@@ -1140,16 +1200,18 @@ mod tests {
             edited(base, "please send it to Kip tomorrow", &refs(&keys)),
             "please send it to Kip Friday"
         );
-        // Three typed over one: lost, however far it is typed.
+        // Three typed over one: the first is the replacement; what follows the
+        // space after it is outside.
         let keys = typing("please send it to Kip ", "Kit and Sarah");
         assert_eq!(
-            last(base, "please send it to Kip tomorrow", &refs(&keys)),
-            Alignment::NotFound
+            edited(base, "please send it to Kip tomorrow", &refs(&keys)),
+            "please send it to Kip Kit"
         );
-        // Two typed over two.
+        // Two typed over two, by key: lost at the space, never cut short.
         let base = "report. ok thanks";
         let keys = typing("report. ", "yes sure");
-        assert_eq!(edited(base, "ok thanks", &refs(&keys)), "yes sure");
+        never_holds(&answers(base, "ok thanks", &refs(&keys)), &["sure"]);
+        assert_eq!(last(base, "ok thanks", &refs(&keys)), Alignment::NotFound);
     }
 
     #[test]
@@ -1343,7 +1405,7 @@ mod tests {
         // change however the words line up.
         let base = "ok. Friday I will be there in ten minutes";
         let tail = " will be there in ten minutes";
-        let mut reads = vec![format!("ok. Friday {}", tail.trim_start())];
+        let mut reads = vec![format!("ok. Friday {tail}")];
         reads.extend(
             typing("ok. Friday ", "Friday")
                 .into_iter()
@@ -1623,11 +1685,10 @@ mod tests {
             tracker.read(&field("ok. alpha beta\ngamma Rune")),
             Alignment::Edited("alpha beta\ngamma Rune".into())
         );
-        // Typing on past the word it shortened is the replacement or what
-        // comes after it, and which is not known.
+        // Typing on after a space is outside the region.
         assert_eq!(
             tracker.read(&field("ok. alpha beta\ngamma Rune typed after text")),
-            Alignment::NotFound
+            Alignment::Edited("alpha beta\ngamma Rune".into())
         );
         // An anchor a few units off still lands, on the paste.
         for drift in [-3_i32, -2, -1, 1, 2, 3] {
@@ -1776,7 +1837,6 @@ mod tests {
     #[test]
     fn follow_places_the_region_by_where_the_change_is() {
         let region = Region { from: 6, to: 10 };
-        let open = Open::default();
         // (before, after, the region after)
         let table = [
             ("ab    wxyz tail", "ab    wxyz tail", Some((6, 10))),
@@ -1786,14 +1846,554 @@ mod tests {
             ("ab    wxyz tail", "ab    wz tail", Some((6, 8))),
             ("ab    wxyz tail", "ab    tail", None),
             ("ab    wxyz tail", "ab", None),
-            ("ab    wxyz tail", "ab    wxyzQ tail", Some((6, 10))),
+            ("ab    wxyz tail", "ab    wxyzQ tail", Some((6, 11))),
+            ("ab    wxyz tail", "ab    wxyz Q tail", Some((6, 10))),
         ];
         for (before, after, expected) in table {
-            let got = Followed { region, open }
-                .after((before, &tokens(before)), (after, &tokens(after)))
-                .map(|f| (f.region.from, f.region.to));
+            let got = Followed {
+                region,
+                open: Edges::default(),
+                fringed: Edges::default(),
+            }
+            .after((before, &tokens(before)), (after, &tokens(after)), 99)
+            .map(|f| (f.region.from, f.region.to));
             assert_eq!(got, expected, "{before:?} -> {after:?}");
         }
+    }
+
+    /// The paste read as landed, then `reads`, every one's answer.
+    fn answers(base: &str, pasted: &str, reads: &[&str]) -> Vec<Alignment> {
+        let mut tracker = landed(base, pasted);
+        reads.iter().map(|r| tracker.read(&field(r))).collect()
+    }
+
+    fn never_holds(answers: &[Alignment], words: &[&str]) {
+        for answer in answers {
+            if let Alignment::Edited(span) = answer {
+                for word in words {
+                    assert!(!span.contains(word), "{span:?} holds {word:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_region_never_holds_more_words_than_the_paste_had() {
+        // One word for two, in one read, is lost (Hanks to "Hank Smith").
+        assert_eq!(
+            last("ok. Hanks", "Hanks", &["ok. Hank Smith"]),
+            Alignment::NotFound
+        );
+        // Key by key the fixed word is kept and what follows the space is not.
+        let a = answers("ok. Hanks", "Hanks", &["ok. Hank", "ok. Hank Smith"]);
+        assert_eq!(a[1], Alignment::Edited("Hank".into()));
+        // "Kit chen" fixed to "Kitchen", then typing on: past the paste's words
+        // it is lost, and no word of it is stored.
+        let base = "send it to Kit chen";
+        assert_eq!(
+            last(
+                base,
+                base,
+                &["send it to Kitchen", "send it to Kitchen and then"]
+            ),
+            Alignment::NotFound
+        );
+        let keys = typing("send it to Kitchen", " and then");
+        let mut reads = vec!["send it to Kitchen"];
+        reads.extend(refs(&keys));
+        never_holds(&answers(base, base, &reads), &["then"]);
+        // A word fixed and a password typed on, in one read or by key.
+        let base = "send it to Kip";
+        assert_eq!(
+            last(base, base, &["send it to Kit my password is hunter2"]),
+            Alignment::NotFound
+        );
+        let keys = typing("send it to Kit", " my password is hunter2");
+        never_holds(&answers(base, base, &refs(&keys)), &["password", "hunter2"]);
+    }
+
+    #[test]
+    fn a_one_character_edge_word_typed_over_is_not_stored_with_what_follows() {
+        for (base, pasted, after) in [
+            ("ok. call me at 5", "call me at 5", "ok. call me at six pm"),
+            ("ok. plan B", "plan B", "ok. plan C instead"),
+            ("ok. room 4", "room 4", "ok. room 5 on the left"),
+        ] {
+            assert_eq!(last(base, pasted, &[after]), Alignment::NotFound, "{after}");
+        }
+        // By key: the fixed word is kept, the rest is outside.
+        let keys = typing("ok. call me at ", "six pm");
+        let a = answers("ok. call me at 5", "call me at 5", &refs(&keys));
+        never_holds(&a, &["pm"]);
+        assert_eq!(a.last(), Some(&Alignment::Edited("call me at six".into())));
+    }
+
+    #[test]
+    fn an_edge_that_opens_is_checked_for_ambiguous_insertions_too() {
+        // "Hanks Smith" cut back to "Hanks", then "Hanks " put before it: the
+        // new word is either before the region or inside it.
+        let a = answers(
+            "ok. Hanks Smith",
+            "Hanks Smith",
+            &["ok. Hanks", "ok. Hanks Hanks"],
+        );
+        assert_eq!(a[1], Alignment::NotFound);
+    }
+
+    #[test]
+    fn a_new_first_word_then_the_old_one_forward_deleted_is_not_the_paste_minus_a_word() {
+        // Typed before the paste's first word, then the first word deleted:
+        // the edit is "Hanks" to "Hex", and the region holds only one of them.
+        let base = "ok. Hanks Smith said hi";
+        let a = answers(
+            base,
+            "Hanks Smith said hi",
+            &["ok. Hex Hanks Smith said hi", "ok. Hex Smith said hi"],
+        );
+        assert_eq!(a[1], Alignment::NotFound);
+        // The same typed into the word (no space) and the old letters deleted
+        // forward: keys glued before the first word are outside it, and the
+        // word cannot then be replaced, so it is lost, not cut short.
+        let a = answers(
+            base,
+            "Hanks Smith said hi",
+            &[
+                "ok. HHanks Smith said hi",
+                "ok. HeHanks Smith said hi",
+                "ok. HexHanks Smith said hi",
+                "ok. Hexanks Smith said hi",
+                "ok. Hexnks Smith said hi",
+                "ok. Hexks Smith said hi",
+                "ok. Hexs Smith said hi",
+                "ok. Hex Smith said hi",
+            ],
+        );
+        assert_eq!(a.last(), Some(&Alignment::NotFound));
+    }
+
+    #[test]
+    fn whitespace_typed_at_an_open_edge_closes_it_and_is_outside_the_region() {
+        // The last word fixed, a space and more typed after: the fixed word
+        // stays, and nothing typed after it is in.
+        let a = answers(
+            "ok. send it to Kip",
+            "send it to Kip",
+            &[
+                "ok. send it to Kit",
+                "ok. send it to Kit ",
+                "ok. send it to Kit and",
+            ],
+        );
+        assert_eq!(a[2], Alignment::Edited("send it to Kit".into()));
+        // A newline too, and typing before the newline: outside.
+        let a = answers(
+            "ok. send it to Kip",
+            "send it to Kip",
+            &[
+                "ok. send it to Kit",
+                "ok. send it to Kit\n",
+                "ok. send it to Kit secret words\n",
+            ],
+        );
+        never_holds(&a, &["secret"]);
+        // A space typed while the paste's words are not all used is lost: the
+        // replacement may go on, and a cut-short span is never stored.
+        let a = answers(
+            "report. ok thanks",
+            "ok thanks",
+            &["report. yes", "report. yes ", "report. yes sure"],
+        );
+        assert_eq!(a[1], Alignment::NotFound);
+        assert_eq!(a[2], Alignment::NotFound);
+    }
+
+    #[test]
+    fn a_closed_edge_beside_typed_words_never_opens_again() {
+        // Words typed right after the paste, then its last word taken away: the
+        // span would be the paste minus a word beside the typed one.
+        let a = answers(
+            "ok. Hanks Smith",
+            "Hanks Smith",
+            &["ok. Hanks Smith Hex", "ok. Hanks Hex"],
+        );
+        assert_eq!(a[1], Alignment::NotFound);
+    }
+
+    #[test]
+    fn a_copy_that_was_there_before_the_paste_is_never_it_even_moved_near_the_anchor() {
+        // Pre-paste text: the old copy, and filler. The paste arrives at the end;
+        // then everything after the old copy is deleted before the first read.
+        let before = "Hanks 01234567890123";
+        let mut tracker = Tracker::new(
+            "Hanks".into(),
+            Some(Anchor {
+                start: utf16_len(before),
+            }),
+            Some(before),
+        );
+        assert_eq!(tracker.read(&field("Hanks ")), Alignment::Unchanged);
+        assert_eq!(tracker.read(&field("Hex ")), Alignment::NotFound);
+        assert_eq!(tracker.read(&field("Hex there")), Alignment::NotFound);
+    }
+
+    #[test]
+    fn a_blank_window_retires_a_waiting_tracker() {
+        let mut tracker = Tracker::new("Hanks".into(), Some(Anchor { start: 0 }), Some(""));
+        let blank = FieldText {
+            text: "   ".into(),
+            windowed: true,
+        };
+        assert_eq!(tracker.read(&blank), Alignment::NotFound);
+        assert_eq!(tracker.read(&field("Hanks")), Alignment::Unchanged);
+        assert_eq!(tracker.read(&field("Hex")), Alignment::NotFound);
+    }
+
+    #[test]
+    fn without_a_caret_a_copy_held_once_before_is_not_adopted_when_the_old_one_goes() {
+        // Held once before the paste: even when only one copy is left, which
+        // one it is is not known.
+        let mut tracker = Tracker::new("Hanks".into(), None, Some("Hanks x"));
+        assert_eq!(tracker.read(&field("x Hanks")), Alignment::Unchanged);
+        assert_eq!(tracker.read(&field("x Hex")), Alignment::NotFound);
+        // Held nowhere before: the one new copy is adopted.
+        let mut tracker = Tracker::new("Hanks".into(), None, Some("x"));
+        assert_eq!(tracker.read(&field("x Hanks")), Alignment::Unchanged);
+        assert_eq!(
+            tracker.read(&field("x Hex")),
+            Alignment::Edited("Hex".into())
+        );
+    }
+
+    #[test]
+    fn deleting_a_one_word_paste_and_typing_words_is_the_replacement_and_no_more() {
+        // "Yes" deleted whole, then words typed where it was.
+        let a = answers(
+            "Yes u1x u2x",
+            "Yes",
+            &[
+                " u1x u2x",
+                "u u1x u2x",
+                "u3x  u1x u2x",
+                "u3x  let me know u1x u2x",
+            ],
+        );
+        assert_eq!(a[3], Alignment::Edited("u3x".into()));
+    }
+
+    #[test]
+    fn the_anchor_moves_by_text_typed_before_the_paste_arrives_beyond_the_drift() {
+        // Nothing within reach of the anchor before the paste, so only the shift
+        // of the anchor through the typed text lets the paste land.
+        let before = "aaaa bbbb cccc dddd eeee ";
+        let mut tracker = Tracker::new(
+            "Hanks".into(),
+            Some(Anchor {
+                start: utf16_len(before),
+            }),
+            Some(before),
+        );
+        let typed = format!("{} {before}", "z".repeat(20));
+        assert_eq!(tracker.read(&field(&typed)), Alignment::NotFound);
+        let pasted = format!("{typed}Hanks");
+        assert_eq!(tracker.read(&field(&pasted)), Alignment::Unchanged);
+        let fixed = format!("{typed}Hex");
+        assert_eq!(
+            tracker.read(&field(&fixed)),
+            Alignment::Edited("Hex".into())
+        );
+    }
+
+    /// The tracker anchored `offset` units off where `pasted` lands in `base`.
+    fn drifted(base: &str, pasted: &str, offset: isize) -> Tracker {
+        let anchor = anchor_of(base, pasted);
+        Tracker::new(
+            pasted.to_string(),
+            Some(Anchor {
+                start: anchor.start.saturating_add_signed(offset),
+            }),
+            None,
+        )
+    }
+
+    #[test]
+    fn the_paste_lands_within_eight_units_of_the_anchor_and_not_nine() {
+        let base = "twelve chars. send it to Kip";
+        for offset in [-8_isize, 8] {
+            let mut tracker = drifted(base, "send it to Kip", offset);
+            assert_eq!(tracker.read(&field(base)), Alignment::Unchanged);
+            assert_eq!(
+                tracker.read(&field("twelve chars. send it to Kit")),
+                Alignment::Edited("send it to Kit".into()),
+                "{offset}"
+            );
+        }
+        for offset in [-9_isize, 9] {
+            let mut tracker = drifted(base, "send it to Kip", offset);
+            assert_eq!(tracker.read(&field(base)), Alignment::Unchanged);
+            assert_eq!(
+                tracker.read(&field("twelve chars. send it to Kit")),
+                Alignment::NotFound,
+                "{offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_blank_field_retires_a_followed_region_for_good() {
+        let mut tracker = landed("ok. Hanks", "Hanks");
+        assert_eq!(tracker.read(&field("")), Alignment::NotFound);
+        assert_eq!(tracker.read(&field("ok. Hanks")), Alignment::Unchanged);
+        assert_eq!(tracker.read(&field("ok. Hex")), Alignment::NotFound);
+    }
+
+    #[test]
+    fn a_deletion_that_could_as_well_have_cut_into_real_text_is_lost() {
+        // "ab " gone from "x b ab zz": the paste's own "ab ", or "b a" across
+        // its start (a "b" that is not the paste's): which is not known.
+        assert_eq!(last("x b ab zz", "ab zz", &["x b zz"]), Alignment::NotFound);
+    }
+
+    #[test]
+    fn a_longer_paste_needs_half_its_words_and_two_of_them_exact() {
+        // All five words near (one letter off), one of them exact: not it.
+        assert_eq!(
+            last(
+                "ok. alpha beta gamma delta epsilon",
+                "alpha beta gamma delta epsilon",
+                &["ok. alpha betb gammx delt epsilo"]
+            ),
+            Alignment::NotFound
+        );
+        // Six words, two exact in order and the rest replaced: under half.
+        assert_eq!(
+            last(
+                "ok. one two three four five six",
+                "one two three four five six",
+                &["ok. one two xxxx yyyy zzzz wwww"]
+            ),
+            Alignment::NotFound
+        );
+        // Five words, two exact and the rest replaced: under half of five.
+        assert_eq!(
+            last(
+                "ok. one two three four five",
+                "one two three four five",
+                &["ok. one two xxxx yyyy zzzz"]
+            ),
+            Alignment::NotFound
+        );
+        // Half in order, two of them exact: it.
+        assert_eq!(
+            edited(
+                "ok. one two three four five six",
+                "one two three four five six",
+                &["ok. one two three xxxx yyyy zzzz"]
+            ),
+            "one two three xxxx yyyy zzzz"
+        );
+    }
+
+    #[test]
+    fn a_change_too_big_to_work_out_word_by_word_is_lost() {
+        // 520 of 1,400 words replaced in one hunk: past what the word diff
+        // works out (250,000 cells), so it is called several changes.
+        let words: Vec<String> = (0..1_400).map(|n| format!("w{n}x")).collect();
+        let base = format!("ok. {}", words.join(" "));
+        let mut changed = words.clone();
+        for (n, word) in changed.iter_mut().enumerate().skip(400).take(520) {
+            *word = format!("v{n}y");
+        }
+        let after = format!("ok. {}", changed.join(" "));
+        assert_eq!(
+            last(&base, &words.join(" "), &[&after]),
+            Alignment::NotFound
+        );
+        // A small one is read as the one change it is.
+        let mut small = words.clone();
+        small[700] = "zzz".into();
+        let after = format!("ok. {}", small.join(" "));
+        assert!(matches!(
+            last(&base, &words.join(" "), &[&after]),
+            Alignment::Edited(_)
+        ));
+    }
+
+    #[test]
+    fn typing_at_the_start_edge_once_the_paste_words_are_used_closes_it() {
+        // The first word replaced by one word: the paste's two words are used.
+        // A word and a space typed before it are outside; the edit is kept.
+        let a = answers("ok. ab cd", "ab cd", &["ok. x cd", "ok. y x cd"]);
+        assert_eq!(a[1], Alignment::Edited("x cd".into()));
+        // The same with the space first, and then the word.
+        let a = answers(
+            "ok. ab cd",
+            "ab cd",
+            &["ok. x cd", "ok.  x cd", "ok. y x cd"],
+        );
+        assert_eq!(a[2], Alignment::Edited("x cd".into()));
+        // A line break at the start edge closes it before the words are used.
+        let a = answers(
+            "ok. ab cd ef",
+            "ab cd ef",
+            &["ok. cd ef", "ok. \n cd ef", "ok. \nx cd ef"],
+        );
+        never_holds(&a, &["x "]);
+    }
+
+    #[test]
+    fn typing_at_the_start_edge_across_a_space_before_the_words_are_used_is_lost() {
+        // "ab" deleted (one of three words), then a word and a space typed in
+        // one read: the replacement may go on, so the region is lost.
+        let a = answers("ok. ab cd ef", "ab cd ef", &["ok.  cd ef", "ok. x  cd ef"]);
+        assert_eq!(a[1], Alignment::NotFound);
+    }
+
+    #[test]
+    fn a_line_break_then_words_typed_on_the_next_line_is_not_beside_the_paste() {
+        // Return, then a new message key by key, then the last word fixed.
+        let mut reads = vec!["ok. send it to Kip\n".to_string()];
+        reads.extend(typing("ok. send it to Kip\n", "thanks"));
+        reads.push("ok. send it to Kit\nthanks".into());
+        assert_eq!(
+            edited("ok. send it to Kip", "send it to Kip", &refs(&reads)),
+            "send it to Kit"
+        );
+    }
+
+    #[test]
+    fn a_region_of_attachments_has_no_edge_to_open() {
+        let a = answers(
+            "ok. Hanks",
+            "Hanks",
+            &["ok. \u{FFFC}\u{FFFC}", "ok. \u{FFFC}\u{FFFC}hello"],
+        );
+        assert_eq!(a[1], Alignment::NotFound);
+        // Nor does a deletion elsewhere let a word typed where the paste was be
+        // taken for its replacement.
+        let a = answers("ok. one Hanks", "Hanks", &["ok. one ", "ok. ", "ok. Hex"]);
+        assert_eq!(a[2], Alignment::NotFound);
+    }
+
+    #[test]
+    fn an_anchor_that_could_as_well_have_moved_either_way_is_lost() {
+        // "a" typed where it could be before or after the anchor ("ab" to
+        // "aab"): which side is not known, so nothing lands after.
+        let mut tracker = Tracker::new("Hanks".into(), Some(Anchor { start: 1 }), Some("ab"));
+        assert_eq!(tracker.read(&field("aab")), Alignment::NotFound);
+        assert_eq!(tracker.read(&field("aa Hanks b")), Alignment::Unchanged);
+        assert_eq!(tracker.read(&field("aa Hex b")), Alignment::NotFound);
+    }
+
+    #[test]
+    fn text_typed_at_the_anchor_itself_before_the_paste_arrives_is_not_shifted_past() {
+        let before = "start ";
+        let mut tracker = Tracker::new(
+            "Hanks".into(),
+            Some(Anchor {
+                start: utf16_len(before),
+            }),
+            Some(before),
+        );
+        let typed = format!("{before}{} ", "y".repeat(20));
+        assert_eq!(tracker.read(&field(&typed)), Alignment::NotFound);
+        let pasted = format!("{typed}Hanks");
+        assert_eq!(tracker.read(&field(&pasted)), Alignment::Unchanged);
+        assert_eq!(
+            tracker.read(&field(&format!("{typed}Hex"))),
+            Alignment::NotFound
+        );
+    }
+
+    #[test]
+    fn an_old_copy_is_moved_with_the_text_so_it_cannot_land_after_a_deletion() {
+        // The old copy is brought near the anchor by a deletion after it, and
+        // then text before both is deleted: it moves with the text, and is
+        // still the old copy.
+        let before = format!("{} Hanks 0 {}", "A".repeat(20), "b".repeat(10));
+        let mut tracker = Tracker::new(
+            "Hanks".into(),
+            Some(Anchor {
+                start: utf16_len(&before),
+            }),
+            Some(&before),
+        );
+        let near = format!("{} Hanks 0 ", "A".repeat(20));
+        assert_eq!(tracker.read(&field(&near)), Alignment::Unchanged);
+        assert_eq!(tracker.read(&field("Hanks 0 ")), Alignment::Unchanged);
+        assert_eq!(tracker.read(&field("Hex 0 ")), Alignment::NotFound);
+    }
+
+    #[test]
+    fn an_old_copy_beside_the_new_one_is_never_told_from_it() {
+        // The old copy is brought near the anchor by a deletion (ignored: it is
+        // the old one), and then the paste arrives beside it.
+        let before = "Hanks 0 abcdefghij";
+        let mut tracker = Tracker::new(
+            "Hanks".into(),
+            Some(Anchor {
+                start: utf16_len(before),
+            }),
+            Some(before),
+        );
+        assert_eq!(tracker.read(&field("Hanks 0 ")), Alignment::Unchanged);
+        assert_eq!(tracker.read(&field("Hanks 0 Hanks")), Alignment::Unchanged);
+        assert!(!matches!(
+            tracker.read(&field("Hanks 0 Hex")),
+            Alignment::Edited(_)
+        ));
+    }
+
+    #[test]
+    fn a_line_break_typed_where_it_could_have_gone_either_side_closes_the_edge() {
+        // The last word backspaced; a line break typed beside the one already
+        // there (before or after it, the text is the same); then a word typed
+        // before the break: outside, since the edge is not known to be open.
+        let a = answers(
+            "ok. send it to Kip\nnext",
+            "send it to Kip",
+            &[
+                "ok. send it to \nnext",
+                "ok. send it to \n\nnext",
+                "ok. send it to x\n\nnext",
+            ],
+        );
+        assert_eq!(a[2], Alignment::Edited("send it to".into()));
+    }
+
+    #[test]
+    fn whitespace_typed_beside_the_paste_does_not_fringe_an_edge() {
+        // A space typed after the last word, then the word fixed.
+        let a = answers(
+            "ok. send it to Kip",
+            "send it to Kip",
+            &["ok. send it to Kip ", "ok. send it to Kit "],
+        );
+        assert_eq!(a[1], Alignment::Edited("send it to Kit".into()));
+        // A space typed before the first word, then the word fixed.
+        let a = answers("ok. ab cd", "ab cd", &["ok.  ab cd", "ok.  xy cd"]);
+        assert_eq!(a[1], Alignment::Edited("xy cd".into()));
+        // Words typed before it on the line above, then the word fixed.
+        let a = answers("ok. ab cd", "ab cd", &["ok. Hi\nab cd", "ok. Hi\nxy cd"]);
+        assert_eq!(a[1], Alignment::Edited("xy cd".into()));
+        // Words typed far before it, past a line break, then the word fixed.
+        let a = answers("ok.\nab cd", "ab cd", &["Hi ok.\nab cd", "Hi ok.\nxy cd"]);
+        assert_eq!(a[1], Alignment::Edited("xy cd".into()));
+        // Words typed right before it do fringe it: the word cannot then be
+        // told from them.
+        let a = answers("ok. ab cd", "ab cd", &["ok. Hi ab cd", "ok. Hi xy cd"]);
+        assert_eq!(a[1], Alignment::NotFound);
+    }
+
+    #[test]
+    fn a_line_break_typed_at_the_start_edge_closes_it() {
+        // "ab" deleted (one of three words), a line break typed where it was,
+        // then a word typed after the break: outside the region.
+        let a = answers(
+            "ok. ab cd ef",
+            "ab cd ef",
+            &["ok.  cd ef", "ok. \n cd ef", "ok. \nx cd ef"],
+        );
+        assert_eq!(a[2], Alignment::Edited("cd ef".into()));
     }
 
     const CHAT: [&str; 36] = [

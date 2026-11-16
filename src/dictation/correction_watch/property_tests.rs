@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use super::locate::{Anchor, Tracker};
+use super::locate::{Alignment, Anchor, Tracker};
 use super::session::{Event, Field, Outcome, READ_CHARS, Session, Step};
 use crate::accessibility::{FieldText, ReadError};
 
@@ -198,7 +198,7 @@ impl Gen {
 }
 
 /// The field, and where the paste is in it: a byte range.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Model {
     text: String,
     from: usize,
@@ -277,9 +277,15 @@ enum Action {
     MultiHunk,
     AppendWord,
     Grow,
+    ForwardDeleteStart,
+    WsThenInsertBefore,
+    OneCharEdge,
+    SpaceMerge,
+    MergeDeleteTyped,
+    TailCutThenSpace,
 }
 
-const ALL: [Action; 30] = [
+const ALL: [Action; 36] = [
     Action::EditWord,
     Action::EditTwo,
     Action::TrailingTwo,
@@ -310,6 +316,12 @@ const ALL: [Action; 30] = [
     Action::MultiHunk,
     Action::AppendWord,
     Action::Grow,
+    Action::ForwardDeleteStart,
+    Action::WsThenInsertBefore,
+    Action::OneCharEdge,
+    Action::SpaceMerge,
+    Action::MergeDeleteTyped,
+    Action::TailCutThenSpace,
 ];
 
 /// A word that sounds nearly like `word`: one letter changed.
@@ -627,6 +639,10 @@ fn apply(model: &mut Model, action: Action, words_gen: &mut Gen) -> Vec<Model> {
             let new = format!("{glue}{}", words_gen.word());
             let to = model.after_region();
             model.splice(to, to, &new);
+            if glue.is_empty() && to == model.to {
+                // Glued to the last word, it is that word, longer.
+                model.to += new.len();
+            }
             one(model)
         }
         Action::SecondDictation => {
@@ -779,6 +795,152 @@ fn apply(model: &mut Model, action: Action, words_gen: &mut Gen) -> Vec<Model> {
             };
             let new = words_gen.phrase(3);
             rewrite_edge(model, edge, &new, false, &mut words_gen.rng)
+        }
+        Action::ForwardDeleteStart if words.len() >= 2 => {
+            // A word typed right before the paste's first word, which is then
+            // forward-deleted a key at a time.
+            let new = format!("{} ", words_gen.word());
+            let from = model.from;
+            model.splice(from, from, &new);
+            model.from += new.len();
+            model.to += new.len();
+            let mut reads = vec![model.clone()];
+            let (a, b) = model.words()[0];
+            for c in model.text[a..=b].chars().collect::<Vec<_>>() {
+                model.splice(a, a + c.len_utf8(), "");
+                model.to -= c.len_utf8();
+                reads.push(model.clone());
+            }
+            reads
+        }
+        Action::WsThenInsertBefore if words.len() >= 2 => {
+            // The last word backspaced, a space or newline typed after it, then
+            // words typed before that whitespace.
+            let (a, b) = words[words.len() - 1];
+            let mut reads = Vec::new();
+            let mut cut = b;
+            for c in model.text[a..b].chars().rev().collect::<Vec<_>>() {
+                cut -= c.len_utf8();
+                model.splice(cut, cut + c.len_utf8(), "");
+                model.to -= c.len_utf8();
+                reads.push(model.clone());
+            }
+            let ws = if words_gen.rng.below(2) == 0 {
+                "\n"
+            } else {
+                " "
+            };
+            let to = model.to;
+            model.splice(to, to, ws);
+            reads.push(model.clone());
+            let more = words_gen.sentence();
+            reads.extend(typed(model, to, &more, &mut words_gen.rng, |m, _| {
+                (m.from, m.to)
+            }));
+            reads
+        }
+        Action::OneCharEdge if !words.is_empty() => {
+            // The last word becomes one character; that is typed over by a
+            // phrase of two words.
+            let (a, b) = words[words.len() - 1];
+            model.splice(a, b, "x");
+            model.to = model.to + 1 - (b - a);
+            let mut reads = vec![model.clone()];
+            let phrase = words_gen.phrase(2);
+            reads.extend(rewrite_edge(
+                model,
+                Edge::End,
+                &phrase,
+                false,
+                &mut words_gen.rng,
+            ));
+            reads
+        }
+        Action::SpaceMerge => {
+            // The space between the paste and a word beside it deleted.
+            let after = model.text[model.to..].starts_with(' ')
+                && model.text[model.to + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| !c.is_whitespace());
+            let before = model.from > 0
+                && model.text[..model.from].ends_with(' ')
+                && model.text[..model.from - 1]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| !c.is_whitespace());
+            if after && (words_gen.rng.below(2) == 0 || !before) {
+                let to = model.to;
+                let rest = &model.text[to + 1..];
+                let word = rest.split(char::is_whitespace).next().unwrap_or("").len();
+                model.splice(to, to + 1, "");
+                model.to += word;
+                one(model)
+            } else if before {
+                let from = model.from;
+                let head = &model.text[..from - 1];
+                let word = head.rsplit(char::is_whitespace).next().unwrap_or("").len();
+                model.splice(from - 1, from, "");
+                model.from = from - 1 - word;
+                model.to -= 1;
+                one(model)
+            } else {
+                Vec::new()
+            }
+        }
+        Action::MergeDeleteTyped if !words.is_empty() => {
+            // The last word's end deleted, then one more character deleted and
+            // two typed in one read.
+            let (a, b) = words[words.len() - 1];
+            if model.text[a..b].chars().count() < 3 {
+                return Vec::new();
+            }
+            let mut reads = Vec::new();
+            let last = model.text[a..b]
+                .chars()
+                .next_back()
+                .map_or(1, char::len_utf8);
+            model.splice(b - last, b, "");
+            model.to -= last;
+            reads.push(model.clone());
+            let b = b - last;
+            let prev = model.text[a..b]
+                .chars()
+                .next_back()
+                .map_or(1, char::len_utf8);
+            model.splice(b - prev, b, "QZ");
+            model.to = model.to + 2 - prev;
+            reads.push(model.clone());
+            reads
+        }
+        Action::TailCutThenSpace if !words.is_empty() => {
+            // The last word's tail deleted, then the space after the paste, so
+            // what is left runs into the next word.
+            let (a, b) = words[words.len() - 1];
+            if model.text[a..b].chars().count() < 2
+                || !model.text[model.to..].starts_with(' ')
+                || model.text[model.to + 1..].trim().is_empty()
+            {
+                return Vec::new();
+            }
+            let mut reads = Vec::new();
+            let last = model.text[a..b]
+                .chars()
+                .next_back()
+                .map_or(1, char::len_utf8);
+            model.splice(b - last, b, "");
+            model.to -= last;
+            reads.push(model.clone());
+            let to = model.to;
+            let word = model.text[to + 1..]
+                .split(char::is_whitespace)
+                .next()
+                .unwrap_or("")
+                .len();
+            model.splice(to, to + 1, "");
+            model.to += word;
+            reads.push(model.clone());
+            reads
         }
         _ => Vec::new(),
     }
@@ -1010,6 +1172,39 @@ fn leak(
     (!inside_a_read).then_some("outside")
 }
 
+/// A span that stops where the paste's words were used up, with the rest of
+/// what the edit typed beyond it: the replacement kept as far as the paste had
+/// words, whitespace then outside the region (Known limits in corrections.md).
+fn kept_the_fixed_words(span: &str, expected: &str, paste: &str) -> bool {
+    expected.starts_with(span)
+        && expected[span.len()..].starts_with(char::is_whitespace)
+        && words_of(span).len() == words_of(paste.trim()).len()
+}
+
+/// An edit made before the paste was first read that shows the same words
+/// twice at the anchor: which copy is the paste cannot be known from the field.
+fn two_copies_before_the_first_read(case: &Case) -> bool {
+    case.setup == Setup::EditedBeforeSeen
+        && case.steps.first().is_some_and(|(action, _)| {
+            matches!(action, Action::PasteBefore | Action::WsThenInsertBefore)
+        })
+}
+
+/// The whole paste replaced in one read, then keys typed at its edge: the
+/// replacement's edges are open, so those keys are taken for more of it while
+/// the paste's words are not all used.
+fn replaced_then_typed_at_the_edge(case: &Case) -> bool {
+    let mut replaced = false;
+    for (action, _) in &case.steps {
+        match action {
+            Action::ReplaceAll => replaced = true,
+            Action::KeysBefore | Action::KeysAfter if replaced => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Whether `span` sits in the final field with every word of it overlapping
 /// the region. With `every` (unique words) all its places must, else one.
 fn inside(text: &str, from: usize, to: usize, span: &str, every: bool) -> bool {
@@ -1136,15 +1331,26 @@ fn report(first: u64, last: u64) -> Report {
         let every_read: Vec<&Model> = std::iter::once(&case.initial)
             .chain(case.steps.iter().flat_map(|(_, reads)| reads))
             .collect();
-        // The paste, whole, in a read after the first: a landing like any.
+        // The paste, whole, in any read (the first included: an edit that
+        // happens to put the same words back): a landing like any.
         let later_shows_paste = case
             .steps
             .iter()
-            .flat_map(|(_, reads)| reads.iter().skip(1))
-            .chain(case.steps.iter().skip(1).flat_map(|(_, reads)| reads))
+            .flat_map(|(_, reads)| reads.iter())
             .any(|m| m.text.to_lowercase().contains(&case.paste.to_lowercase()));
-        let waivable = one_hunk_reading(&case);
+        let waivable = one_hunk_reading(&case)
+            || two_copies_before_the_first_read(&case)
+            || replaced_then_typed_at_the_edge(&case);
         for mode in modes(seed) {
+            // An app that collapses blank lines shows a typed line break as
+            // nothing at all: what is typed after it cannot be told from typing
+            // at the edge.
+            let waivable = waivable
+                || (mode == Mode::Collapsing
+                    && case
+                        .steps
+                        .iter()
+                        .any(|(action, _)| *action == Action::WsThenInsertBefore));
             let run = run(&case, mode);
             let collapses = mode == Mode::Collapsing;
             let mut mine = Counts {
@@ -1168,7 +1374,13 @@ fn report(first: u64, last: u64) -> Report {
                 if mode == Mode::Windowed {
                     mine.outside += 1;
                     note("windowed", format!("{span:?}"));
-                } else if let Some(leak) = leak(&run, &every_read, span, collapses, case.unique) {
+                } else if let Some(leak) = leak(
+                    &run,
+                    &every_read,
+                    span,
+                    collapses,
+                    case.unique && case.setup != Setup::DuplicateShort,
+                ) {
                     if waivable {
                         mine.waived += 1;
                     } else if leak == "deleted" {
@@ -1194,6 +1406,20 @@ fn report(first: u64, last: u64) -> Report {
                 .before
                 .to_lowercase()
                 .contains(&case.paste.to_lowercase());
+            // A word typed before the first, then that first word deleted: the
+            // edit is of two words, and the region holds only one of them.
+            if case.steps.len() == 1
+                && kind == Action::ForwardDeleteStart
+                && case.setup == Setup::Normal
+                && mode != Mode::Windowed
+                && matches!(run.outcome, Outcome::Edited(_))
+            {
+                mine.outside += 1;
+                note(
+                    "typed beside, then the word deleted",
+                    format!("{:?}", run.outcome),
+                );
+            }
             if single && case.setup != Setup::EditedBeforeSeen {
                 let (action, reads) = &case.steps[0];
                 let model = &reads[reads.len() - 1];
@@ -1202,7 +1428,12 @@ fn report(first: u64, last: u64) -> Report {
                 let blanked = reads
                     .iter()
                     .any(|m| m.text.chars().all(|c| c.is_whitespace() || c == '\u{FFFC}'));
-                let landed = matches!(mode, Mode::Anchored | Mode::Drifting(_) | Mode::NoCaret)
+                let words_only = case
+                    .paste
+                    .split_whitespace()
+                    .all(|w| w.chars().any(char::is_alphanumeric));
+                let landed = words_only
+                    && matches!(mode, Mode::Anchored | Mode::Drifting(_) | Mode::NoCaret)
                     && !held_before
                     && !blanked
                     && case.setup != Setup::DuplicateShort;
@@ -1223,6 +1454,7 @@ fn report(first: u64, last: u64) -> Report {
                         | Action::BackspaceRetypeStart
                         | Action::SelectTypeOneEnd
                         | Action::SelectTypeOneStart
+                        | Action::MergeDeleteTyped
                 );
                 if landed && (good_one || edge_one) {
                     mine.good += 1;
@@ -1241,10 +1473,13 @@ fn report(first: u64, last: u64) -> Report {
                         | Action::BackspaceRetypeStart
                         | Action::SelectTypeOneEnd
                         | Action::SelectTypeOneStart
+                        | Action::OneCharEdge
+                        | Action::MergeDeleteTyped
                         | Action::Ime
                 ) && let Outcome::Edited(span) = &run.outcome
                     && mode != Mode::Windowed
                     && *span != expected
+                    && !kept_the_fixed_words(span, &expected, &case.paste)
                 {
                     mine.inexact += 1;
                     note("inexact", format!("{span:?}, wanted {expected:?}"));
@@ -1314,13 +1549,13 @@ fn what_is_stored_is_the_pastes_own_region_and_nothing_else() {
     check(&report, 2_000, 100);
 }
 
-/// The long run: well over 200,000 cases. `cargo test -- --ignored`.
+/// The long run: over 800,000 cases. `cargo test -- --ignored`.
 #[test]
-#[ignore = "long: 70,000 cases in three modes each"]
+#[ignore = "long: 290,000 cases in three modes each"]
 fn what_is_stored_holds_over_a_long_run() {
-    let report = report(1_000_000, 1_070_000);
+    let report = report(1_000_000, 1_290_000);
     print(&report);
-    check(&report, 200_000, 10_000);
+    check(&report, 800_000, 40_000);
 }
 
 /// Before the paste has been seen whole, nothing is an edit: not anchored,
@@ -1375,5 +1610,66 @@ fn debug_one_seed() {
             windowed: false,
         };
         println!("{:?} -> {:?}", model.text, tracker.read(&read));
+    }
+}
+
+#[test]
+fn every_action_keeps_its_model_in_bounds() {
+    for seed in 1..=3_000 {
+        let case = generate(seed);
+        for (action, reads) in &case.steps {
+            for m in reads {
+                assert!(
+                    m.from <= m.to
+                        && m.to <= m.text.len()
+                        && m.text.is_char_boundary(m.from)
+                        && m.text.is_char_boundary(m.to),
+                    "seed {seed} {action:?}: {m:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A copy of the paste that was in the field before it, brought near the
+/// anchor by deleting what lay between (before the paste is first read), is
+/// never taken for the paste: nothing stored comes from it.
+#[test]
+fn an_old_copy_brought_near_the_anchor_is_never_the_paste() {
+    for seed in 1..=2_000_u64 {
+        let mut words_gen = Gen::new(seed);
+        let (a, b) = (1 + words_gen.rng.below(2), 2 + words_gen.rng.below(4));
+        let paste = words_gen.words(a);
+        let filler = words_gen.words(b);
+        let after = words_gen.word();
+        // The old copy, filler, then where the paste will go.
+        let before = format!("{paste} {filler} {after} ");
+        let anchor = Anchor {
+            start: u16_len(&before[..before.len() - after.len() - 1]),
+        };
+        let mut tracker = Tracker::new(paste.clone(), Some(anchor), Some(&before));
+        let read = |tracker: &mut Tracker, text: &str| {
+            tracker.read(&FieldText {
+                text: text.to_string(),
+                windowed: false,
+            })
+        };
+        // The paste arrives, then everything after the old copy is deleted
+        // before the first read: the old copy is now where the anchor is.
+        assert!(!matches!(
+            read(&mut tracker, &format!("{paste} ")),
+            Alignment::Edited(_)
+        ));
+        // Whatever is read of the old copy afterwards is no edit of the paste.
+        for later in [
+            format!("{} ", words_gen.word()),
+            format!("{} tail", words_gen.word()),
+        ] {
+            let seen = read(&mut tracker, &later);
+            assert!(
+                !matches!(seen, Alignment::Edited(_)),
+                "seed {seed}: {paste:?} -> {later:?}: {seen:?}"
+            );
+        }
     }
 }

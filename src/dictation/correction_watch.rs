@@ -20,9 +20,13 @@ use crate::accessibility::{self, RetainedElement};
 use crate::dictation::key_counts;
 use crate::history::History;
 
+#[cfg(test)]
+mod fuzz_tests;
 mod locate;
 #[cfg(test)]
 mod property_tests;
+#[cfg(test)]
+mod recall_tests;
 use locate::Anchor;
 mod session;
 mod worker;
