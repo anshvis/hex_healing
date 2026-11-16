@@ -560,8 +560,7 @@ mod tests {
         t0: Instant,
         anchor: Option<Anchor>,
     ) -> Session<F> {
-        let before = anchor.is_none().then_some("");
-        Session::new(field, t0, Tracker::new(inserted.into(), anchor, before))
+        Session::new(field, t0, Tracker::new(inserted.into(), anchor, Some("")))
     }
 
     /// The first read of a watch: the paste, whole. No edit is called before.

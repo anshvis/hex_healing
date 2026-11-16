@@ -183,7 +183,11 @@ impl Scenario<'_> {
         let mut session = Session::new(
             &live,
             t0,
-            Tracker::new(self.paste.to_string(), Some(anchor), None),
+            Tracker::new(
+                self.paste.to_string(),
+                Some(anchor),
+                Some(&format!("{}{}", self.prefix, self.suffix)),
+            ),
         );
         let open: &dyn Fn() -> bool = &|| true;
         let mut result = None;
