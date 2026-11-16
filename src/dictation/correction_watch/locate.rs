@@ -757,6 +757,9 @@ impl Followed {
             start: self.fringed.start || edges.start,
             end: self.fringed.end || edges.end,
         };
+        // A region with no word left, both edges open, is one place: words
+        // typed in it come out of the room of each.
+        let shared = edge.is_empty() && self.open.start && self.open.end;
         // Typing at an open edge, across spaces on its line, goes on being the
         // replacement while the words taken there are not all back; a line
         // break, or whitespace once they are, closes the edge and is never
@@ -790,7 +793,11 @@ impl Followed {
                 },
                 room: Room {
                     end: room,
-                    ..self.room
+                    start: if shared && !closing {
+                        self.room.start.checked_sub(put)?
+                    } else {
+                        self.room.start
+                    },
                 },
                 fringed: fringed(Edges {
                     end: closing && words,
@@ -834,7 +841,11 @@ impl Followed {
                 },
                 room: Room {
                     start: room,
-                    ..self.room
+                    end: if shared && !closing {
+                        self.room.end.checked_sub(put)?
+                    } else {
+                        self.room.end
+                    },
                 },
                 fringed: fringed(Edges {
                     start: closing && words,
