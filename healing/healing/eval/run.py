@@ -183,6 +183,7 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict]]:
         format_errors, format_words = format_errors + (errors or 0), format_words + (words or 0)
         row = {
             "id": record["id"], "terms_hit": hit, "terms_expected": terms, "transcript": transcript,
+            "expected": definition["expected"],
             # A strong clip's reference is the model's own words outside the edited ones, so the
             # whole-reference counts would reward agreeing with oneself: not recorded for edited.
             "word_errors": record["word_errors"] if policy.whole_reference else None,
@@ -205,6 +206,7 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict]]:
         "ref_words": first.summary["reference_words"] if policy.whole_reference else None,
         "format_error_rate": format_errors / format_words if format_words else None,
         "term_error_rate": None if recall is None else 1 - recall,
+        "false_replacement_rate": first.summary["quality"].get("false_replacement_rate"),
         "term_hits": term_hits,
         "median_rtf": statistics.median(r.summary["median_rtf"] for r in runs),
         "p95_clip_ms": statistics.median(r.summary["p95_clip_ms"] for r in runs),
@@ -230,6 +232,8 @@ def evaluate(
     bench=run_benchmark,
     now: Callable[[], float] = time.time,
     parent: str = "current",
+    vocabulary_entries: list[dict] | None = None,
+    vocabulary_boost: str | None = None,
 ) -> dict:
     """Score `models` on `set_names`: the one place a request is validated (`EvalUsageError`) and its
     set names deduplicated; the CLI only parses."""
@@ -261,7 +265,9 @@ def evaluate(
             refs.append(found)
 
     entries, boost, why_none = ([], None, None)
-    if vocabulary == "current":
+    if vocabulary_entries is not None:  # the caller names the list (`healing vocab ab`); Hex's settings are not read
+        entries, boost = list(vocabulary_entries), vocabulary_boost
+    elif vocabulary == "current":
         entries, boost, why_none = current_vocabulary(settings_path)
         if not entries and why_none:
             progress(f"vocabulary: none passed ({why_none})")
