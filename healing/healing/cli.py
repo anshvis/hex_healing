@@ -113,6 +113,11 @@ def main(argv: list[str] | None = None) -> int:
     apply.add_argument("--dry-run", action="store_true")
     apply.add_argument("--max-biased", type=int, default=64, help="slots Hex biases, for the report (Hex's own cap is 64)")
     apply.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
+    ab = vocab.add_parser("ab", help="score the current GGUF with and without the mined terms (needs the T3.4 hex)")
+    ab.add_argument("--boost", choices=["light", "normal", "strong"], default="normal")
+    ab.add_argument("--model", type=Path, default=None, help="GGUF to score (default: the catalog Unified)")
+    ab.add_argument("--parent", default="current", help="whose rolling set to score")
+    ab.add_argument("--hex", type=Path, default=None, help="path to the hex binary that reads your vocabulary")
     revert = vocab.add_parser("revert", help="remove the terms healing still owns by content, in one write")
     revert.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
 
@@ -142,6 +147,10 @@ def main(argv: list[str] | None = None) -> int:
         from healing.vocab import apply as apply_module
         from healing.vocab import mine as mine_module
 
+        if args.command == "ab":
+            from healing.vocab import ab as ab_module
+
+            return ab_module.main(args)
         return (mine_module if args.command == "mine" else apply_module).main(args)
     if args.group == "report":
         return _report(args)
