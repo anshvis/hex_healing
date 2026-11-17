@@ -1309,7 +1309,13 @@ fn hunks_between(before: &str, after: &str, most: bool) -> usize {
 
 /// How a stored span leaks, if it does: from a deleted paste, or from outside
 /// the region of every read of the field.
-fn leak(run: &Run, every_read: &[&Model], span: &str, collapses: bool) -> Option<&'static str> {
+fn leak(
+    run: &Run,
+    every_read: &[&Model],
+    span: &str,
+    collapses: bool,
+    strict: bool,
+) -> Option<&'static str> {
     if run.from == run.to {
         return Some("deleted");
     }
@@ -1319,6 +1325,7 @@ fn leak(run: &Run, every_read: &[&Model], span: &str, collapses: bool) -> Option
             stored(collapses, &m.text[..m.from]).len(),
             stored(collapses, &m.text[..m.to]).len(),
             span,
+            strict,
         )
     });
     (!inside_a_read).then_some("outside")
@@ -1366,7 +1373,14 @@ fn leak_after(case: &Case, steps: usize, mode: Mode) -> Option<String> {
     let every_read: Vec<&Model> = std::iter::once(&case.initial)
         .chain(case.steps.iter().flat_map(|(_, reads)| reads))
         .collect();
-    leak(&run, &every_read, span, mode == Mode::Collapsing).map(|_| span.clone())
+    leak(
+        &run,
+        &every_read,
+        span,
+        mode == Mode::Collapsing,
+        case.setup != Setup::Periodic,
+    )
+    .map(|_| span.clone())
 }
 
 /// Whether the leak the whole case ends with first showed at a step that is
@@ -1417,6 +1431,26 @@ fn edge_ambiguous(before: &str, after: &str, paste: &str) -> bool {
         .filter(|w| count(&new, w) > count(&old, w))
         .collect();
     let paste = fold(paste);
+    // A word put in that is the word beside the paste: the edit could as well
+    // have been made on the other side of it.
+    let neighbours: Vec<String> = before
+        .to_lowercase()
+        .find(&paste.join(" "))
+        .map(|at| {
+            let end = at + paste.join(" ").len();
+            let lower = before.to_lowercase();
+            lower[..at]
+                .split_whitespace()
+                .next_back()
+                .into_iter()
+                .chain(lower[end..].split_whitespace().next())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if put.iter().any(|p| neighbours.contains(*p)) {
+        return true;
+    }
     taken
         .iter()
         .filter(|t| paste.first() == Some(**t) || paste.last() == Some(**t))
@@ -1435,8 +1469,27 @@ fn edge_ambiguous(before: &str, after: &str, paste: &str) -> bool {
 /// Whether `span` sits in the final field with every word of it wholly inside
 /// the region: a word that only touches it, or runs out of it into the text
 /// beside it, is not. Every place the span's words stand must be inside.
-fn inside(text: &str, from: usize, to: usize, span: &str) -> bool {
+fn inside(text: &str, from: usize, to: usize, span: &str, strict: bool) -> bool {
     let words = words_of(text);
+    // The words that make up the region: a place the span stands within a word
+    // of it could as well be the paste's.
+    let region: Vec<usize> = (0..words.len())
+        .filter(|&k| words[k].0 < to && words[k].1 > from)
+        .collect();
+    let near = |start: usize, end: usize| {
+        let touching: Vec<usize> = (0..words.len())
+            .filter(|&k| words[k].0 < end && words[k].1 > start)
+            .collect();
+        match (
+            region.first(),
+            region.last(),
+            touching.first(),
+            touching.last(),
+        ) {
+            (Some(&r0), Some(&r1), Some(&t0), Some(&t1)) => t1 + 1 >= r0 && t0 <= r1 + 1,
+            _ => true,
+        }
+    };
     let mut ok = Vec::new();
     let mut aligned = Vec::new();
     let mut at = 0;
@@ -1447,16 +1500,21 @@ fn inside(text: &str, from: usize, to: usize, span: &str) -> bool {
             .filter(|(a, b)| *a < end && *b > start)
             .all(|(a, b)| *a >= from && *b <= to);
         ok.push(all);
-        // The span as words of its own, not a run of letters inside others.
+        // The span as words of its own, not a run of letters inside others,
+        // and where it could be taken for the region's.
         let on_words =
             words.iter().any(|(a, _)| *a == start) && words.iter().any(|(_, b)| *b == end);
-        if on_words {
+        if on_words && near(start, end) {
             aligned.push(all);
         }
         at = start + text[start..].chars().next().map_or(1, char::len_utf8);
     }
-    // Every place the words stand must be the region's: otherwise which of the
-    // places is the paste's is not known.
+    // Every such place must be the region's: otherwise which of them is the
+    // paste's is not known. (Not in a periodic text, where the words alone
+    // never tell the places apart and the paste's arrival is what does.)
+    if !strict {
+        return ok.iter().any(|&all| all);
+    }
     let places = if aligned.is_empty() { &ok } else { &aligned };
     !places.is_empty() && places.iter().all(|&all| all)
 }
@@ -1600,7 +1658,13 @@ fn report(first: u64, last: u64) -> Report {
                 if mode == Mode::Windowed {
                     mine.outside += 1;
                     note("windowed", format!("{span:?}"));
-                } else if let Some(leak) = leak(&run, &every_read, span, collapses) {
+                } else if let Some(leak) = leak(
+                    &run,
+                    &every_read,
+                    span,
+                    collapses,
+                    case.setup != Setup::Periodic,
+                ) {
                     if leak == "deleted" {
                         mine.deleted_stored += 1;
                         note(leak, format!("{span:?}"));

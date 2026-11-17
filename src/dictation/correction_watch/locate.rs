@@ -148,6 +148,31 @@ fn alike(a: &Token, b: &Token) -> bool {
         || (a.fold.len() >= 3 && b.fold.len() >= 3 && edit_within_one(&a.fold, &b.fold))
 }
 
+/// Whether `a` could be a copy of `b` typed with a key or two wrong: the same
+/// word, one letter off (three letters or more), or two off (five or more).
+fn near_copy(a: &Token, b: &Token) -> bool {
+    if alike(a, b) {
+        return true;
+    }
+    let (x, y) = (&a.fold, &b.fold);
+    if x.len() < 5 || y.len() < 5 || x.len().abs_diff(y.len()) > 2 {
+        return false;
+    }
+    let mut row: Vec<usize> = (0..=y.len()).collect();
+    for (i, cx) in x.iter().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cy) in y.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (diagonal + usize::from(cx != cy))
+                .min(above + 1)
+                .min(row[j] + 1);
+            diagonal = above;
+        }
+    }
+    row[y.len()] <= 2
+}
+
 fn same(a: &Token, b: &Token) -> bool {
     a.fold == b.fold
 }
@@ -468,6 +493,20 @@ impl Followed {
         };
         let region = Region { from, ..region };
         let held = tokens_in(words, region);
+        // Words that now stand where the paste's did and are the words beside
+        // them could as well be those words: the same text, read two ways
+        // ("Yes" over "Yes No" to "No No").
+        let changed = held.len() != edge.len()
+            || held.iter().zip(edge).any(|(now, was)| now.fold != was.fold);
+        if changed && let (Some(first), Some(last)) = (held.first(), held.last()) {
+            let at = |t: &Token| words.iter().position(|w| w.u16_start == t.u16_start);
+            let before_it = at(first).and_then(|k| k.checked_sub(1)).map(|k| &words[k]);
+            let after_it = at(last).and_then(|k| words.get(k + 1));
+            let same = |x: Option<&Token>, y: &Token| x.is_some_and(|x| x.fold == y.fold);
+            if same(before_it, first) || same(after_it, last) {
+                return None;
+            }
+        }
         // A word that runs out of the region is the region's text joined to
         // the text beside it: none of it is known to be the paste's.
         if held
@@ -608,7 +647,7 @@ impl Followed {
                 && typed.windows(text.len()).any(|w| w == text)
         };
         let more = |t: &Token| {
-            let count = |words: &[Token]| words.iter().filter(|w| alike(w, t)).count();
+            let count = |words: &[Token]| words.iter().filter(|w| near_copy(w, t)).count();
             count(after) > count(before)
         };
         // (A word of the region typed over is its own edit, not a copy.)
@@ -1155,6 +1194,12 @@ impl Tracker {
             want,
             state,
         }
+    }
+
+    /// Whether a region is being followed.
+    #[cfg(test)]
+    pub(super) fn landed(&self) -> bool {
+        matches!(self.state, Tracking::Following { .. })
     }
 
     #[cfg(test)]
@@ -2999,6 +3044,57 @@ mod tests {
     fn round_11_letters_typed_and_taken_out_in_one_read_leave_the_equal_words_unplaced() {
         // "a" taken from the front and typed at the end: the same words.
         stores_nothing(&replay("a", Some(1), "a", &["a a", " a\ta", " a\tab"]));
+    }
+
+    #[test]
+    fn round_11_a_paste_glued_to_a_neighbour_is_never_landed_and_a_reread_stores_nothing() {
+        // Glued after: "note:" run into "it's".
+        stores_nothing(&replay(
+            "note:",
+            Some(0),
+            "it's stra\u{df}e\tnote:",
+            &[
+                "note:it's stra\u{df}e\tnote:",
+                "note:it's stra\u{df}e\tnote:",
+            ],
+        ));
+        // Glued before: "kip" run on from "Hex".
+        stores_nothing(&replay(
+            "kip",
+            Some(3),
+            "Hex",
+            &["Hexkip", "Hexkip", "Hexkit"],
+        ));
+    }
+
+    #[test]
+    fn round_11_a_blank_read_ends_the_following_of_a_region() {
+        // Undone to empty and the words put back: not an edit of the paste.
+        stores_nothing(&replay(
+            "Hanks",
+            Some(0),
+            "",
+            &["Hanks", "", "Hanks", "Hex"],
+        ));
+    }
+
+    #[test]
+    fn round_11_a_paste_that_fits_two_places_is_not_landed() {
+        // "kip " fits before "kip tomorrow" and after its first word.
+        let mut tracker = Tracker::new("kip ".into(), None, Some("kip tomorrow"));
+        tracker.read(&field("kip kip tomorrow"));
+        assert!(!tracker.landed());
+        stores_nothing(&replay(
+            "kip ",
+            None,
+            "kip tomorrow",
+            &["kip kip tomorrow", "kit kip tomorrow"],
+        ));
+    }
+
+    #[test]
+    fn round_11_one_character_typed_after_a_read_of_the_old_field_is_not_a_paste() {
+        stores_nothing(&replay("a", Some(0), "", &["", "a", "ab"]));
     }
 
     #[test]

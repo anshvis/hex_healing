@@ -21,6 +21,8 @@ use crate::dictation::key_counts;
 use crate::history::History;
 
 #[cfg(test)]
+mod cell_fuzz_tests;
+#[cfg(test)]
 mod fuzz_tests;
 #[cfg(test)]
 mod glue_fuzz_tests;
