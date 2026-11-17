@@ -213,7 +213,21 @@ def _dataset(train: str | None, snapshot_sha: str | None) -> dict | None:
     snapshots.write(snap)
     return {"snapshot_sha256": snap.sha256, "snapshot_path": str(snapshots.snapshot_path(snap.sha256).relative_to(objects.registry_dir())),
             "train_split": train, "train_n": snap.train_n, "strong_n": snap.strong_n, "weak_n": snap.weak_n,
-            "weights_frozen": snap.weights_frozen}
+            "weights_frozen": snap.weights_frozen, "bundle_sha256": _bundle(train)}
+
+
+def _bundle(train: str) -> str | None:
+    """The sha256 of `healing train prepare`'s bundle for this train split (T6.1), checked against its
+    files, or None when none was prepared (or it was deleted)."""
+    from healing.train import manifest as train_manifest
+
+    path = train_manifest.bundle_for(train)
+    if not path.exists():
+        return None
+    try:
+        return train_manifest.verify_bundle(path)
+    except train_manifest.TrainError as error:
+        raise CommandError(f"the training bundle for {train} is damaged: {error}") from error
 
 
 def register(args) -> list[str]:
