@@ -150,6 +150,11 @@ def run_ab(
     if not mined:
         raise AbError("no mined terms to measure: run `healing vocab mine` (the A/B mines the training clips itself, "
                       "but a correction needs to have been made twice)")
+    slots = vocab_apply.BIAS_SLOTS - len(yours)  # Hex biases the first 64 entries, in stored order
+    if slots <= 0:
+        raise AbError(f"your own {len(yours)} terms already fill Hex's {vocab_apply.BIAS_SLOTS} bias slots: "
+                      "no mined term would be biased, so there is nothing to measure")
+    biased = mined[:slots]
     documents = {}
     for arm, entries in (("without", yours), ("with", yours + mined)):
         progress(f"{arm} the mined terms ({len(entries)} vocabulary terms)")
@@ -160,7 +165,7 @@ def run_ab(
     key = str(model)
     a, b = documents["without"], documents["with"]
     sets: dict[str, dict] = {}
-    mined_terms = [m["term"] for m in mined]
+    mined_terms = [m["term"] for m in biased]  # only a term the engine took can replace a heard word
     for name in SETS:
         if name in a["unavailable_sets"]:
             sets[name] = {"na": a["unavailable_sets"][name]}
@@ -186,6 +191,7 @@ def run_ab(
         "scope": "global vocabulary only; no mode vocabularies (a mode's own terms take bias slots first in Hex)",
         "your_terms": len(yours),
         "mined_terms": [{"term": m["term"], "sounds_like": m["sounds_like"]} for m in mined],
+        "biased_terms": [{"term": m["term"], "sounds_like": m["sounds_like"]} for m in biased],
         "mined_source": "train clips only, in memory (vocab_candidates untouched)",
         "sets": {name: {k: (asdict(v) if isinstance(v, TermResult) else v) for k, v in result.items()} for name, result in sets.items()},
         "verdict": outcome,
@@ -247,7 +253,7 @@ def write_verdict(report: dict) -> Path:
     vocab_apply.write_atomic(path, json.dumps({
         "ab_id": report["ab_id"], "measured_at_ms": int(time.time() * 1000), "boost": outcome.get("boost", report["boost"]),
         "passes": outcome.get("passes"), "recommended_boost": outcome.get("recommended_boost"),
-        "gates": outcome.get("gates"), "mined_terms": report["mined_terms"], "model_sha256": report["model"]["gguf_sha256"],
+        "gates": outcome.get("gates"), "measured_terms": report["biased_terms"], "model_sha256": report["model"]["gguf_sha256"],
     }, indent=1) + "\n")
     return path
 

@@ -145,7 +145,7 @@ def test_train_only_mining_in_memory(tmp_path, monkeypatch, capsys):
     def stub(model, boost, parent, *, yours, mined, store, **kwargs):
         seen.update(yours=yours, mined=mined)
         return {"ab_id": "vocab-ab-test", "model": {"gguf_path": str(model), "gguf_sha256": "x"}, "boost": boost,
-                "your_terms": len(yours), "mined_terms": mined, "sets": {}, "verdict": {"text": "stub"}}
+                "your_terms": len(yours), "mined_terms": mined, "biased_terms": mined, "sets": {}, "verdict": {"text": "stub"}}
 
     monkeypatch.setattr(ab, "run_ab", stub)
     assert main(["vocab", "ab", "--hex", str(binary), "--model", str(tmp_path / "m.gguf")]) == 0
@@ -217,7 +217,27 @@ def test_the_verdict_is_recorded_for_apply(tmp_path, monkeypatch):
 
     saved = json.loads(vocab_apply.verdict_path().read_text())
     assert saved["boost"] == "normal" and saved["passes"] is True and saved["ab_id"] == report["ab_id"]
-    assert saved["mined_terms"] == [{"term": "Qorvyx", "sounds_like": ["corvix"]}]  # what it measured
+    assert saved["measured_terms"] == [{"term": "Qorvyx", "sounds_like": ["corvix"]}]  # what it measured
+    assert "mined_terms" not in saved
     failed = run(fake_evaluate(bias_hurts_general=10))
     ab.write_verdict(failed)
     assert json.loads(vocab_apply.verdict_path().read_text())["passes"] is False  # the latest wins
+
+
+def test_only_the_biased_mined_terms_are_recorded_as_measured(tmp_path, monkeypatch):
+    monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))
+    yours = [{"term": f"mine{i}", "sounds_like": []} for i in range(62)]  # two of Hex's 64 slots are left
+    mined = [{"term": f"Mined{i}", "sounds_like": []} for i in range(5)]
+    report = ab.run_ab(MODEL, "normal", "current", yours=yours, mined=mined, store=None, evaluate=fake_evaluate())
+    assert [m["term"] for m in report["biased_terms"]] == ["Mined0", "Mined1"]
+    assert len(report["mined_terms"]) == 5  # all of them are still listed
+    ab.write_verdict(report)
+    from healing.vocab import apply as vocab_apply
+
+    assert [m["term"] for m in json.loads(vocab_apply.verdict_path().read_text())["measured_terms"]] == ["Mined0", "Mined1"]
+
+
+def test_your_terms_filling_the_slots_cannot_be_measured():
+    yours = [{"term": f"mine{i}", "sounds_like": []} for i in range(64)]
+    with pytest.raises(ab.AbError, match="64 bias slots"):
+        ab.run_ab(MODEL, "normal", "current", yours=yours, mined=MINED, store=None, evaluate=fake_evaluate())

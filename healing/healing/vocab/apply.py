@@ -15,7 +15,7 @@ list was removed by you: it goes to `rejected` and is never added again. `pendin
 journal back, so a term you later add by hand is never claimed; only an answer that never came (a
 timeout) leaves `pending`, and a later run adds to it until a write is confirmed. The journal is fsynced,
 and its directory too, before Hex is called. `apply` refuses at a `normal` or `strong` boost unless the
-latest `healing vocab ab` passed at that boost on a set holding every term it is about to add
+latest `healing vocab ab` passed at that boost on a set holding every mined term that will sit inside Hex's 64-entry bias cap
 (`ab-verdict.json`); `light` and `off` need none, and
 `--force` overrides, logged to `apply.log`.
 """
@@ -39,6 +39,11 @@ BIAS_SLOTS = 64  # Hex's cap on the entries it biases, taken in stored order
 EXIT_NOT_RUNNING = 3  # docs/cli.md: control commands never launch Hex
 EXIT_REFUSED = 4  # the A/B gate said no
 HEX_TIMEOUT_S = 60
+# Error codes of `hex vocabulary set --json` that mean Hex looked at the request and refused it, so
+# nothing was saved. Anything else that fails (`transport`, `control-timeout`, an unknown code, output that
+# isn't a reply, a signal) leaves the outcome unknown: the write may have happened.
+REFUSAL_CODES = frozenset({"invalid-vocabulary", "version-mismatch", "unsupported", "outdated", "busy",
+                           "disabled", "feature-off", "not-running"})
 SAFE_BOOSTS = ("light", "off")  # no A/B needed: light is where a failed or missing A/B leaves Hex
 BOOST_KEY = "vocabulary_boost"  # `hex settings get|set` (src/control/settings/registry.rs)
 
@@ -81,22 +86,44 @@ def normalize(item) -> dict:
 
 # ---- the hex calls -------------------------------------------------------------------------------
 
-def _run(binary: Path, args: list[str]) -> subprocess.CompletedProcess:
+def _reply(text: str) -> dict | None:
+    """The `--json` reply in `text` (its last JSON line), or None when there is none."""
+    for line in reversed(text.strip().splitlines()):
+        try:
+            reply = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(reply, dict):
+            return reply
+    return None
+
+
+def _run(binary: Path, args: list[str], *, write: bool = False) -> subprocess.CompletedProcess:
+    """Run `hex`. For a `write`, a failure is `ApplyError` only when Hex confirmably refused (a known
+    error code, or not running) or never started; any other failure is `HexOutcomeUnknown`."""
     # Not the isolated environment the benchmark uses: this talks to the one running Hex, found through
     # its own data folder's discovery file.
     env = {**os.environ, "HEX_DISABLE_UPDATES": "1"}
+    name = " ".join(args[:2])
     try:
         done = subprocess.run([str(binary), *args], capture_output=True, text=True, env=env, timeout=HEX_TIMEOUT_S)
     except subprocess.TimeoutExpired as error:
-        raise HexOutcomeUnknown(f"hex {' '.join(args[:2])} did not answer in {HEX_TIMEOUT_S}s; its outcome is unknown") from error
+        raise HexOutcomeUnknown(f"hex {name} did not answer in {HEX_TIMEOUT_S}s; its outcome is unknown") from error
     except OSError as error:  # it never started
         raise ApplyError(f"could not run {binary}: {error}") from error
+    if done.returncode == 0:
+        return done
     if done.returncode == EXIT_NOT_RUNNING:
         raise HexNotRunning("Hex isn't running")
-    if done.returncode != 0:
-        raise ApplyError(f"hex {' '.join(args[:2])} exited {done.returncode}: "
-                         + (done.stderr.strip() or done.stdout.strip())[-300:])
-    return done
+    reply = _reply(done.stdout) or _reply(done.stderr) or {}
+    code = reply.get("code") if reply.get("status") == "error" else None
+    detail = (reply.get("message") if code else None) or (done.stderr.strip() or done.stdout.strip())[-300:]
+    message = f"hex {name} exited {done.returncode}" + (f" ({code})" if code else "") + f": {detail}"
+    if not write or code in REFUSAL_CODES:
+        if code == "not-running":
+            raise HexNotRunning("Hex isn't running")
+        raise ApplyError(message)
+    raise HexOutcomeUnknown(message + "; its outcome is unknown")
 
 
 def hex_list(binary: Path) -> list[dict]:
@@ -115,7 +142,7 @@ def hex_set(binary: Path, entries: list[dict]) -> bool:
     with tempfile.TemporaryDirectory(prefix="set-", dir=folder) as scratch:
         path = Path(scratch) / "vocabulary.json"
         path.write_text(json.dumps([e if e["sounds_like"] else e["term"] for e in entries], indent=1))
-        done = _run(binary, ["vocabulary", "set", "--file", str(path), "--json"])
+        done = _run(binary, ["vocabulary", "set", "--file", str(path), "--json"], write=True)
     try:
         return bool(json.loads(done.stdout).get("changed", True))
     except ValueError:
@@ -301,10 +328,11 @@ def running_boost(binary: Path) -> str | None:
     return "normal" if value is None else str(value)
 
 
-def gate(binary: Path, adding: list[dict]) -> tuple[str | None, str | None]:
+def gate(binary: Path, biased: list[dict]) -> tuple[str | None, str | None]:
     """`(boost, why not)`: why `apply` may not write at the boost Hex runs, None when it may. `light` and
     `off` need no A/B; `normal` and `strong` need the latest `healing vocab ab` to have passed at that boost
-    on a set of mined terms (term and spellings) that holds every one `adding`. A subset is fine."""
+    on a set of terms (term and spellings) that holds every mined term `biased`, the ones that will sit inside
+    Hex's bias cap after the write. Terms past the cap need no measurement; a subset is fine."""
     boost = running_boost(binary)
     if boost in SAFE_BOOSTS:
         return boost, None
@@ -321,13 +349,13 @@ def gate(binary: Path, adding: list[dict]) -> tuple[str | None, str | None]:
     if verdict.get("passes") is not True:
         return boost, f"the latest A/B at {boost} boost " + ("was undecided" if verdict.get("passes") is None else "failed")
     try:
-        measured = {(m["term"], tuple(m.get("sounds_like") or [])) for m in verdict["mined_terms"]}
+        measured = {(m["term"], tuple(m.get("sounds_like") or [])) for m in verdict["measured_terms"]}
     except (KeyError, TypeError, AttributeError):
-        return boost, "the latest A/B does not record which terms it measured; rerun `healing vocab ab`"
-    unmeasured = [a["term"] for a in adding if (a["term"], tuple(a["sounds_like"])) not in measured]
+        return boost, "the latest A/B does not record which terms it biased; rerun `healing vocab ab`"
+    unmeasured = [a["term"] for a in biased if (a["term"], tuple(a["sounds_like"])) not in measured]
     if unmeasured:
         shown = ", ".join(unmeasured[:5]) + (f" and {len(unmeasured) - 5} more" if len(unmeasured) > 5 else "")
-        return boost, f"{len(unmeasured)} mined term(s) were not measured by the latest A/B ({shown}); rerun `healing vocab ab`"
+        return boost, f"{len(unmeasured)} mined term(s) would be biased but were not measured by the latest A/B ({shown}); rerun `healing vocab ab`"
     return boost, None
 
 
@@ -367,7 +395,7 @@ def apply(binary: Path, candidates: list[mine_module.Candidate], *, dry_run: boo
     lines = report(p, hex_modes(), slots)
     if p.newly_rejected:
         lines.append("removed by you, never added again: " + ", ".join(p.newly_rejected))
-    boost, why = gate(binary, p.mined)
+    boost, why = gate(binary, p.mined[:max(0, BIAS_SLOTS - len(p.yours))])
     if dry_run:
         return ["dry run, nothing written"] + ([f"apply would {refusal(boost, why)}"] if why else []) + lines
     if not p.changed:

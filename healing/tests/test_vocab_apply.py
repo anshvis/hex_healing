@@ -10,7 +10,7 @@ from healing.vocab import apply as vocab_apply
 from healing.vocab import mine as vocab
 
 FAKE_HEX = """#!{python}
-import json, os, sys, time
+import json, os, signal, sys, time
 state = os.environ["FAKE_HEX_STATE"]
 log = state + ".calls"
 args = sys.argv[1:]
@@ -29,9 +29,20 @@ if args[:2] == ["vocabulary", "list"]:
     print(json.dumps({{"version": 4, "status": "vocabulary", "entries": entries}}))
 elif args[:2] == ["vocabulary", "set"]:
     mode = os.environ.get("FAKE_SET_MODE")
+    def error(code, exit_code=1):
+        print(json.dumps({{"version": 4, "status": "error", "code": code, "message": "x"}}))
+        sys.exit(exit_code)
     if mode == "fail":
-        sys.stderr.write("invalid-vocabulary: entry 0: refused\\n")
+        error("invalid-vocabulary")
+    if mode == "busy":
+        error("busy")
+    if mode == "transport-before":
+        error("transport")
+    if mode == "garbage":
+        print("something odd")
         sys.exit(1)
+    if mode == "killed":
+        os.kill(os.getpid(), signal.SIGKILL)
     if mode == "hang-before":
         time.sleep(5)
     items = json.load(open(args[args.index("--file") + 1]))
@@ -40,6 +51,8 @@ elif args[:2] == ["vocabulary", "set"]:
     json.dump(new, open(state, "w"))
     if mode == "hang-after":
         time.sleep(5)
+    if mode == "transport-after":
+        error("transport")  # the write happened; the reply didn't reach the client
     print(json.dumps({{"version": 4, "status": "done", "changed": changed}}))
 else:
     sys.exit(2)
@@ -356,7 +369,7 @@ def verdict(boost, passes, mined=None):
     measured = [{"term": t, "sounds_like": sl} for t, sl in (MINED if mined is None else mined)]
     vocab_apply.verdict_path().parent.mkdir(parents=True, exist_ok=True)
     vocab_apply.verdict_path().write_text(json.dumps(
-        {"ab_id": "vocab-ab-x", "boost": boost, "passes": passes, "mined_terms": measured}))
+        {"ab_id": "vocab-ab-x", "boost": boost, "passes": passes, "measured_terms": measured}))
 
 
 def refused(env, capsys, *args):
@@ -465,5 +478,89 @@ def test_a_verdict_without_the_terms_it_measured_is_refused(env, monkeypatch):
     env.set_list([{"term": "Anomaly"}])
     env.candidates(*MINED)
     vocab_apply.verdict_path().parent.mkdir(parents=True, exist_ok=True)
-    vocab_apply.verdict_path().write_text(json.dumps({"boost": "normal", "passes": True}))  # an older verdict file
+    vocab_apply.verdict_path().write_text(json.dumps({"boost": "normal", "passes": True, "mined_terms": [
+        {"term": t, "sounds_like": sl} for t, sl in MINED]}))  # an older verdict file: it claimed every mined term
     assert env.run("apply") == 4
+
+
+# ---- second review round: unknown outcomes, and only the biased terms need measuring ---------------
+
+@pytest.mark.parametrize("mode", ["transport-after", "transport-before", "garbage", "killed"])
+def test_an_unknown_outcome_keeps_pending(env, monkeypatch, mode):
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    monkeypatch.setenv("FAKE_SET_MODE", mode)
+    assert env.run("apply") == 1
+    assert [t["term"] for t in journal()["pending"]] == ["Kit", "Qorvyx", "Rowan"]
+
+
+@pytest.mark.parametrize("mode", ["fail", "busy"])
+def test_a_known_refusal_code_restores_the_journal(env, monkeypatch, mode):
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    monkeypatch.setenv("FAKE_SET_MODE", mode)
+    assert env.run("apply") == 1
+    assert not journal().get("pending")
+
+
+def test_a_set_that_cannot_start_is_a_failure_to_start(env, monkeypatch):
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    real = vocab_apply.subprocess.run
+
+    def run(command, *args, **kwargs):
+        if "set" in command:
+            raise FileNotFoundError("hex vanished")
+        return real(command, *args, **kwargs)
+
+    monkeypatch.setattr(vocab_apply.subprocess, "run", run)
+    assert env.run("apply") == 1
+    assert not journal().get("pending") and env.terms() == ["Anomaly"]
+
+
+def test_revert_keeps_pending_on_an_unknown_outcome(env, monkeypatch):
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    env.run("apply")
+    monkeypatch.setenv("FAKE_SET_MODE", "transport-after")  # Hex removed them, the reply was lost
+    assert env.run("revert") == 1
+    assert env.listed() == [{"term": "Anomaly"}]
+    monkeypatch.delenv("FAKE_SET_MODE")
+    env.run("apply")  # must not read the missing terms as you removing them
+    assert journal()["rejected"] == [] and env.terms() == ["Anomaly", "Kit", "Qorvyx", "Rowan"]
+
+
+def test_revert_restores_the_journal_on_a_known_refusal(env, monkeypatch):
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    env.run("apply")
+    monkeypatch.setenv("FAKE_SET_MODE", "fail")
+    assert env.run("revert") == 1
+    assert [t["term"] for t in journal()["terms"]] == ["Kit", "Qorvyx", "Rowan"] and not journal().get("pending")
+
+
+def many_mined(n):
+    return [(f"Mined{i}", [f"heard{i}"]) for i in range(n)]
+
+
+def test_only_mined_terms_inside_the_bias_cap_need_measuring(env, monkeypatch):
+    monkeypatch.setenv("FAKE_BOOST", "normal")
+    env.set_list([{"term": f"mine{i}"} for i in range(62)])  # 62 of yours: two bias slots left
+    rows = many_mined(5)
+    env.candidates(*rows)
+    verdict("normal", True, mined=rows[:2])  # the A/B biased exactly the two that fit
+    assert env.run("apply") == 0 and len(env.terms()) == 67
+
+
+def test_a_term_that_moves_inside_the_cap_needs_a_new_ab(env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_BOOST", "normal")
+    env.set_list([{"term": f"mine{i}"} for i in range(62)])
+    rows = many_mined(5)
+    env.candidates(*rows)
+    verdict("normal", True, mined=rows[:2])
+    env.run("apply")
+    env.set_list(env.listed()[:60] + env.listed()[62:])  # you removed two of yours: slots open up
+    env.candidates(*rows[1:])  # and the list changes, so apply writes
+    assert env.run("apply") == 4
+    err = capsys.readouterr().err
+    assert "Mined2" in err and "healing vocab ab" in err
