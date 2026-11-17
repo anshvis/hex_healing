@@ -289,6 +289,17 @@ that is the word before the paste), and in the property generator 182 of 28,181
 known-good edits (0.65%) plus 310 edge-ambiguous ones. A missed correction costs one training example; a stored wrong one teaches the
 model text the person never meant.
 
+Round 12 recall cost: 62,877 of 64,701 fixes stored exactly (97.2%), none
+wrong. Line breaks are read everywhere (any break in the blanks around a
+replacement's words, and every Unicode line separator), and a new word at an
+edge that holds, or is a near copy of, the word beside it loses the region.
+The boundary, stated plainly: the tracker judges by the minimal explanations
+of the reads, and a history that every minimal alignment explains as an edit of
+the paste is stored. Paste "Kip", reads "Kip", "Kip secret", "Kit secret"
+stores "Kit": an outside copy inserted and the original replaced reads exactly
+as " secret" typed after the paste and Kip fixed to Kit, so refusing it would
+refuse the ordinary case.
+
 Known limits, stated plainly: a send button without a Return loses the
 observation (the field going blank looks like delete-all); a keystroke that
 shares a tick with the Return that sends it is never read, so the edit kept is
