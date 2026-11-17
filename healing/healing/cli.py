@@ -103,6 +103,13 @@ def main(argv: list[str] | None = None) -> int:
     observation = report.add_parser("observation", help="per app: pastes observed and edited")
     observation.add_argument("--json", action="store_true")
 
+    vocab = commands.add_parser("vocab").add_subparsers(dest="command", required=True)
+    mine = vocab.add_parser("mine", help="corrections you made twice become candidate vocabulary terms")
+    mine.add_argument("--min-pairs", type=int, default=2)
+    mine.add_argument("--window", default="30d", help="how far back a term's recent use is counted: 30d, a date or RFC 3339")
+    mine.add_argument("--train-only", action="store_true", help="only clips outside the test clusters (the A/B needs this)")
+    mine.add_argument("--json", action="store_true")
+
     protocol = commands.add_parser("protocol").add_subparsers(dest="command", required=True)
     seeded = protocol.add_parser("corrections", help="the seeded edit-recall protocol (X-3)")
     seeded.add_argument("step", choices=["plan", "run", "score"])
@@ -125,6 +132,10 @@ def main(argv: list[str] | None = None) -> int:
         from healing import golden as golden_module
 
         return golden_module.main(args)
+    if args.group == "vocab":
+        from healing.vocab import mine as mine_module
+
+        return mine_module.main(args)
     if args.group == "report":
         return _report(args)
     if args.group == "protocol":
