@@ -15,7 +15,8 @@ list was removed by you: it goes to `rejected` and is never added again. `pendin
 journal back, so a term you later add by hand is never claimed; only an answer that never came (a
 timeout) leaves `pending`, and a later run adds to it until a write is confirmed. The journal is fsynced,
 and its directory too, before Hex is called. `apply` refuses at a `normal` or `strong` boost unless the
-latest `healing vocab ab` passed at that boost (`ab-verdict.json`); `light` and `off` need none, and
+latest `healing vocab ab` passed at that boost on a set holding every term it is about to add
+(`ab-verdict.json`); `light` and `off` need none, and
 `--force` overrides, logged to `apply.log`.
 """
 
@@ -300,9 +301,10 @@ def running_boost(binary: Path) -> str | None:
     return "normal" if value is None else str(value)
 
 
-def gate(binary: Path) -> tuple[str | None, str | None]:
+def gate(binary: Path, adding: list[dict]) -> tuple[str | None, str | None]:
     """`(boost, why not)`: why `apply` may not write at the boost Hex runs, None when it may. `light` and
-    `off` need no A/B; `normal` and `strong` need the latest `healing vocab ab` to have passed at that boost."""
+    `off` need no A/B; `normal` and `strong` need the latest `healing vocab ab` to have passed at that boost
+    on a set of mined terms (term and spellings) that holds every one `adding`. A subset is fine."""
     boost = running_boost(binary)
     if boost in SAFE_BOOSTS:
         return boost, None
@@ -318,6 +320,14 @@ def gate(binary: Path) -> tuple[str | None, str | None]:
         return boost, f"Hex runs {boost} boost but the latest A/B measured {verdict.get('boost')}"
     if verdict.get("passes") is not True:
         return boost, f"the latest A/B at {boost} boost " + ("was undecided" if verdict.get("passes") is None else "failed")
+    try:
+        measured = {(m["term"], tuple(m.get("sounds_like") or [])) for m in verdict["mined_terms"]}
+    except (KeyError, TypeError, AttributeError):
+        return boost, "the latest A/B does not record which terms it measured; rerun `healing vocab ab`"
+    unmeasured = [a["term"] for a in adding if (a["term"], tuple(a["sounds_like"])) not in measured]
+    if unmeasured:
+        shown = ", ".join(unmeasured[:5]) + (f" and {len(unmeasured) - 5} more" if len(unmeasured) > 5 else "")
+        return boost, f"{len(unmeasured)} mined term(s) were not measured by the latest A/B ({shown}); rerun `healing vocab ab`"
     return boost, None
 
 
@@ -357,7 +367,7 @@ def apply(binary: Path, candidates: list[mine_module.Candidate], *, dry_run: boo
     lines = report(p, hex_modes(), slots)
     if p.newly_rejected:
         lines.append("removed by you, never added again: " + ", ".join(p.newly_rejected))
-    boost, why = gate(binary)
+    boost, why = gate(binary, p.mined)
     if dry_run:
         return ["dry run, nothing written"] + ([f"apply would {refusal(boost, why)}"] if why else []) + lines
     if not p.changed:

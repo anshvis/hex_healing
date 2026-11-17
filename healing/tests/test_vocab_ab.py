@@ -217,6 +217,7 @@ def test_the_verdict_is_recorded_for_apply(tmp_path, monkeypatch):
 
     saved = json.loads(vocab_apply.verdict_path().read_text())
     assert saved["boost"] == "normal" and saved["passes"] is True and saved["ab_id"] == report["ab_id"]
+    assert saved["mined_terms"] == [{"term": "Qorvyx", "sounds_like": ["corvix"]}]  # what it measured
     failed = run(fake_evaluate(bias_hurts_general=10))
     ab.write_verdict(failed)
     assert json.loads(vocab_apply.verdict_path().read_text())["passes"] is False  # the latest wins

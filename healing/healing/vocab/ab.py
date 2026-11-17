@@ -247,7 +247,7 @@ def write_verdict(report: dict) -> Path:
     vocab_apply.write_atomic(path, json.dumps({
         "ab_id": report["ab_id"], "measured_at_ms": int(time.time() * 1000), "boost": outcome.get("boost", report["boost"]),
         "passes": outcome.get("passes"), "recommended_boost": outcome.get("recommended_boost"),
-        "gates": outcome.get("gates"), "model_sha256": report["model"]["gguf_sha256"],
+        "gates": outcome.get("gates"), "mined_terms": report["mined_terms"], "model_sha256": report["model"]["gguf_sha256"],
     }, indent=1) + "\n")
     return path
 

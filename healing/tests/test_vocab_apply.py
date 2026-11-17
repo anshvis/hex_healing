@@ -351,9 +351,12 @@ def test_the_journal_directory_is_synced_before_hex_is_called(env, monkeypatch):
     assert seen == {"directory_synced_first": True}
 
 
-def verdict(boost, passes):
+def verdict(boost, passes, mined=None):
+    """The latest A/B's record; by default it measured all of MINED."""
+    measured = [{"term": t, "sounds_like": sl} for t, sl in (MINED if mined is None else mined)]
     vocab_apply.verdict_path().parent.mkdir(parents=True, exist_ok=True)
-    vocab_apply.verdict_path().write_text(json.dumps({"ab_id": "vocab-ab-x", "boost": boost, "passes": passes}))
+    vocab_apply.verdict_path().write_text(json.dumps(
+        {"ab_id": "vocab-ab-x", "boost": boost, "passes": passes, "mined_terms": measured}))
 
 
 def refused(env, capsys, *args):
@@ -426,3 +429,41 @@ def test_revert_needs_no_verdict(env, monkeypatch):
     env.run("apply")
     monkeypatch.setenv("FAKE_BOOST", "strong")
     assert env.run("revert") == 0 and env.terms() == ["Anomaly"]
+
+
+def test_apply_refuses_a_mined_term_the_ab_did_not_measure(env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_BOOST", "normal")
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    verdict("normal", True, mined=MINED[:2])  # Rowan was mined after the A/B
+    assert env.run("apply") == 4
+    err = capsys.readouterr().err
+    assert "Rowan" in err and "healing vocab ab" in err and "vocabulary set" not in env.calls()
+    verdict("normal", True, mined=[("Kit", ["kip"]), ("Qorvyx", ["other"]), ("Rowan", [])])  # same term, other spellings
+    assert env.run("apply") == 4 and "Qorvyx" in capsys.readouterr().err
+    assert env.run("apply", "--force") == 0
+
+
+def test_a_subset_of_the_measured_terms_is_fine(env, monkeypatch):
+    monkeypatch.setenv("FAKE_BOOST", "normal")
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED[:2])  # the A/B measured three; two are about to be added
+    verdict("normal", True)
+    assert env.run("apply") == 0 and env.terms() == ["Anomaly", "Kit", "Qorvyx"]
+
+
+def test_a_term_you_already_have_need_not_be_measured(env, monkeypatch):
+    monkeypatch.setenv("FAKE_BOOST", "normal")
+    env.set_list([{"term": "Rowan"}])  # yours, so it is not added
+    env.candidates(*MINED)
+    verdict("normal", True, mined=MINED[:2])
+    assert env.run("apply") == 0 and env.terms() == ["Rowan", "Kit", "Qorvyx"]
+
+
+def test_a_verdict_without_the_terms_it_measured_is_refused(env, monkeypatch):
+    monkeypatch.setenv("FAKE_BOOST", "normal")
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    vocab_apply.verdict_path().parent.mkdir(parents=True, exist_ok=True)
+    vocab_apply.verdict_path().write_text(json.dumps({"boost": "normal", "passes": True}))  # an older verdict file
+    assert env.run("apply") == 4
