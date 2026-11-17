@@ -26,3 +26,8 @@ def hex_support_dir() -> Path:
     """Hex's own data folder (`$HEX_APPLICATION_SUPPORT_DIR`, else Application Support). Read-only here."""
     named = os.environ.get("HEX_APPLICATION_SUPPORT_DIR")
     return Path(named) if named else Path.home() / "Library" / "Application Support" / "hex"
+
+
+def train_dir() -> Path:
+    """`$HEALING_HOME/train`: training bundles (`<round>/`) and the replay transcript cache."""
+    return healing_home() / "train"
