@@ -60,14 +60,14 @@ def test_reports_deltas_and_cis():
     assert terms["wins"] == 25 and terms["losses"] == 0 and terms["favours_mined"] and terms["p_value"] < 1e-6
     assert rolling["wer"]["delta"] < 0 and rolling["wer"]["ci_low"] <= rolling["wer"]["delta"] <= rolling["wer"]["ci_high"]
     assert general["wer"]["delta"] == 0 and general["false_replacements"]["rate"] == 0
-    assert report["verdict"]["ship_at_normal"] is True and report["verdict"]["boost"] == "normal"
+    assert report["verdict"]["passes"] is True and report["verdict"]["boost"] == "normal"
     printed = ab.text(report)
-    assert "McNemar exact: mined got 25 more right" in printed and "95% CI" in printed and "verdict: the mined terms pass" in printed
+    assert "McNemar exact over clips: mined got 25 more clips right" in printed and "95% CI" in printed and "verdict: the mined terms pass" in printed
 
 
 def test_a_worse_general_wer_or_false_replacement_falls_back_to_light():
     report = run(fake_evaluate(bias_hurts_general=10))  # 10 words in 400: +2.5 pt
-    assert report["verdict"]["ship_at_normal"] is False and report["verdict"]["boost"] == "light"
+    assert report["verdict"]["passes"] is False and report["verdict"]["recommended_boost"] == "light"
     assert report["verdict"]["gates"]["general_wer_ci_high_at_most_0.3pt"] is False
     report = run(fake_evaluate(false_replacements=2))  # 2 of 40 clips: 5%
     assert report["verdict"]["gates"]["false_replacements_at_most_0.5pct"] is False
@@ -90,7 +90,7 @@ def test_too_few_terms_is_na():
     report = run(fake_evaluate(term_clips=19))
     terms = report["sets"]["rolling"]["terms"]
     assert terms["na"].startswith("n/a: 19 clip(s)") and terms["favours_mined"] is False and terms["p_value"] is None
-    assert report["verdict"]["ship_at_normal"] is None and report["verdict"]["boost"] == "light"
+    assert report["verdict"]["passes"] is None and report["verdict"]["recommended_boost"] == "light"
     assert "no verdict" in ab.text(report) and "term error rate: n/a" in ab.text(report)
 
 
@@ -103,7 +103,7 @@ def test_an_unavailable_set_is_na_not_a_win():
         return document
 
     report = run(evaluate)
-    assert "n/a (no rolling set" in ab.text(report) and report["verdict"]["ship_at_normal"] is None
+    assert "n/a (no rolling set" in ab.text(report) and report["verdict"]["passes"] is None
 
 
 def test_mcnemar_exact():
@@ -178,3 +178,45 @@ def test_evaluate_passes_the_named_list_not_hex_settings(world):  # noqa: F811
     first, second = world.calls()
     assert first["vocabulary"] == MINED and first["args"][first["args"].index("--boost") + 1] == "strong"
     assert "--vocabulary" not in second["args"]
+
+
+def test_mcnemar_counts_clips_not_terms():
+    # one clip gets 10 terms right only with the mined list; 19 others are unchanged
+    without = [{"id": "c0", "terms_expected": [f"t{i}" for i in range(10)], "terms_hit": []}]
+    with_ = [{"id": "c0", "terms_expected": [f"t{i}" for i in range(10)], "terms_hit": [f"t{i}" for i in range(10)]}]
+    for i in range(1, 25):
+        row = {"id": f"c{i}", "terms_expected": ["x"], "terms_hit": ["x"]}
+        without.append(row)
+        with_.append(dict(row))
+    result = ab.term_result(without, with_)
+    assert (result.wins, result.losses, result.p_value, result.favours_mined) == (1, 0, 1.0, False)
+    assert result.terms == 34 and result.error_without == 10 / 34 and result.error_with == 0  # descriptive, per term
+
+
+def test_a_clip_is_right_only_when_all_its_terms_are():
+    without = [{"id": f"c{i}", "terms_expected": ["a", "b"], "terms_hit": ["a"]} for i in range(20)]
+    with_ = [{"id": f"c{i}", "terms_expected": ["a", "b"], "terms_hit": ["a", "b"]} for i in range(20)]
+    result = ab.term_result(without, with_)
+    assert (result.wins, result.losses, result.favours_mined) == (20, 0, True)
+    half = [{"id": r["id"], "terms_expected": ["a", "b"], "terms_hit": []} for r in with_]
+    assert ab.term_result(half, with_).wins == 20  # a clip that lost one of two terms is still wrong
+
+
+def test_the_verdict_is_specific_to_the_boost_it_measured():
+    for boost in ("light", "strong"):
+        report = ab.run_ab(MODEL, boost, "current", yours=YOURS, mined=MINED, store=None, evaluate=fake_evaluate())
+        assert report["verdict"]["boost"] == boost and report["verdict"]["passes"] is True
+        assert "ship_at_normal" not in report["verdict"] and boost in report["verdict"]["text"]
+
+
+def test_the_verdict_is_recorded_for_apply(tmp_path, monkeypatch):
+    monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))
+    report = run(fake_evaluate())
+    ab.write_verdict(report)
+    from healing.vocab import apply as vocab_apply
+
+    saved = json.loads(vocab_apply.verdict_path().read_text())
+    assert saved["boost"] == "normal" and saved["passes"] is True and saved["ab_id"] == report["ab_id"]
+    failed = run(fake_evaluate(bias_hurts_general=10))
+    ab.write_verdict(failed)
+    assert json.loads(vocab_apply.verdict_path().read_text())["passes"] is False  # the latest wins

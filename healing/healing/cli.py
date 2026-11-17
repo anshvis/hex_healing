@@ -112,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     apply = vocab.add_parser("apply", help="write your terms, then the mined ones by rank, into Hex's vocabulary")
     apply.add_argument("--dry-run", action="store_true")
     apply.add_argument("--max-biased", type=int, default=64, help="slots Hex biases, for the report (Hex's own cap is 64)")
+    apply.add_argument("--force", action="store_true", help="write even without a passing A/B at Hex's boost (logged)")
     apply.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
     ab = vocab.add_parser("ab", help="score the current GGUF with and without the mined terms (needs the T3.4 hex)")
     ab.add_argument("--boost", choices=["light", "normal", "strong"], default="normal")

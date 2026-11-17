@@ -1,5 +1,6 @@
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -9,7 +10,7 @@ from healing.vocab import apply as vocab_apply
 from healing.vocab import mine as vocab
 
 FAKE_HEX = """#!{python}
-import json, os, sys
+import json, os, sys, time
 state = os.environ["FAKE_HEX_STATE"]
 log = state + ".calls"
 args = sys.argv[1:]
@@ -18,14 +19,27 @@ if not os.path.exists(state):
     sys.exit(3)
 with open(log, "a") as f:
     f.write(" ".join(args[:2]) + "\\n")
+if args[:2] == ["settings", "get"]:
+    key = args[2]
+    value = os.environ.get("FAKE_BOOST", "light")
+    print(json.dumps({{"version": 4, "status": "settings", "settings": [{{"key": key, "value": value}}]}}))
+    sys.exit(0)
 entries = json.load(open(state))
 if args[:2] == ["vocabulary", "list"]:
     print(json.dumps({{"version": 4, "status": "vocabulary", "entries": entries}}))
 elif args[:2] == ["vocabulary", "set"]:
+    mode = os.environ.get("FAKE_SET_MODE")
+    if mode == "fail":
+        sys.stderr.write("invalid-vocabulary: entry 0: refused\\n")
+        sys.exit(1)
+    if mode == "hang-before":
+        time.sleep(5)
     items = json.load(open(args[args.index("--file") + 1]))
     new = [{{"term": i}} if isinstance(i, str) else i for i in items]
     changed = new != entries
     json.dump(new, open(state, "w"))
+    if mode == "hang-after":
+        time.sleep(5)
     print(json.dumps({{"version": 4, "status": "done", "changed": changed}}))
 else:
     sys.exit(2)
@@ -38,6 +52,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("HEX_APPLICATION_SUPPORT_DIR", str(tmp_path / "hex-support"))  # never the real one
     state = tmp_path / "hex-list.json"
     monkeypatch.setenv("FAKE_HEX_STATE", str(state))
+    monkeypatch.setenv("FAKE_BOOST", "light")  # the gate (T4.3) only guards normal and strong
     binary = tmp_path / "hex"
     binary.write_text(FAKE_HEX.format(python=sys.executable))
     binary.chmod(0o755)
@@ -228,3 +243,186 @@ def test_a_crash_before_the_set_answers_keeps_ownership(env):
     vocab_apply.applied_path().write_text(json.dumps(record))
     env.run("revert")
     assert env.listed() == [{"term": "Anomaly"}]
+
+
+# ---- review round: journal, lock, durability, and the A/B gate ----------------------------------
+
+def journal():
+    return json.loads(vocab_apply.applied_path().read_text())
+
+
+def test_a_refused_set_restores_the_journal(env, monkeypatch):
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    monkeypatch.setenv("FAKE_SET_MODE", "fail")
+    assert env.run("apply") == 1
+    assert env.listed() == [{"term": "Anomaly"}]
+    record = journal() if vocab_apply.applied_path().exists() else {}
+    assert not record.get("pending") and not record.get("terms")
+    monkeypatch.delenv("FAKE_SET_MODE")
+    env.set_list(env.listed() + [{"term": "Kit", "sounds_like": ["kip"]}])  # you add the same term by hand
+    env.run("revert")
+    assert env.terms() == ["Anomaly", "Kit"]
+
+
+def test_an_unknown_outcome_keeps_pending_and_revert_still_owns_it(env, monkeypatch):
+    monkeypatch.setattr(vocab_apply, "HEX_TIMEOUT_S", 0.5)
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    monkeypatch.setenv("FAKE_SET_MODE", "hang-after")  # Hex took the list but never answered
+    assert env.run("apply") == 1
+    assert [t["term"] for t in journal()["pending"]] == ["Kit", "Qorvyx", "Rowan"]
+    monkeypatch.delenv("FAKE_SET_MODE")
+    env.run("revert")
+    assert env.listed() == [{"term": "Anomaly"}]
+
+
+def test_a_retry_keeps_the_unresolved_pending_of_a_crashed_run(env, monkeypatch):
+    monkeypatch.setattr(vocab_apply, "HEX_TIMEOUT_S", 0.5)
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED[:2])
+    monkeypatch.setenv("FAKE_SET_MODE", "hang-after")
+    env.run("apply")  # Kit and Qorvyx are in the list, unconfirmed
+    env.candidates(("Rowan", []))
+    monkeypatch.setenv("FAKE_SET_MODE", "hang-before")  # the retry is unknown too, and changed nothing
+    env.run("apply")
+    assert {t["term"] for t in journal()["pending"]} == {"Kit", "Qorvyx", "Rowan"}
+    monkeypatch.setenv("FAKE_SET_MODE", "fail")  # a refused retry puts back what was unresolved
+    env.run("apply")
+    assert {t["term"] for t in journal()["pending"]} == {"Kit", "Qorvyx", "Rowan"}
+    monkeypatch.delenv("FAKE_SET_MODE")
+    env.run("revert")
+    assert env.listed() == [{"term": "Anomaly"}]
+
+
+def test_a_confirmed_retry_replaces_pending(env, monkeypatch):
+    monkeypatch.setattr(vocab_apply, "HEX_TIMEOUT_S", 0.5)
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED[:2])
+    monkeypatch.setenv("FAKE_SET_MODE", "hang-after")
+    env.run("apply")
+    monkeypatch.delenv("FAKE_SET_MODE")
+    env.candidates(("Rowan", []))
+    assert env.run("apply") == 0
+    assert env.terms() == ["Anomaly", "Rowan"]
+    record = journal()
+    assert [t["term"] for t in record["terms"]] == ["Rowan"] and "pending" not in record
+
+
+def test_apply_and_revert_hold_the_healing_lock(env, capsys):
+    from healing.store import process_lock
+
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    with process_lock():
+        assert env.run("apply") == 1
+        assert env.run("revert") == 1
+    assert "another healing process" in capsys.readouterr().err
+    assert env.terms() == ["Anomaly"] and "vocabulary set" not in env.calls()
+
+
+def test_the_journal_uses_unique_temp_files(env, monkeypatch):
+    sources = []
+    real = vocab_apply.os.replace
+    monkeypatch.setattr(vocab_apply.os, "replace", lambda a, b: (sources.append(str(a)), real(a, b))[1])
+    vocab_apply.save_applied(vocab_apply.Applied(1, [], [], None, 0))
+    vocab_apply.save_applied(vocab_apply.Applied(2, [], [], None, 0))
+    assert len(set(sources)) == 2 and all(not Path(s).exists() for s in sources)
+
+
+def test_the_journal_directory_is_synced_before_hex_is_called(env, monkeypatch):
+    import os
+    import stat
+
+    synced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(vocab_apply.os, "fsync", lambda fd: (synced.append(stat.S_ISDIR(os.fstat(fd).st_mode)), real_fsync(fd))[1])
+    real_set = vocab_apply.hex_set
+    seen = {}
+
+    def spy(binary, entries):
+        seen["directory_synced_first"] = True in synced
+        return real_set(binary, entries)
+
+    monkeypatch.setattr(vocab_apply, "hex_set", spy)
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    env.run("apply")
+    assert seen == {"directory_synced_first": True}
+
+
+def verdict(boost, passes):
+    vocab_apply.verdict_path().parent.mkdir(parents=True, exist_ok=True)
+    vocab_apply.verdict_path().write_text(json.dumps({"ab_id": "vocab-ab-x", "boost": boost, "passes": passes}))
+
+
+def refused(env, capsys, *args):
+    assert env.run("apply", *args) == 4
+    err = capsys.readouterr().err
+    assert "hex settings set vocabulary_boost light" in err and "--force" in err
+    assert env.terms() == ["Anomaly"] and "vocabulary set" not in env.calls()
+
+
+def test_apply_refuses_normal_boost_without_a_passing_verdict(env, capsys, monkeypatch):
+    monkeypatch.setenv("FAKE_BOOST", "normal")
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    refused(env, capsys)  # no A/B on record
+    verdict("normal", False)
+    refused(env, capsys)  # a failed one
+    verdict("normal", None)
+    refused(env, capsys)  # an undecided one
+    verdict("strong", True)
+    refused(env, capsys)  # passing, but at another boost
+    monkeypatch.setenv("FAKE_BOOST", "strong")
+    verdict("normal", True)
+    refused(env, capsys)
+
+
+def test_apply_goes_ahead_with_a_passing_verdict_at_the_running_boost(env, monkeypatch):
+    monkeypatch.setenv("FAKE_BOOST", "normal")
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    verdict("normal", True)
+    assert env.run("apply") == 0 and env.terms()[0] == "Anomaly" and len(env.terms()) == 4
+
+
+@pytest.mark.parametrize("boost", ["light", "off"])
+def test_light_and_off_need_no_verdict(env, monkeypatch, boost):
+    monkeypatch.setenv("FAKE_BOOST", boost)
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    assert env.run("apply") == 0 and len(env.terms()) == 4
+
+
+def test_force_overrides_the_gate_and_is_logged(env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_BOOST", "normal")
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    assert env.run("apply", "--force") == 0 and len(env.terms()) == 4
+    log = (vocab_apply.applied_path().parent / "apply.log").read_text()
+    assert "forced" in log and "normal" in log and "no `healing vocab ab` is on record" in log
+
+
+def test_dry_run_says_it_would_refuse_and_still_writes_nothing(env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_BOOST", "normal")
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    assert env.run("apply", "--dry-run") == 0
+    assert "apply would refuse" in capsys.readouterr().out and "vocabulary set" not in env.calls()
+
+
+def test_unreadable_boost_refuses_too(env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_BOOST", "normal")
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    monkeypatch.setattr(vocab_apply, "running_boost", lambda binary: None)
+    refused(env, capsys)
+
+
+def test_revert_needs_no_verdict(env, monkeypatch):
+    env.set_list([{"term": "Anomaly"}])
+    env.candidates(*MINED)
+    env.run("apply")
+    monkeypatch.setenv("FAKE_BOOST", "strong")
+    assert env.run("revert") == 0 and env.terms() == ["Anomaly"]

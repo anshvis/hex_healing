@@ -64,8 +64,8 @@ class TermResult:
     terms: int  # expected terms in them
     error_without: float | None
     error_with: float | None
-    wins: int  # terms only the mined list got right
-    losses: int  # terms only the list without them got right
+    wins: int  # clips only the mined list got right (all their terms)
+    losses: int  # clips only the list without them got right
     p_value: float | None
     favours_mined: bool
     na: str | None  # why there is no verdict
@@ -76,7 +76,9 @@ class TermResult:
 
 
 def term_result(without: list[dict], with_: list[dict]) -> TermResult:
-    """Per (clip, term) hits in the two arms of the same set."""
+    """The McNemar test counts clips, not terms: a clip is right when every term it expects was heard, so
+    one clip that gets ten terms cannot stand for ten independent pieces of evidence. The term error rates
+    stay per term, as description."""
     by_id = {row["id"]: row for row in with_}
     clips = terms = misses_a = misses_b = wins = losses = 0
     for row in without:
@@ -85,11 +87,12 @@ def term_result(without: list[dict], with_: list[dict]) -> TermResult:
             continue
         other = by_id[row["id"]]
         clips += 1
-        for term in expected:
-            hit_a, hit_b = term in row["terms_hit"], term in other["terms_hit"]
-            terms += 1
-            misses_a, misses_b = misses_a + (not hit_a), misses_b + (not hit_b)
-            wins, losses = wins + (hit_b and not hit_a), losses + (hit_a and not hit_b)
+        hits_a = [term in row["terms_hit"] for term in expected]
+        hits_b = [term in other["terms_hit"] for term in expected]
+        terms += len(expected)
+        misses_a, misses_b = misses_a + hits_a.count(False), misses_b + hits_b.count(False)
+        right_a, right_b = all(hits_a), all(hits_b)
+        wins, losses = wins + (right_b and not right_a), losses + (right_a and not right_b)
     if clips < MIN_TERM_CLIPS:
         return TermResult(clips, terms, None, None, wins, losses, None, False,
                           f"n/a: {clips} clip(s) hold a term, at least {MIN_TERM_CLIPS} are needed")
@@ -116,7 +119,9 @@ def false_replacements(per_clip: list[dict], mined_terms: list[str]) -> dict:
             "rate": len(bad) / len(per_clip) if per_clip else None, "examples": bad[:10]}
 
 
-def verdict(terms: TermResult | None, general_wer: dict | None, general_false: dict | None) -> dict:
+def verdict(boost: str, terms: TermResult | None, general_wer: dict | None, general_false: dict | None) -> dict:
+    """Specific to the boost that was measured: only a `normal` run can approve normal, a `strong` run
+    strong (`apply` reads this against the boost Hex runs)."""
     gates = {
         "general_wer_ci_high_at_most_0.3pt": None if general_wer is None else general_wer["ci_high"] <= GATE_WER_CI_HIGH,
         "false_replacements_at_most_0.5pct": None if not general_false or general_false["rate"] is None
@@ -125,13 +130,14 @@ def verdict(terms: TermResult | None, general_wer: dict | None, general_false: d
     }
     if any(value is None for value in gates.values()):
         undecided = [name for name, value in gates.items() if value is None]
-        return {"gates": gates, "ship_at_normal": None, "boost": "light",
-                "text": "no verdict (n/a: " + ", ".join(undecided) + "); apply defaults to light"}
+        return {"gates": gates, "boost": boost, "passes": None, "recommended_boost": "light",
+                "text": f"no verdict at {boost} boost (n/a: " + ", ".join(undecided) + "); keep Hex at light"}
     if all(gates.values()):
-        return {"gates": gates, "ship_at_normal": True, "boost": "normal", "text": "the mined terms pass the gate at normal boost"}
+        return {"gates": gates, "boost": boost, "passes": True, "recommended_boost": boost,
+                "text": f"the mined terms pass the gate at {boost} boost"}
     failed = [name for name, value in gates.items() if not value]
-    return {"gates": gates, "ship_at_normal": False, "boost": "light",
-            "text": "the gate fails (" + ", ".join(failed) + "); apply defaults to light"}
+    return {"gates": gates, "boost": boost, "passes": False, "recommended_boost": "light",
+            "text": f"the gate fails at {boost} boost (" + ", ".join(failed) + "); keep Hex at light"}
 
 
 def run_ab(
@@ -170,7 +176,7 @@ def run_ab(
                                                           "with": scores_b.get("false_replacement_rate")}
         sets[name] = result
     rolling, general = sets.get("rolling", {}), sets.get("general", {})
-    outcome = verdict(rolling.get("terms"), general.get("wer"), general.get("false_replacements"))
+    outcome = verdict(boost, rolling.get("terms"), general.get("wer"), general.get("false_replacements"))
     started = time.time() if now is None else now
     return {
         "ab_id": "vocab-ab-" + datetime.fromtimestamp(started, timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
@@ -220,7 +226,7 @@ def text(report: dict) -> str:
                 lines.append(
                     f"  term error rate ({terms['terms']} terms in {terms['clips']} clips): {_pct(terms['error_without'])} -> "
                     f"{_pct(terms['error_with'])}, delta {_pt(terms['error_with'] - terms['error_without'])}; "
-                    f"McNemar exact: mined got {terms['wins']} more right, lost {terms['losses']}, p = {terms['p_value']:.4f}"
+                    f"McNemar exact over clips: mined got {terms['wins']} more clips right, lost {terms['losses']}, p = {terms['p_value']:.4f}"
                     + (" (favours mined)" if terms["favours_mined"] else " (does not favour mined)")
                 )
         fr = result.get("false_replacements")
@@ -232,6 +238,18 @@ def text(report: dict) -> str:
             )
     lines.append("verdict: " + report["verdict"]["text"])
     return "\n".join(lines)
+
+
+def write_verdict(report: dict) -> Path:
+    """The latest A/B's verdict, where `apply` reads it: which boost was measured and whether it passed."""
+    path = vocab_apply.verdict_path()
+    outcome = report["verdict"]
+    vocab_apply.write_atomic(path, json.dumps({
+        "ab_id": report["ab_id"], "measured_at_ms": int(time.time() * 1000), "boost": outcome.get("boost", report["boost"]),
+        "passes": outcome.get("passes"), "recommended_boost": outcome.get("recommended_boost"),
+        "gates": outcome.get("gates"), "model_sha256": report["model"]["gguf_sha256"],
+    }, indent=1) + "\n")
+    return path
 
 
 def write(report: dict) -> Path:
@@ -279,6 +297,7 @@ def main(args) -> int:
             if store is not None:
                 store.close()
         path = write(report)
+        write_verdict(report)
     except vocab_apply.HexNotRunning as error:
         print(f"error: {error}", file=sys.stderr)
         return 3
