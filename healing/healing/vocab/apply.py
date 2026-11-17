@@ -31,12 +31,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from healing import hexcli
 from healing.paths import healing_home, hex_support_dir
 from healing.vocab import mine as mine_module
 
 MAX_ENTRIES = 500  # Hex's cap on the saved list (`src/dictation/vocabulary.rs`)
 BIAS_SLOTS = 64  # Hex's cap on the entries it biases, taken in stored order
-EXIT_NOT_RUNNING = 3  # docs/cli.md: control commands never launch Hex
+EXIT_NOT_RUNNING = hexcli.EXIT_NOT_RUNNING  # docs/cli.md: control commands never launch Hex
 EXIT_REFUSED = 4  # the A/B gate said no
 HEX_TIMEOUT_S = 60
 # Error codes of `hex vocabulary set --json` that mean Hex looked at the request and refused it, so
@@ -48,16 +49,9 @@ SAFE_BOOSTS = ("light", "off")  # no A/B needed: light is where a failed or miss
 BOOST_KEY = "vocabulary_boost"  # `hex settings get|set` (src/control/settings/registry.rs)
 
 
-class ApplyError(RuntimeError):
-    pass
-
-
-class HexNotRunning(ApplyError):
-    pass
-
-
-class HexOutcomeUnknown(ApplyError):
-    """`hex` didn't answer in time: the write may or may not have happened."""
+ApplyError = hexcli.HexError
+HexNotRunning = hexcli.HexNotRunning
+HexOutcomeUnknown = hexcli.HexOutcomeUnknown
 
 
 class Refused(ApplyError):
@@ -87,53 +81,12 @@ def normalize(item) -> dict:
 # ---- the hex calls -------------------------------------------------------------------------------
 
 def _reply(text: str) -> dict | None:
-    """The `--json` reply in `text`, or None when there is none. Hex pretty-prints it over many lines,
-    so the whole output is tried first, then the last JSON object starting at a line's beginning."""
-    text = text.strip()
-    try:
-        reply = json.loads(text)
-    except ValueError:
-        reply = None
-    if isinstance(reply, dict):
-        return reply
-    decoder = json.JSONDecoder()
-    starts = [i for i, ch in enumerate(text) if ch == "{" and (i == 0 or text[i - 1] == "\n")]
-    for start in reversed(starts):
-        try:
-            reply, _ = decoder.raw_decode(text, start)
-        except ValueError:
-            continue
-        if isinstance(reply, dict):
-            return reply
-    return None
+    return hexcli.reply(text)
 
 
 def _run(binary: Path, args: list[str], *, write: bool = False) -> subprocess.CompletedProcess:
-    """Run `hex`. For a `write`, a failure is `ApplyError` only when Hex confirmably refused (a known
-    error code, or not running) or never started; any other failure is `HexOutcomeUnknown`."""
-    # Not the isolated environment the benchmark uses: this talks to the one running Hex, found through
-    # its own data folder's discovery file.
-    env = {**os.environ, "HEX_DISABLE_UPDATES": "1"}
-    name = " ".join(args[:2])
-    try:
-        done = subprocess.run([str(binary), *args], capture_output=True, text=True, env=env, timeout=HEX_TIMEOUT_S)
-    except subprocess.TimeoutExpired as error:
-        raise HexOutcomeUnknown(f"hex {name} did not answer in {HEX_TIMEOUT_S}s; its outcome is unknown") from error
-    except OSError as error:  # it never started
-        raise ApplyError(f"could not run {binary}: {error}") from error
-    if done.returncode == 0:
-        return done
-    if done.returncode == EXIT_NOT_RUNNING:
-        raise HexNotRunning("Hex isn't running")
-    reply = _reply(done.stdout) or _reply(done.stderr) or {}
-    code = reply.get("code") if reply.get("status") == "error" else None
-    detail = (reply.get("message") if code else None) or (done.stderr.strip() or done.stdout.strip())[-300:]
-    message = f"hex {name} exited {done.returncode}" + (f" ({code})" if code else "") + f": {detail}"
-    if not write or code in REFUSAL_CODES:
-        if code == "not-running":
-            raise HexNotRunning("Hex isn't running")
-        raise ApplyError(message)
-    raise HexOutcomeUnknown(message + "; its outcome is unknown")
+    """Run `hex` (`hexcli.run`) with this module's timeout and refusal codes."""
+    return hexcli.run(binary, args, write=write, timeout=HEX_TIMEOUT_S, refusal_codes=REFUSAL_CODES)
 
 
 def hex_list(binary: Path) -> list[dict]:

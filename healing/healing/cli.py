@@ -122,6 +122,39 @@ def main(argv: list[str] | None = None) -> int:
     revert = vocab.add_parser("revert", help="remove the terms healing still owns by content, in one write")
     revert.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
 
+    models = commands.add_parser("models", help="the model registry (M5)").add_subparsers(dest="command", required=True)
+    base_model = models.add_parser("register-base", help="record Hex's catalog model as v0, pinned by its GGUF's SHA-256")
+    base_model.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
+    base_model.add_argument("--gguf", type=Path, default=None, help="the GGUF (default: the selected catalog model's file)")
+    base_model.add_argument("--model-id", default=None, help="its catalog id (default: Hex's selected model)")
+    base_model.add_argument("--arch", choices=["parakeet-unified", "tdt-v2"], default=None)
+    base_model.add_argument("--scores", type=Path, default=None, help="baseline.json, an eval document or {set: {wer}}")
+    candidate = models.add_parser("register", help="record a fine-tuned GGUF as a candidate")
+    candidate.add_argument("--gguf", type=Path, required=True)
+    candidate.add_argument("--delta", type=Path, required=True, help="the LoRA delta it was merged from")
+    candidate.add_argument("--config", type=Path, required=True, help="the training config (YAML)")
+    candidate.add_argument("--parent", default="current")
+    candidate.add_argument("--train", default=None, help="the frozen train split it trained on (`splits.snapshot_train`)")
+    candidate.add_argument("--snapshot", default=None, help="or an already stored snapshot's sha256")
+    candidate.add_argument("--arch", choices=["parakeet-unified", "tdt-v2"], default=None, help="default: the parent's")
+    candidate.add_argument("--quantization", default="q8_0")
+    candidate.add_argument("--converter-repo", default=None, help="default: the parent's")
+    candidate.add_argument("--converter-rev", default=None, help="default: the parent's")
+    candidate.add_argument("--export-command", default=None,
+                           help="the export argv, with {base} {delta} {config} {output} {checkout} (default: the parent's)")
+    candidate.add_argument("--converter-dir", default=None, help="the converter checkout restore runs in")
+    candidate.add_argument("--hex-sha", default=None, help="the Hex commit the GGUF was checked with")
+    candidate.add_argument("--scores", type=Path, default=None, help="an eval document or {set: {wer}}")
+    models_list = models.add_parser("list", help="every version, its state and scores")
+    models_list.add_argument("--json", action="store_true")
+    models.add_parser("show", help="one version's whole record").add_argument("version")
+    restore = models.add_parser("restore", help="rebuild a version's GGUF from base + delta + the pinned converter")
+    restore.add_argument("version")
+    restore.add_argument("--converter-dir", type=Path, default=None, help="a checkout of the converter at the recorded rev")
+    model_current = models.add_parser("current", help="the current version, cross-checked with Hex's selected model")
+    model_current.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
+    models.add_parser("pin-golden", help="pin the frozen golden set's hash in the registry (G-10)")
+
     protocol = commands.add_parser("protocol").add_subparsers(dest="command", required=True)
     seeded = protocol.add_parser("corrections", help="the seeded edit-recall protocol (X-3)")
     seeded.add_argument("step", choices=["plan", "run", "score"])
@@ -153,6 +186,10 @@ def main(argv: list[str] | None = None) -> int:
 
             return ab_module.main(args)
         return (mine_module if args.command == "mine" else apply_module).main(args)
+    if args.group == "models":
+        from healing.registry import commands as registry_commands
+
+        return registry_commands.main(args)
     if args.group == "report":
         return _report(args)
     if args.group == "protocol":
@@ -242,6 +279,7 @@ def _label_all(args) -> int:
 def _split(args) -> int:
     from healing import manifest, splits
     from healing.collect import since_to_ms
+    from healing.registry.store import RegistryError
     from healing.store import Store, StoreError, now_ms, process_lock
 
     try:
@@ -251,13 +289,14 @@ def _split(args) -> int:
                 report = splits.verify_report(store)
             finally:
                 store.close()
-            for problem in report.leaks:
+            violations = report.leaks + [p for p in [_golden_pin_problem()] if p]
+            for problem in violations:
                 print(f"violation: {problem}")
             for problem in report.snapshot_overlaps:
                 print(f"snapshot overlap: {problem}")
-            total = len(report.problems)
+            total = len(violations) + len(report.snapshot_overlaps)
             print("split verify: " + (
-                f"{len(report.leaks)} violation(s), {len(report.snapshot_overlaps)} snapshot overlap(s)" if total else "ok"))
+                f"{len(violations)} violation(s), {len(report.snapshot_overlaps)} snapshot overlap(s)" if total else "ok"))
             return 1 if total else 0
         cutoff = None
         if args.cutoff:
@@ -271,11 +310,25 @@ def _split(args) -> int:
                 result = splits.build(store, args.parent, cutoff)
             finally:
                 store.close()
-    except (StoreError, splits.SplitError, manifest.ManifestError) as error:
+    except (StoreError, splits.SplitError, manifest.ManifestError, RegistryError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     print(result.text())
     return 0
+
+
+def _golden_pin_problem() -> str | None:
+    """G-10: the frozen golden set against the registry's pin."""
+    from healing import splits
+    from healing.registry.commands import golden_pin_problem
+    from healing.store import Store
+
+    store = Store(sweep=False)
+    try:
+        row = splits.golden_row(store.db)
+    finally:
+        store.close()
+    return golden_pin_problem(row)
 
 
 def _report(args) -> int:
