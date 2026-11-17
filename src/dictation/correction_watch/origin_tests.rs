@@ -800,3 +800,91 @@ fn words(cases: u64, first: u64) -> Vec<String> {
 fn origin_fuzz_words() {
     finish("words", 300_000, &words(300_000, 1));
 }
+
+// Round 12.
+
+/// No read of the sequence says an edit.
+fn stores_nothing(paste: &str, anchor: usize, before: &str, sequence: &[&str]) {
+    for read in reads(paste, Some(anchor), Some(before), sequence) {
+        assert!(
+            !matches!(read, Alignment::Edited(_)),
+            "{sequence:?} stored {read:?}"
+        );
+    }
+}
+
+#[test]
+fn round_12_leading_line_break_in_the_replacement_stores_nothing() {
+    for lead in ["\n", "\r\n", "\n\n"] {
+        let read = format!("send it to {lead}hunter2 secret");
+        stores_nothing(
+            "send it to Kip Jones",
+            0,
+            "",
+            &["send it to Kip Jones", &read],
+        );
+        let read = format!("send it to hunter2 secret{lead}");
+        stores_nothing(
+            "send it to Kip Jones",
+            0,
+            "",
+            &["send it to Kip Jones", &read],
+        );
+    }
+}
+
+#[test]
+fn round_12_unicode_line_separators_store_nothing() {
+    for sep in ['\u{2028}', '\u{2029}', '\u{85}', '\u{B}', '\u{C}', '\r'] {
+        for read in [
+            format!("send it to Rune{sep}secret"),
+            format!("send it to {sep}secret"),
+            format!("send it to Rune secret{sep}"),
+        ] {
+            stores_nothing(
+                "send it to Kip Jones",
+                0,
+                "",
+                &["send it to Kip Jones", &read],
+            );
+        }
+    }
+}
+
+#[test]
+fn round_12_separators_after_a_deleted_paste_store_nothing() {
+    for sep in [
+        '\u{2028}', '\u{2029}', '\u{b}', '\u{85}', '\u{c}', '\n', '\r',
+    ] {
+        let read = format!("send it to Rune{sep}secret");
+        stores_nothing(
+            "Kip Jones",
+            11,
+            "send it to ",
+            &["send it to Kip Jones", "send it to ", &read],
+        );
+    }
+}
+
+#[test]
+fn round_12_mutated_neighbour_swapped_in_stores_nothing() {
+    stores_nothing("Hi ", 0, "secret", &["Hi secret", "secret2 secret"]);
+    stores_nothing("Hi ", 0, "secret", &["Hi secret", "secrets secret"]);
+    stores_nothing("Hi ", 0, "secret", &["Hi secret", "asecret secret"]);
+    stores_nothing("Hi ", 0, "secret", &["Hi secret", "secrat secret"]);
+    stores_nothing("Hi ", 0, "secret", &["Hi secret", "secret secret2"]);
+}
+
+#[test]
+fn round_12_minimal_explanation_kept() {
+    // An outside copy inserted and the original replaced reads exactly as
+    // " secret" typed after the paste and Kip fixed to Kit: the tracker
+    // judges by the minimal explanations, and every one is an edit of the paste.
+    let seen = reads(
+        "Kip",
+        Some(0),
+        Some(""),
+        &["Kip", "Kip secret", "Kit secret"],
+    );
+    assert_eq!(seen.last(), Some(&edited("Kit")));
+}

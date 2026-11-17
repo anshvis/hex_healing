@@ -318,10 +318,12 @@ enum Action {
     GlueAndSpace,
     SwapContext,
     BreakWithin,
+    BreakAtEdge,
+    NeighbourCopy,
     Coalesced,
 }
 
-const ALL: [Action; 41] = [
+const ALL: [Action; 43] = [
     Action::EditWord,
     Action::EditTwo,
     Action::TrailingTwo,
@@ -362,6 +364,8 @@ const ALL: [Action; 41] = [
     Action::GlueAndSpace,
     Action::SwapContext,
     Action::BreakWithin,
+    Action::BreakAtEdge,
+    Action::NeighbourCopy,
     Action::Coalesced,
 ];
 
@@ -1103,6 +1107,56 @@ fn apply(model: &mut Model, action: Action, words_gen: &mut Gen) -> Vec<Model> {
             reads.push(model.clone());
             reads
         }
+        Action::BreakAtEdge if !words.is_empty() => {
+            // The last word deleted, then a replacement that begins or ends
+            // with a line break (any of the separators a field breaks at), or
+            // has one among its words, typed in its place in one read.
+            const BREAKS: [&str; 7] = [
+                "\n", "\r", "\r\n", "\u{2028}", "\u{2029}", "\u{85}", "\u{b}",
+            ];
+            let (a, b) = words[words.len() - 1];
+            model.splice(a, b, "");
+            model.to -= b - a;
+            let mut reads = vec![model.clone()];
+            let sep = BREAKS[words_gen.rng.below(BREAKS.len())];
+            let (first, second) = (words_gen.word(), words_gen.word());
+            let (text, inside) = match words_gen.rng.below(4) {
+                0 => (format!("{sep}{first} {second}"), a),
+                1 => (format!("{first} {second}{sep}"), a + first.len()),
+                2 => (format!("{first}{sep}{second}"), a + first.len()),
+                _ => (format!("{sep}{first}{sep}"), a),
+            };
+            model.splice(a, a, &text);
+            model.to = inside;
+            reads.push(model.clone());
+            reads
+        }
+        Action::NeighbourCopy => {
+            // The paste replaced by a word beside it with a key or two
+            // changed, or letters put on it: its own text, a little off.
+            let after = model.text[model.to..].split_whitespace().next();
+            let before = model.text[..model.from].split_whitespace().next_back();
+            let Some(word) = after.or(before).map(str::to_string) else {
+                return Vec::new();
+            };
+            let off = match words_gen.rng.below(5) {
+                0 => format!("{word}2"),
+                1 => format!("x{word}"),
+                2 => format!("{word}s"),
+                3 => near(&word),
+                _ => word
+                    .chars()
+                    .take(word.chars().count().saturating_sub(1))
+                    .collect(),
+            };
+            if off == word || off == model.region() || off.is_empty() {
+                return Vec::new();
+            }
+            let (from, to) = (model.from, model.to);
+            model.splice(from, to, &off);
+            model.to = from + off.len();
+            one(model)
+        }
         Action::Coalesced => {
             // Two ordinary changes in one read.
             // (Not DeleteBefore, which takes the paste's own words with it: typed
@@ -1823,7 +1877,9 @@ fn print(report: &Report) {
     }
 }
 
-fn check(report: &Report, runs: usize, good: usize) {
+/// `slack` widens the recall bounds for a sample too small to show a rate under
+/// 1% (the long run holds them at 1).
+fn check(report: &Report, runs: usize, good: usize, slack: usize) {
     let total = report.total();
     assert!(total.cases >= runs, "{}", total.cases);
     assert!(total.good >= good, "{}", total.good);
@@ -1838,13 +1894,13 @@ fn check(report: &Report, runs: usize, good: usize) {
     // replacement that is a word elsewhere): the price of failing closed, under
     // 1% (182 of 28,181 in the long run).
     assert!(
-        total.missed * 100 <= total.good,
+        total.missed * 100 <= total.good * slack,
         "{} of {} known-good edits missed",
         total.missed,
         total.good
     );
     assert!(
-        total.ambiguous_missed * 50 <= total.good,
+        total.ambiguous_missed * 50 <= total.good * slack,
         "{} of {} known-good edits lost to a second reading",
         total.ambiguous_missed,
         total.good
@@ -1854,9 +1910,9 @@ fn check(report: &Report, runs: usize, good: usize) {
 #[test]
 fn what_is_stored_is_the_pastes_own_region_and_nothing_else() {
     // The fast subset: it fits nextest's 30 s limit in a debug build.
-    let report = report(1, 1_800);
+    let report = report(1, 5_400);
     print(&report);
-    check(&report, 2_000, 100);
+    check(&report, 6_000, 100, 3);
 }
 
 /// The long run: over 800,000 cases. `cargo test -- --ignored`.
@@ -1865,7 +1921,7 @@ fn what_is_stored_is_the_pastes_own_region_and_nothing_else() {
 fn what_is_stored_holds_over_a_long_run() {
     let report = report(1_000_000, 1_290_000);
     print(&report);
-    check(&report, 800_000, 25_000);
+    check(&report, 800_000, 25_000, 1);
 }
 
 /// Before the paste has been seen whole, nothing is an edit: not anchored,

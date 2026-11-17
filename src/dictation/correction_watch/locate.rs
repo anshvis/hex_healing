@@ -173,6 +173,18 @@ fn near_copy(a: &Token, b: &Token) -> bool {
     row[y.len()] <= 2
 }
 
+/// Whether `new` is made of `outside` (four letters or more each): it holds
+/// the word (with letters put on before or after), or is a near copy of it. A
+/// word that is only the first letters of it is a key-by-key retyping that has
+/// not got there yet, which the very word ends (see `Followed::after`).
+fn made_of(new: &Token, outside: &Token) -> bool {
+    let (x, y) = (&new.fold, &outside.fold);
+    x.len() >= 4
+        && y.len() >= 4
+        && !(x.len() < y.len() && y.starts_with(x))
+        && (near_copy(new, outside) || x.windows(y.len()).any(|w| w == y.as_slice()))
+}
+
 fn same(a: &Token, b: &Token) -> bool {
     a.fold == b.fold
 }
@@ -408,16 +420,25 @@ fn is_ws_unit(unit: u16) -> bool {
     char::from_u32(u32::from(unit)).is_some_and(is_space)
 }
 
-/// Whether a line break sits among the words `typed` puts in: what follows it
-/// is a new line, not the words before it carried on.
+/// A line break: the ones a text field starts a new line at (LF, VT, FF, CR,
+/// NEL, LS, PS). The one place that decides it; every break check uses it.
+fn is_line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\u{B}' | '\u{C}' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+fn is_break_unit(unit: u16) -> bool {
+    char::from_u32(u32::from(unit)).is_some_and(is_line_break)
+}
+
+/// Whether words are put in with a line break anywhere in them, in the blanks
+/// before or after as well as between: what follows it is a new line, not the
+/// words before it carried on. Blanks alone (a line break typed) have no words
+/// to be read, and each caller reads them as a closing break.
 fn breaks_within(typed: &[u16]) -> bool {
-    let Some(first) = typed.iter().position(|&u| !is_ws_unit(u)) else {
-        return false;
-    };
-    let last = typed.iter().rposition(|&u| !is_ws_unit(u)).unwrap_or(first);
-    typed[first..=last]
-        .iter()
-        .any(|&u| u == u16::from(b'\n') || u == u16::from(b'\r'))
+    !is_blank_units(typed) && typed.iter().any(|&u| is_break_unit(u))
 }
 
 fn is_blank_units(units: &[u16]) -> bool {
@@ -427,9 +448,7 @@ fn is_blank_units(units: &[u16]) -> bool {
 /// Blank without a line break: words typed this far from the region are right
 /// beside it.
 fn is_gap(units: &[u16]) -> bool {
-    units.iter().all(|&u| {
-        char::from_u32(u32::from(u)).is_some_and(|c| is_space(c) && c != '\n' && c != '\r')
-    })
+    units.iter().all(|&u| is_ws_unit(u) && !is_break_unit(u))
 }
 
 /// The words `typed` puts in, put between the units `left` and `right` of the
@@ -504,6 +523,21 @@ impl Followed {
             let after_it = at(last).and_then(|k| words.get(k + 1));
             let same = |x: Option<&Token>, y: &Token| x.is_some_and(|x| x.fold == y.fold);
             if same(before_it, first) || same(after_it, last) {
+                return None;
+            }
+        }
+        // A new word at an edge that is made of the word beside it outside the
+        // region (it holds it, or is one a key or two off, or it with letters
+        // put on) could as well be that word, copied in and mistyped: not
+        // known to be the paste's.
+        if let (Some(first), Some(last)) = (held.first(), held.last()) {
+            let at = |t: &Token| words.iter().position(|w| w.u16_start == t.u16_start);
+            let new = |w: &Token| !edge.iter().any(|e| e.fold == w.fold);
+            let before_it = at(first).and_then(|k| k.checked_sub(1)).map(|k| &words[k]);
+            let after_it = at(last).and_then(|k| words.get(k + 1));
+            if (new(first) && before_it.is_some_and(|b| made_of(first, b)))
+                || (new(last) && after_it.is_some_and(|b| made_of(last, b)))
+            {
                 return None;
             }
         }
@@ -588,7 +622,6 @@ impl Followed {
         }
         let shorter = nb.min(na);
         let s = tail.min(shorter - p);
-        let slide = (p + tail).saturating_sub(shorter);
         // The window of words `[w0, w1)` of the old read, and its place
         // against the region's `[r0, r1 + 1)`.
         let place = |w0: usize, w1: usize| -> u8 {
@@ -610,6 +643,7 @@ impl Followed {
                 13
             }
         };
+        let slide = (p + tail).saturating_sub(shorter);
         let touches = |w0: usize, w1: usize| w1 + 1 >= r0 && w0 <= r1 + 2;
         let first = (p, nb - s);
         if (0..=slide).any(|k| place(p - k, nb - s - k) != place(first.0, first.1)) {
@@ -655,7 +689,7 @@ impl Followed {
             .slid()
             .any(|w| w.to <= self.region.from || w.from >= self.region.to);
         !one_key
-            && (held.len().saturating_mul(na) > MAX_CELLS
+            && (held.len().saturating_mul(nb + na) > MAX_CELLS
                 || (beside_region && held.iter().any(more))
                 || diff
                     .slid()
@@ -3022,6 +3056,61 @@ mod tests {
     }
 
     #[test]
+    fn round_12_new_words_that_are_the_words_beside_the_paste_could_be_them() {
+        // "b" taken out of "a b a": which "a" is left is not known, and the one
+        // left in the paste's place is the word beside it.
+        stores_nothing(&replay("b a", Some(2), "a ", &["a b a", "a a"]));
+        stores_nothing(&replay("b a", Some(4), "b b ", &["b b b a", "b b b"]));
+    }
+
+    #[test]
+    fn round_12_words_typed_after_a_line_break_beside_an_edge_word_are_not_the_paste() {
+        // "ok" is what is left of the paste (the emoji and "thanks" taken out,
+        // other words typed over them); in one read a break, "Friday" and
+        // another break appear after it. Which words are the replacement is
+        // not known (long run, seed 1014607; killed by the lettered branch of
+        // `coalesced_ambiguously`, no word of the old read changed).
+        let reads = [
+            "did you send it to Kip yet ok \u{1f600} thanks \u{597d}\u{7684}",
+            "did you send it to Kip yet ok \u{1f600}  \u{597d}\u{7684}",
+            "did you send it to Kip yet ok \u{1f600} \n \u{597d}\u{7684}",
+            "did you send it to Kip yet ok \u{1f600} the\n \u{597d}\u{7684}",
+            "did you send it to Kip yet ok \u{1f600} the report is attached to this email\n \u{597d}\u{7684}",
+            "did you send it to Kip yet ok  the report is attached to this email\n \u{597d}\u{7684}",
+            "did you send it to Kip yet ok \u{2028}Friday\u{2028} the report is attached to this email\n \u{597d}\u{7684}",
+        ];
+        let seen = replay(
+            "ok \u{1f600} thanks",
+            Some(27),
+            "did you send it to Kip yet  \u{597d}\u{7684}",
+            &reads,
+        );
+        assert!(
+            !matches!(seen.last(), Some(Alignment::Edited(s)) if s.contains("Friday")),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn round_12_a_change_that_slides_along_equal_words_across_an_edge_is_not_followed() {
+        // "the meeting is at noon tomorrow" put in before the paste, after a
+        // "tomorrow": it could as well be "tomorrow the meeting is at noon"
+        // put in before that word, so the paste's own words may begin
+        // elsewhere (long run, seed 1086381).
+        let seen = replay(
+            "can you send it to Bob today",
+            Some(31),
+            "please send it to Kip tomorrow  \u{fffc}\u{fffc}",
+            &[
+                "please send it to Kip tomorrow can you send it to Bob today \u{fffc}\u{fffc}",
+                "please send it to Kip tomorrow the meeting is at noon tomorrow can you send it to Bob today \u{fffc}\u{fffc}",
+                "please send it to Kip tomorrow the meeting is at noon tomorrow can you sent it to Bob today \u{fffc}\u{fffc}",
+            ],
+        );
+        assert_eq!(seen.last(), Some(&Alignment::NotFound), "{seen:?}");
+    }
+
+    #[test]
     fn round_11_k_keys_glued_to_the_paste_and_a_space_in_one_read_are_not_it() {
         stores_nothing(&replay(
             "oscar",
@@ -3042,6 +3131,8 @@ mod tests {
 
     #[test]
     fn round_11_letters_typed_and_taken_out_in_one_read_leave_the_equal_words_unplaced() {
+        // (The round 10 code refused this too; the branch is pinned by
+        // `round_12_words_typed_after_a_line_break_beside_an_edge_word_are_not_the_paste`.)
         // "a" taken from the front and typed at the end: the same words.
         stores_nothing(&replay("a", Some(1), "a", &["a a", " a\ta", " a\tab"]));
     }
