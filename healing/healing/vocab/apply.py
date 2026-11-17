@@ -87,10 +87,20 @@ def normalize(item) -> dict:
 # ---- the hex calls -------------------------------------------------------------------------------
 
 def _reply(text: str) -> dict | None:
-    """The `--json` reply in `text` (its last JSON line), or None when there is none."""
-    for line in reversed(text.strip().splitlines()):
+    """The `--json` reply in `text`, or None when there is none. Hex pretty-prints it over many lines,
+    so the whole output is tried first, then the last JSON object starting at a line's beginning."""
+    text = text.strip()
+    try:
+        reply = json.loads(text)
+    except ValueError:
+        reply = None
+    if isinstance(reply, dict):
+        return reply
+    decoder = json.JSONDecoder()
+    starts = [i for i, ch in enumerate(text) if ch == "{" and (i == 0 or text[i - 1] == "\n")]
+    for start in reversed(starts):
         try:
-            reply = json.loads(line)
+            reply, _ = decoder.raw_decode(text, start)
         except ValueError:
             continue
         if isinstance(reply, dict):

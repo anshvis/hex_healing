@@ -22,15 +22,15 @@ with open(log, "a") as f:
 if args[:2] == ["settings", "get"]:
     key = args[2]
     value = os.environ.get("FAKE_BOOST", "light")
-    print(json.dumps({{"version": 4, "status": "settings", "settings": [{{"key": key, "value": value}}]}}))
+    print(json.dumps({{"version": 4, "status": "settings", "settings": [{{"key": key, "value": value}}]}}, indent=2))
     sys.exit(0)
 entries = json.load(open(state))
 if args[:2] == ["vocabulary", "list"]:
-    print(json.dumps({{"version": 4, "status": "vocabulary", "entries": entries}}))
+    print(json.dumps({{"version": 4, "status": "vocabulary", "entries": entries}}, indent=2))
 elif args[:2] == ["vocabulary", "set"]:
     mode = os.environ.get("FAKE_SET_MODE")
     def error(code, exit_code=1):
-        print(json.dumps({{"version": 4, "status": "error", "code": code, "message": "x"}}))
+        print(json.dumps({{"version": 4, "status": "error", "code": code, "message": "x"}}, indent=2))
         sys.exit(exit_code)
     if mode == "fail":
         error("invalid-vocabulary")
@@ -53,7 +53,7 @@ elif args[:2] == ["vocabulary", "set"]:
         time.sleep(5)
     if mode == "transport-after":
         error("transport")  # the write happened; the reply didn't reach the client
-    print(json.dumps({{"version": 4, "status": "done", "changed": changed}}))
+    print(json.dumps({{"version": 4, "status": "done", "changed": changed}}, indent=2))
 else:
     sys.exit(2)
 """
