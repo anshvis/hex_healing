@@ -246,7 +246,8 @@ file's order: a JSON array whose items are a term string or
 `{"term": "...", "sounds_like": ["..."]}`. It is all or nothing: an invalid
 entry (empty, over 64 characters, over 16 spellings), a term listed twice (any
 case), or more than 500 entries answers `invalid-vocabulary` naming the entry
-(from 0) and nothing is saved. The same list, in the same order, replies
+(from 0) and nothing is saved. A list whose request would pass the 64 KiB
+`/control` limit is refused the same way, before anything is sent. The same list, in the same order, replies
 `changed: false`. Per-mode vocabularies are untouched. Like `add`, it needs the
 running Hex.
 

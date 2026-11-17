@@ -56,7 +56,7 @@ const MAX_PATH_BYTES: usize = 2 * 1024;
 pub(crate) const MAX_AUDIO_BYTES: usize = 64 * 1024 * 1024;
 const MAX_DEVELOPER_CONTROL_BYTES: usize = 16 * 1024;
 const DEVELOPER_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_CONTROL_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_CONTROL_BYTES: usize = 64 * 1024;
 const MAX_DICTATION_SOURCE_BYTES: usize = 128;
 
 type HealthProvider = Arc<dyn Fn() -> HealthResponse + Send + Sync>;
