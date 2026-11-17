@@ -29,6 +29,10 @@ use std::time::Duration;
 
 use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString};
 
+use super::run_loop::{
+    CFRunLoopGetCurrent, CFRunLoopRunInMode, CFRunLoopStop, kCFRunLoopCommonModes,
+    kCFRunLoopDefaultMode,
+};
 use crate::app_settings::{CAPS_LOCK_USAGE, PhysicalModifierKeys, physical_key_bit};
 use crate::audio::CaptureInstant;
 
@@ -100,16 +104,7 @@ unsafe extern "C" {
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
-    fn CFRunLoopGetCurrent() -> *mut c_void;
-    fn CFRunLoopRunInMode(
-        mode: *const c_void,
-        seconds: f64,
-        return_after_source_handled: u8,
-    ) -> i32;
-    fn CFRunLoopStop(run_loop: *mut c_void);
     fn CFRelease(value: *const c_void);
-    static kCFRunLoopCommonModes: *const c_void;
-    static kCFRunLoopDefaultMode: *const c_void;
 }
 
 /// The tracked usages every matched keyboard holds right now, unioned.

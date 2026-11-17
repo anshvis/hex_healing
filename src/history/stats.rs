@@ -178,6 +178,7 @@ mod tests {
             language: None,
             text_ms: None,
             versions: Vec::new(),
+            correction: None,
         }
     }
 

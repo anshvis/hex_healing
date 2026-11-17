@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from healing.eval.bench import BenchError, hex_binary
+from healing.corrections import label_reset
+from healing.eval.bench import BenchError, history_hex
 from healing.store import Store, StoreError, process_lock, clip_id, now_ms, read_wav
 
 PAGE_LIMIT = 10_000
@@ -33,7 +34,13 @@ MUTABLE = (
     "audio_ms",
     "raw_text",
     "final_text",
+    "correction_outcome",
+    "correction_reason",
+    "edited_text",
 )
+
+# A change to any of these makes a stored classification stale.
+CLASSIFICATION_INPUTS = ("raw_text", "final_text", "edited_text", "correction_outcome")
 
 
 class CollectError(Exception):
@@ -203,6 +210,14 @@ def _store_entry(
         "raw_text": entry["raw_text"],
         "final_text": entry["final_text"],
     }
+    # An entry without `correction` says nothing: an older Hex drops the field when it saves.
+    correction = entry.get("correction")
+    observed = {
+        "correction_outcome": (correction or {}).get("outcome"),
+        "correction_reason": (correction or {}).get("reason"),
+        "edited_text": (correction or {}).get("edited_text"),
+    }
+    fields.update(observed)
     existing = store.db.execute(
         "SELECT * FROM clips WHERE hex_epoch_ms = ? AND hex_id = ?", (epoch, hex_id)
     ).fetchone()
@@ -217,27 +232,52 @@ def _store_entry(
         store.db.execute(
             "INSERT INTO clips (clip_id, hex_id, hex_epoch_ms, timestamp_ms, application, mode,"
             " kind, model_id, model_name, rewritten, audio_ms, raw_text, final_text, audio_sha256,"
-            " collected_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " collected_at_ms, correction_outcome, correction_reason, edited_text)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 clip_id(epoch, hex_id), hex_id, epoch, timestamp, fields["application"],
                 fields["mode"], fields["kind"], fields["model_id"], fields["model_name"],
                 fields["rewritten"], fields["audio_ms"], fields["raw_text"], fields["final_text"],
-                audio_sha, now_ms(),
+                audio_sha, now_ms(), fields["correction_outcome"], fields["correction_reason"],
+                fields["edited_text"],
             ),
         )
         return
     changed = {k: v for k, v in fields.items() if existing[k] != v}
+    changed = _correction_changes(existing, correction, observed, changed)
     if audio_sha != existing["audio_sha256"]:
         changed["audio_sha256"] = audio_sha
     if not changed:
         return
     if "raw_text" in changed and existing["label"] != "verified":
         changed["label"] = "unlabelled"  # M3 recomputes labels from the new raw text
+    if any(name in changed for name in CLASSIFICATION_INPUTS):
+        # Hex added or changed the correction: `label corrections` classifies it again.
+        store.db.execute("DELETE FROM edits WHERE clip_id = ?", (existing["clip_id"],))
+        changed["reference_text"] = None
+        changed["classified_at_ms"] = None
+        if (label := label_reset(existing["label"])) != existing["label"]:
+            changed["label"] = label
     assignments = ", ".join(f"{name} = ?" for name in changed)
     store.db.execute(
         f"UPDATE clips SET {assignments} WHERE hex_epoch_ms = ? AND hex_id = ?",
         (*changed.values(), epoch, hex_id),
     )
+
+
+def _correction_changes(existing, correction: dict | None, observed: dict, changed: dict) -> dict:
+    """`changed`, adjusted so that only a correction Hex actually reports touches the stored one.
+
+    An entry without `correction` says nothing (an older Hex drops the field when it saves), so
+    the stored correction stays, unless the entry's text changed too (a Replace in Hex): that
+    correction was seen against the old text, so it goes rather than label the new one.
+    """
+    if correction is not None:
+        return changed
+    kept = {name: value for name, value in changed.items() if name not in observed}
+    if "raw_text" in kept or "final_text" in kept:
+        kept.update({name: None for name in observed if existing[name] is not None})
+    return kept
 
 
 def _store_audio(store: Store, recording: str, summary: Summary) -> str | None:
@@ -261,7 +301,7 @@ def main_collect(since: str | None, hex_path: Path | None, min_free: int | None 
         if since is not None:
             check_since(since)
         try:
-            binary = Path(hex_path or hex_binary()).resolve()
+            binary = Path(hex_path or history_hex()).resolve()
         except BenchError as error:
             raise CollectError(str(error), 2) from error
         if not Path(binary).is_file():

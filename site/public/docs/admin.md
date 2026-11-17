@@ -20,6 +20,7 @@ launch; a changed profile applies after Hex relaunches.
 | `DisableOpenCodeProcessing` | No OpenCode requests: mode rewrites, meeting notes and titles, and sending captures to OpenCode sessions. |
 | `DisableTransforms` | No transforms at all, built in or from `hex.config.ts`; the config is never loaded. |
 | `RestrictTransformsToLoopback` | Transforms stay on, but `fetch` reaches only this Mac and `node:child_process` (`exec`, `execFile`) is refused. Every host name, redirects included, must resolve to loopback addresses only (`127.0.0.0/8`, `::1`); the check runs on the resolved addresses Hex connects to, and the system proxy is bypassed. Use it with a local, authenticated model proxy. |
+| `DisableCorrections` | Learn from corrections is off: Hex reads nothing back from other apps' text fields after a paste. |
 | `DisableLabs` | Every Labs feature is off. |
 | `DisableUpdates` | Hex never checks for, downloads, or installs updates. |
 

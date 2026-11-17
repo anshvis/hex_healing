@@ -21,7 +21,7 @@ import soundfile
 from healing.paths import healing_home
 
 SAMPLE_RATE = 16_000
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE audio (
@@ -97,7 +97,31 @@ CREATE TABLE clean_runs (
 );
 """
 
-MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4]
+SCHEMA_V5 = """
+ALTER TABLE clips ADD COLUMN correction_outcome TEXT;
+ALTER TABLE clips ADD COLUMN correction_reason TEXT;
+ALTER TABLE clips ADD COLUMN edited_text TEXT;
+ALTER TABLE clips ADD COLUMN reference_text TEXT;
+CREATE TABLE edits (
+    clip_id TEXT NOT NULL REFERENCES clips(clip_id),
+    idx INTEGER NOT NULL,
+    raw_from TEXT NOT NULL,
+    final_from TEXT NOT NULL,
+    to_text TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('acoustic', 'rewrite', 'unmapped')),
+    score_metaphone INTEGER,
+    score_char REAL,
+    score_phone REAL,
+    PRIMARY KEY (clip_id, idx),
+    CHECK (kind != 'acoustic' OR raw_from != '')
+);
+"""
+
+SCHEMA_V6 = """
+ALTER TABLE clips ADD COLUMN classified_at_ms INTEGER;
+"""
+
+MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6]
 
 
 class StoreError(Exception):

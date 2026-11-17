@@ -33,6 +33,24 @@ entries from before it was recorded omit it), `audio_ms`, the clip's length
 (omitted when 0), and `rewritten`, true only when an OpenCode rewrite produced
 `final_text`.
 
+With `--raw`, a row also carries `correction` when Labs › Learn from corrections
+saw the entry's pasted text (additive, `version` stays 1, absent otherwise and
+never without `--raw`, because it holds text):
+
+```ts
+type Correction = { // history row, --json --raw only
+  outcome: "unchanged" | "edited" | "lost"
+  reason?: "element_gone" | "secure" | "too_large" | "span_not_found"
+         | "read_timeout" | "read_failed" | "cleared_before_read"  // only when outcome is "lost"
+  observed_at_ms: number   // from the paste to the read it comes from
+  edited_text?: string     // only when "edited": the aligned span, at most 16 KiB
+}
+```
+
+An entry has at most one; the first observation wins. It counts toward the
+16 MiB text cap and leaves with its entry. A Hex older than this field drops it
+when it next saves the file.
+
 - `--since` is inclusive and `--until` is exclusive. A date alone means local
   midnight; `--until 2026-10-20` includes all of October 20.
 - Times accept `3d`, `36h`, `90m`, `2w`, `today`, `yesterday`, `now`, dates,
@@ -269,7 +287,7 @@ available on every OS.
 
 ## Retention stays bounded in one store
 
-The history cap is now 10,000 entries or 16 MiB of raw plus final text, whichever
+The history cap is now 10,000 entries or 16 MiB of raw plus final text (and any kept correction span), whichever
 is reached first, up from 2,000 / 4 MiB. Per-entry limits, owner-only files,
 atomic replacement, expiry, explicit deletion, and Clear all remain shared with
 the History pane. Older entries already evicted cannot be recovered by this change.

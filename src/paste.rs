@@ -222,6 +222,16 @@ impl Paster {
         }
     }
 
+    /// What the last continuing paste put in the field: its text after the
+    /// continuation join and smart spacing. Empty after a copy only or a
+    /// Standalone paste.
+    pub fn inserted(&self) -> String {
+        self.continuation
+            .as_ref()
+            .map(|continuation| continuation.inserted.clone())
+            .unwrap_or_default()
+    }
+
     pub fn paste(&mut self, text: &str, mode: PasteMode) -> Result<()> {
         if matches!(mode, PasteMode::CopyOnly) {
             return self.copy_only(text);
@@ -1091,6 +1101,8 @@ mod tests {
 
         // Returns without posting ⌘V or typing: only the clipboard changes.
         paster.paste("dictated text", PasteMode::CopyOnly).unwrap();
+        // Nothing was inserted into a field, so there is nothing to watch.
+        assert_eq!(paster.inserted(), "");
 
         assert_eq!(
             clipboard

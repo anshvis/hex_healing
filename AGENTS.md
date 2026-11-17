@@ -47,7 +47,8 @@ a stable build with the driver keeps its pane for Uninstall alone), Playground
 language (#216), Mouse shortcuts (#209, macOS), Also pause the browser (#301,
 macOS), Share dictation shortcut (#176, Windows), Unload model when idle
 (#442), Smaller model files (macOS), Terminal paste (Windows), and Terminal
-paste shortcut (Windows, Linux). Externally contributed features land there
+paste shortcut (Windows, Linux), and Learn from corrections (macOS).
+Externally contributed features land there
 too. Annotate is a normal feature in every build, stable included, on macOS,
 Linux, and Windows; only developer tools (`dev_build::is_dev_build()` with
 `DEVELOPER_FEATURES_ENABLED`) stay gated to dev builds.
@@ -242,7 +243,9 @@ substitute for source inspection or a second roadmap.
   clipboard restoration.
 - `accessibility`: bounded focused-window and selected-text capture through
   Accessibility without touching the clipboard, including the bounded visible
-  window text Labs › Screen vocabulary reads (macOS).
+  window text Labs › Screen vocabulary reads (macOS), and the post-paste
+  read of the pasted-into field's value (≤ 8,192 characters, 30 s, never a secure field)
+  for Labs › Learn from corrections.
 - `recognition`: the macOS listener coordinator for hotkey and programmatic
   dictation controls, workers, and observations. It does not own the
   authoritative microphone timeline.
@@ -296,7 +299,8 @@ substitute for source inspection or a second roadmap.
   `settings.json`.
 - `policy`: macOS managed-preference feature locks in `anomaly.hex`
   (`DisableMeetings`, `DisableAnnotate`, `DisableOpenCodeProcessing`,
-  `DisableTransforms`, `DisableLabs`, `RestrictTransformsToLoopback`), forced
+  `DisableTransforms`, `DisableLabs`, `DisableCorrections`,
+  `RestrictTransformsToLoopback`), forced
   values only. Locked switches read off at load and keep their saved values on
   save; list-driven work checks the policy where it starts.
 - `app_paths`: the Application Support owner (`hex` on every OS) for runtime
@@ -1042,7 +1046,10 @@ CoreAudio formats, AppleScript details, or event serialization.
   own 512 MiB cap (oldest audio dropped first, text kept). Turning it off
   stops saving; existing audio stays until it expires or History is cleared.
 - Retained dictation history records only successful pasted output: raw and
-  final text plus bounded metadata, never full browser URLs or window titles,
+  final text plus bounded metadata (and, with Labs › Learn from corrections
+  on, the edited span read back from the field it was pasted into, bounded to
+  2 × the pasted length + 64 characters, under the same retention, caps,
+  Delete and Clear all), never full browser URLs or window titles,
   and no audio unless Labs › Keep recordings is on. Entries name their speech
   model; with Keep recordings, Replace keeps up to five earlier versions
   inside the entry, counted by the same caps. History defaults to seven days, and every retention window remains

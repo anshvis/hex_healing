@@ -68,6 +68,16 @@ pub fn cursor_context() -> bool {
     CURSOR_CONTEXT.load(Ordering::Acquire) && Feature::CursorContext.on_this_os()
 }
 
+/// The paste worker hands a pasted-into text field to the correction watcher
+/// (macOS; read as a paste commits). Off, nothing is read or kept.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn learn_from_corrections() -> bool {
+    // The state word has no bit for it: its own atomic, as for
+    // `cursor_context`.
+    let _ = state();
+    LEARN_FROM_CORRECTIONS.load(Ordering::Acquire) && Feature::LearnFromCorrections.on_this_os()
+}
+
 /// A finished Annotate capture copies to the clipboard as one light zip file
 /// rather than its image and summary (read where a written capture is copied).
 #[cfg_attr(not(hex_capture), allow(dead_code))]

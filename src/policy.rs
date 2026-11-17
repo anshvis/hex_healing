@@ -1,7 +1,7 @@
 //! Feature locks an organization sets through managed preferences (macOS
 //! configuration profiles) in the `anomaly.hex` domain: `DisableMeetings`,
 //! `DisableAnnotate`, `DisableOpenCodeProcessing`, `DisableTransforms`, and
-//! `DisableLabs`, plus `RestrictTransformsToLoopback`, which keeps
+//! `DisableLabs`, `DisableCorrections`, plus `RestrictTransformsToLoopback`, which keeps
 //! transformations on but holds their `fetch` to this computer and runs no
 //! programs. Only a value the profile forces counts, so a key a person
 //! wrote with `defaults write` locks nothing. Other OSes have no locks.
@@ -35,16 +35,20 @@ pub enum Lock {
     /// (after DNS, on every redirect) and no program runs
     /// (`personal_commands::script`).
     LoopbackTransforms,
+    /// No Learn from corrections: Hex reads back no text from other apps'
+    /// fields after a paste.
+    Corrections,
 }
 
 impl Lock {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Meetings,
         Self::Annotate,
         Self::OpenCodeProcessing,
         Self::Transforms,
         Self::Labs,
         Self::LoopbackTransforms,
+        Self::Corrections,
     ];
 
     /// Its key in the `anomaly.hex` managed preferences.
@@ -56,6 +60,7 @@ impl Lock {
             Self::Transforms => "DisableTransforms",
             Self::Labs => "DisableLabs",
             Self::LoopbackTransforms => "RestrictTransformsToLoopback",
+            Self::Corrections => "DisableCorrections",
         }
     }
 
@@ -74,6 +79,7 @@ impl Lock {
             Self::LoopbackTransforms => {
                 "Transformations may only reach this computer, by your organization's policy"
             }
+            Self::Corrections => "Learn from corrections is managed by your organization",
         }
     }
 }
@@ -85,10 +91,9 @@ pub struct Policy(u8);
 impl Policy {
     /// This process's policy, read once.
     pub fn current() -> Self {
-        // A UI test can force a policy on its own thread, so a locked row is
-        // exercised without a managed Mac. Only Linux renders the panes
-        // tests, so only there does the override exist.
-        #[cfg(all(test, target_os = "linux"))]
+        // A test can force a policy on its own thread, so a locked row or
+        // gate is exercised without a managed Mac.
+        #[cfg(test)]
         if let Some(forced) = FORCED_FOR_TEST.with(|slot| *slot.borrow()) {
             return forced;
         }
@@ -131,7 +136,7 @@ impl Policy {
 
     /// Forces `policy` on this thread until the guard drops, so a pane test
     /// can see what an organization's lock does to a row.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(test)]
     pub fn forced_for_test(policy: Policy) -> ForcedPolicy {
         FORCED_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(policy));
         ForcedPolicy
@@ -140,16 +145,16 @@ impl Policy {
     /// The lock on a Labs feature: Labs, Meetings for Meetings, Annotate for
     /// Annotate replay, or OpenCode processing for a voice prompt.
     pub fn labs_lock(self, feature: crate::labs::Feature) -> Option<Lock> {
-        if feature == crate::labs::Feature::Meetings && self.locks(Lock::Meetings) {
-            return Some(Lock::Meetings);
-        }
-        if feature == crate::labs::Feature::AnnotateReplay && self.locks(Lock::Annotate) {
-            return Some(Lock::Annotate);
-        }
-        if feature == crate::labs::Feature::VoicePrompt && self.locks(Lock::OpenCodeProcessing) {
-            return Some(Lock::OpenCodeProcessing);
-        }
-        self.locks(Lock::Labs).then_some(Lock::Labs)
+        use crate::labs::Feature;
+        let own = match feature {
+            Feature::Meetings => Some(Lock::Meetings),
+            Feature::AnnotateReplay => Some(Lock::Annotate),
+            Feature::VoicePrompt => Some(Lock::OpenCodeProcessing),
+            Feature::LearnFromCorrections => Some(Lock::Corrections),
+            _ => None,
+        };
+        own.filter(|lock| self.locks(*lock))
+            .or_else(|| self.locks(Lock::Labs).then_some(Lock::Labs))
     }
 
     /// The lock on `hex settings` key `name`, if any.
@@ -178,6 +183,7 @@ impl Policy {
             // `meetings.summaries` is a choice, not a switch; see `enforce`.
             // A voice prompt is one of the OpenCode requests the lock stops.
             Lock::OpenCodeProcessing => vec![&mut settings.labs.voice_prompt],
+            Lock::Corrections => vec![&mut settings.labs.learn_from_corrections],
             Lock::Transforms | Lock::LoopbackTransforms => Vec::new(),
             Lock::Labs => crate::labs::Feature::switches(settings),
         }
@@ -218,7 +224,7 @@ impl Policy {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 thread_local! {
     /// The policy a test forced on this thread ([`Policy::forced_for_test`]),
     /// read ahead of the process's own so a locked row needs no managed Mac.
@@ -227,10 +233,10 @@ thread_local! {
 }
 
 /// Clears a test's forced policy when it drops ([`Policy::forced_for_test`]).
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 pub struct ForcedPolicy;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 impl Drop for ForcedPolicy {
     fn drop(&mut self) {
         FORCED_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
@@ -287,9 +293,42 @@ mod tests {
                 "DisableOpenCodeProcessing",
                 "DisableTransforms",
                 "DisableLabs",
-                "RestrictTransformsToLoopback"
+                "RestrictTransformsToLoopback",
+                "DisableCorrections"
             ]
         );
+    }
+
+    #[test]
+    fn all_locks_fit_bits() {
+        let mut seen = 0u8;
+        for lock in Lock::ALL {
+            assert_eq!(seen & lock.bit(), 0, "{} shares a bit", lock.key());
+            seen |= lock.bit();
+        }
+        assert!(Lock::ALL.len() <= u8::BITS as usize);
+    }
+
+    #[test]
+    fn disable_corrections_locks_the_lab() {
+        let policy = Policy::from_forced(|key| key == "DisableCorrections");
+        assert!(policy.locks(Lock::Corrections));
+        assert!(!policy.locks(Lock::Labs));
+        assert_eq!(
+            Lock::Corrections.refusal(),
+            "Learn from corrections is managed by your organization"
+        );
+        let feature = crate::labs::Feature::LearnFromCorrections;
+        assert_eq!(policy.labs_lock(feature), Some(Lock::Corrections));
+        assert_eq!(
+            policy.setting_lock("labs.learn_from_corrections"),
+            Some(Lock::Corrections)
+        );
+        assert_eq!(Policy::default().labs_lock(feature), None);
+        let mut settings = AppSettings::default();
+        settings.labs.learn_from_corrections = true;
+        policy.enforce(&mut settings);
+        assert!(!settings.labs.learn_from_corrections);
     }
 
     #[test]

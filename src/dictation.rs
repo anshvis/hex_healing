@@ -11,9 +11,13 @@ pub(crate) mod config;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 pub(crate) mod context;
 #[cfg(target_os = "macos")]
+pub(crate) mod correction_watch;
+#[cfg(target_os = "macos")]
 pub(crate) mod diagnostics;
 pub(crate) mod filler_words;
 pub(crate) mod indicator;
+#[cfg(target_os = "macos")]
+pub(crate) mod key_counts;
 pub(crate) mod live_text;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) mod modes;

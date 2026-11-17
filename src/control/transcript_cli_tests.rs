@@ -133,6 +133,7 @@ fn history_stats_parse_sum_retained_entries_and_need_the_labs_toggle() {
         language: None,
         text_ms: None,
         versions: Vec::new(),
+        correction: None,
     };
     let entries = [
         entry(1, 10, "expired by retention", "expired by retention"),
@@ -825,4 +826,40 @@ fn history_row_omits_absent_fields() {
     for key in ["model_id", "audio_ms", "rewritten"] {
         assert!(row.get(key).is_none(), "{key} should be omitted");
     }
+}
+
+#[test]
+fn correction_only_with_raw() {
+    let mut entries = entries();
+    entries[1].correction = Some(crate::history::HistoryCorrection {
+        outcome: "edited".into(),
+        reason: None,
+        observed_at_ms: 4_200,
+        edited_text: Some("Kit".into()),
+    });
+    let id = entries[1].id;
+    let rows = |extra: &[&str]| {
+        let output = history_output(
+            &entries,
+            &args(extra),
+            HistoryRetention::Week,
+            NOW,
+            &[],
+            None,
+        )
+        .unwrap();
+        serde_json::to_value(output).unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    let raw = rows(&["--raw"]);
+    assert_eq!(
+        raw["correction"],
+        serde_json::json!({"outcome":"edited","observed_at_ms":4200,"edited_text":"Kit"})
+    );
+    assert!(rows(&[]).get("correction").is_none());
 }

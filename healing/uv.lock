@@ -39,6 +39,7 @@ name = "healing"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "metaphone" },
     { name = "numpy" },
     { name = "pyarrow" },
     { name = "soundfile" },
@@ -51,6 +52,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "metaphone", specifier = ">=0.6" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pyarrow", specifier = ">=15" },
     { name = "soundfile", specifier = ">=0.12" },
@@ -67,6 +69,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/01/e1/2069291243c926a2f
 wheels = [
     { url = "https://files.pythonhosted.org/packages/56/43/4ca9e49d27a1fcf6bece6f6aec0ea46bb9112489b93d4b688fb415457bdb/iniconfig-2.3.1-py3-none-any.whl", hash = "sha256:9121e2c1fdb355232495be3194c8dfe87ccc2d5dee45947b78e68f499790d7a7", size = 7552, upload-time = "2026-10-06T22:48:36.959Z" },
 ]
+
+[[package]]
+name = "metaphone"
+version = "0.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d4/ae/c9e4d007e32a6469be212da11d0b8e104d643f6f247d771742caf6ac6bb8/Metaphone-0.6.tar.gz", hash = "sha256:ad0beadca66cb7ec6ede71ef72bb02da097c493ddf159930d6340bc83f53da27", size = 14075, upload-time = "2016-08-24T14:37:29.687Z" }
 
 [[package]]
 name = "numpy"

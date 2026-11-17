@@ -30,3 +30,23 @@ def test_benchmark_runs_hex_in_an_isolated_data_folder(tmp_path, monkeypatch):
     assert os.path.commonpath([support, str(home)]) == str(home)
     assert "Library/Application Support/hex/" not in support + "/"
     assert env["HEX_DISABLE_UPDATES"] == "1"
+
+
+def test_history_readers_prefer_the_installed_hex(tmp_path, monkeypatch):
+    # A checkout's build can come from another branch that doesn't know History's newer fields
+    # (a correction), so anything reading History asks the installed app first.
+    from healing.eval import bench
+
+    build = tmp_path / "repo" / "target" / "release" / "hex"
+    installed = tmp_path / "Hex.app" / "hex"
+    for binary in (build, installed):
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+    monkeypatch.delenv("HEX_BIN", raising=False)
+    monkeypatch.setattr(bench, "repo_root", lambda: tmp_path / "repo")
+    monkeypatch.setattr(bench, "INSTALLED_HEX", installed)
+    assert bench.hex_binary() == build
+    assert bench.history_hex() == installed
+    monkeypatch.setenv("HEX_BIN", str(build))
+    assert bench.history_hex() == build

@@ -5,6 +5,11 @@ use std::time::{Duration, Instant};
 
 use crate::dictation::caret_text::{Keep, bounded_units};
 
+mod watch;
+pub use watch::{
+    FieldText, Notification, Observer, ReadError, caret, read_value_bounded, run_loop_once,
+};
+
 type CfTypeRef = *const c_void;
 type CfStringRef = *const c_void;
 type AxUiElementRef = *const c_void;
@@ -509,6 +514,40 @@ fn parameterized_string(element: &CfObject, range: CfRange) -> Option<CfObject> 
     (status == 0 && !value.is_null()).then(|| CfObject(value))
 }
 
+/// An Accessibility element another process's focused field, kept past the
+/// read that found it so the correction watcher can read its value later.
+/// It holds one retain and releases it exactly once when dropped, on every
+/// path (a dropped queue item, a lab turned off, a quit).
+pub struct RetainedElement(CfObject);
+
+// SAFETY: the wrapped `AXUIElementRef` is a Core Foundation object. CFRetain
+// and CFRelease are atomic, and Accessibility calls are valid from any
+// thread (`screen_vocabulary` already reads from a background one). The
+// element is never aliased: this type is the only owner of its retain.
+unsafe impl Send for RetainedElement {}
+
+impl RetainedElement {
+    /// A real retained element that names no field, for tests.
+    #[cfg(test)]
+    pub fn for_test() -> Self {
+        // SAFETY: AXUIElementCreateApplication returns a retained object.
+        Self(bounded_element(unsafe { AXUIElementCreateApplication(1) }).unwrap())
+    }
+}
+
+/// The focused element of another process, for the correction watcher to
+/// read after a paste. `None` for Hex's own pid, a secure (password) field,
+/// no focused element, or an Accessibility call that exceeds its 0.25 s
+/// timeout. Reads no text and changes nothing.
+pub fn focused_element(pid: i32) -> Option<RetainedElement> {
+    let application = foreign_application(pid)?;
+    let focused = copy_element(&application, c"AXFocusedUIElement")?;
+    if is_secure_text_field(&focused) {
+        return None;
+    }
+    Some(RetainedElement(focused))
+}
+
 struct CfObject(CfTypeRef);
 
 impl Drop for CfObject {
@@ -538,12 +577,19 @@ fn bounded_element(element: AxUiElementRef) -> Option<CfObject> {
         .then_some(element)
 }
 
-fn copy_attribute(element: &CfObject, name: &CStr) -> Option<CfObject> {
+/// An attribute and the status that came with it, for a caller that tells
+/// failures apart (`None` when the name itself can't be made).
+fn fetch_attribute(element: &CfObject, name: &CStr) -> Option<(i32, Option<CfObject>)> {
     let attribute = CfObject(cf_string_literal(name)?);
     let mut value = ptr::null();
     let status = unsafe { AXUIElementCopyAttributeValue(element.0, attribute.0, &mut value) };
     // `then`, not `then_some`: dropping a `CfObject(null)` would CFRelease(NULL).
-    (status == 0 && !value.is_null()).then(|| CfObject(value))
+    let value = (status == 0 && !value.is_null()).then(|| CfObject(value));
+    Some((status, value))
+}
+
+fn copy_attribute(element: &CfObject, name: &CStr) -> Option<CfObject> {
+    fetch_attribute(element, name)?.1
 }
 
 fn copy_element(element: &CfObject, name: &CStr) -> Option<CfObject> {

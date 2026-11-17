@@ -1175,7 +1175,7 @@ impl DictationHotkey {
 }
 
 /// Return and the keypad's Enter.
-const RETURN_KEY_CODES: [u16; 2] = [36, 76];
+pub(super) const RETURN_KEY_CODES: [u16; 2] = [36, 76];
 
 fn is_return_key(event: InputEvent) -> bool {
     matches!(

@@ -13,6 +13,9 @@ Nothing is built until an assistive client asks, so Hex pays nothing for it
 until then. Names and descriptions go through `desktop::i18n` like the visible
 copy.
 
+Reading other apps' fields after a paste (Labs › Learn from corrections) is
+a different direction and is mapped in [corrections](corrections.md).
+
 ## Window
 
 ```ts

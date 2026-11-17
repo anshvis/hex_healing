@@ -32,6 +32,8 @@ HEX_RELEASE_UNSIGNED=1 HEX_LOCAL_BUILD=1 scripts/install-app.sh
 rm -rf target/app/Hex.app  # so macOS never launches the build copy instead
 ```
 
+Put the CLI on your PATH once: `ln -s /Applications/Hex.app/Contents/MacOS/hex ~/.local/bin/hex`.
+
 - `HEX_RELEASE_UNSIGNED=1` keeps the normal app name and bundle id (`anomaly.hex`), so it uses the
   usual `~/Library/Application Support/hex` data folder: models, settings and History carry over.
 - `HEX_LOCAL_BUILD=1` turns updates off, so it never replaces itself with an official release.
@@ -40,9 +42,15 @@ rm -rf target/app/Hex.app  # so macOS never launches the build copy instead
   which `healing` doesn't read unless `HEX_BIN` points at it.
 - A plain `scripts/install-app.sh` needs `HEX_TEAM_ID` and a Developer ID identity, and fails without them.
 
-The signature is ad-hoc, so macOS may ask for Microphone and Accessibility again after a rebuild.
-If the shortcut stops working while Hex looks allowed, remove Hex under System Settings › Privacy &
-Security › Accessibility and add `/Applications/Hex.app` back. Turn on Settings › Labs › Keep
+The signature is ad-hoc, so macOS ties the Accessibility grant to that exact binary and every rebuild
+invalidates it, even though System Settings still shows Hex as allowed. If Hex says "Waiting for setup"
+or the shortcut stops working after a rebuild, reset the grant and relaunch, then allow Hex again if
+asked:
+
+```sh
+tccutil reset Accessibility anomaly.hex && hex quit; open /Applications/Hex.app
+```
+ Turn on Settings › Labs › Keep
 recordings, or `healing collect` has no audio to copy.
 
 ## Commands
@@ -57,6 +65,9 @@ recordings, or `healing collect` has no audio to copy.
 | `healing sets build-general` | Builds the fixed general regression set: 300 LibriSpeech test-other and 200 AMI IHM utterances, seeded and SHA-pinned. A second run prints `unchanged`; a different set is refused. |
 | `healing eval baseline [--model <gguf>]` | Scores a model on the general set with `hex benchmark-transcription` and writes `healing/eval/baseline.json`. |
 | `healing stats paired <a.jsonl> <b.jsonl>` | Δ WER (b − a) with a paired-bootstrap 95% CI, clips as the resampling unit. Takes benchmark JSONL or `nemo_wer.py` output. |
+| `healing label corrections [--since] [--recompute]` | Aligns each edited clip's `edited_text` with `final_text`, maps edits back onto `raw_text`, and classifies them `acoustic` (sounds alike), `rewrite` or `unmapped`. Acoustic edits make `reference_text` and a `strong` label. Skips clips an OpenCode rewrite produced. |
+| `healing report observation [--json]` | Per app: pastes the lab saw, how many were observed, the `span_not_found` rate and the edited rate. |
+| `healing protocol corrections plan\|run\|score` | The seeded edit-recall protocol (X-3). `plan` writes `RUNBOOK.md`; `run` needs a person at a Mac. |
 
 ## M0 spikes
 

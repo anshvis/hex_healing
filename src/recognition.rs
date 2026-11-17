@@ -800,10 +800,9 @@ pub fn listen(
                 continue;
             }
             // Labs › YOLO mode: Escape after a release skips that
-            // dictation's Return.
-            if input_event.is_escape_down() {
-                crate::dictation::yolo_mode::note_escape();
-            }
+            // dictation's Return. Labs › Learn from corrections: a Return
+            // may be a chat send.
+            crate::dictation::key_counts::note(input_event);
             #[cfg(hex_capture)]
             if let Some(host) = capture_host.as_mut() {
                 // Escape while drawing stops drawing, never the recording.

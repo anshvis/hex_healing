@@ -26,6 +26,8 @@ Hex                                      // macOS release
 
 [Dictation](dictation.md), [Meetings](meetings.md), and [Recovery](recovery.md)
 have detailed maps.
+[Learn from corrections](corrections.md) maps what Hex reads back after a
+paste, what it keeps, and the managed lock.
 [Accessibility](accessibility.md) maps what screen readers, Voice Control, and
 automation (strobe's benches) read from the window, the HUD, and the capsules.
 Agents can [read retained transcripts](transcript-cli.md) and
@@ -1861,6 +1863,7 @@ Configuration profile forces a key in anomaly.hex     // maintain.managed-locks
 ├── RestrictTransformsToLoopback -> transforms on; fetch reaches loopback only
 │   (resolved addresses, every redirect, no proxy); exec/execFile refused
 ├── DisableLabs -> every Labs feature off
+├── DisableCorrections -> Learn from corrections off; no post-paste field reads
 └── Window: setting off, disabled, "Managed by your organization";
     hex settings set / hex labs on / local API refuse with code "managed"
 ```

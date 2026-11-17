@@ -95,7 +95,7 @@ impl Backend {
 }
 
 /// An early failure for the catalog models that never take a bias, before
-/// anything loads. The load checks every file again (`fixed_run_bias`), which
+/// anything loads. The load checks every file again (`OfflineGgufSession::fix_run_bias`), which
 /// also covers one this cannot name.
 fn require_bias_model(id: Option<TranscriptionModelId>) -> std::result::Result<(), String> {
     let Some(id) = id else { return Ok(()) };

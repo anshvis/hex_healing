@@ -87,10 +87,11 @@ pub enum Feature {
     ShellCompletions,
     YoloMode,
     CursorContext,
+    LearnFromCorrections,
 }
 
 impl Feature {
-    pub const ALL: [Self; 82] = [
+    pub const ALL: [Self; 83] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -173,5 +174,6 @@ impl Feature {
         Self::ShellCompletions,
         Self::YoloMode,
         Self::CursorContext,
+        Self::LearnFromCorrections,
     ];
 }

@@ -328,6 +328,11 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: the mode's OpenCode rewrite reads the text around the cursor, so names and terms match where the result lands (macOS); password fields are never read",
     ),
     key(
+        "labs.learn_from_corrections",
+        Kind::Bool,
+        "Labs: watch the field a dictation pasted into for a short time and keep the edited span on its History entry (macOS); password fields are never read",
+    ),
+    key(
         "labs.mouse_shortcuts",
         Kind::Bool,
         "Labs: record mouse buttons as shortcuts (macOS)",

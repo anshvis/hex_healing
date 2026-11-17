@@ -176,6 +176,7 @@ impl Feature {
             | Self::ShellCompletions
             | Self::YoloMode
             | Self::CursorContext
+            | Self::LearnFromCorrections
             | Self::MoreDictationShortcuts => Audience::Everyone,
         }
     }
@@ -262,6 +263,7 @@ impl Feature {
             | Self::YoloMode
             | Self::CursorContext
             | Self::CleanUpWithAppleIntelligence => 20261113,
+            Self::LearnFromCorrections => 20261114,
         }
     }
 
@@ -346,6 +348,7 @@ impl Feature {
             | Self::PrintStart
             | Self::ScreenVocabulary
             | Self::CursorContext
+            | Self::LearnFromCorrections
             | Self::MoreDictationShortcuts => cfg!(target_os = "macos"),
             Self::CleanUpWithAppleIntelligence => cfg!(target_os = "macos"),
             Self::CopyOnly => cfg!(any(target_os = "macos", target_os = "windows")),
@@ -489,6 +492,7 @@ impl Feature {
             Self::ShellCompletions => "shell-completions",
             Self::YoloMode => "yolo-mode",
             Self::CursorContext => "cursor-context",
+            Self::LearnFromCorrections => "learn-from-corrections",
             Self::MoreDictationShortcuts => "more-dictation-shortcuts",
         }
     }
@@ -577,6 +581,7 @@ impl Feature {
             Self::ShellCompletions => "labs.shell_completions",
             Self::YoloMode => "labs.yolo_mode",
             Self::CursorContext => "labs.cursor_context",
+            Self::LearnFromCorrections => "labs.learn_from_corrections",
             Self::MoreDictationShortcuts => "labs.more_dictation_shortcuts",
         }
     }
@@ -669,6 +674,7 @@ impl Feature {
             Self::ShellCompletions => settings.labs.shell_completions,
             Self::YoloMode => settings.labs.yolo_mode,
             Self::CursorContext => settings.labs.cursor_context,
+            Self::LearnFromCorrections => settings.labs.learn_from_corrections,
             Self::MoreDictationShortcuts => settings.labs.more_dictation_shortcuts,
         }
     }
@@ -759,6 +765,7 @@ impl Feature {
             &mut labs.shell_completions,
             &mut labs.yolo_mode,
             &mut labs.cursor_context,
+            &mut labs.learn_from_corrections,
             &mut labs.more_dictation_shortcuts,
         ]
     }
@@ -856,6 +863,7 @@ impl Feature {
             Self::ShellCompletions => settings.labs.shell_completions = on,
             Self::YoloMode => settings.labs.yolo_mode = on,
             Self::CursorContext => settings.labs.cursor_context = on,
+            Self::LearnFromCorrections => settings.labs.learn_from_corrections = on,
             Self::MoreDictationShortcuts => settings.labs.more_dictation_shortcuts = on,
             // Off, no shortcut keeps a key only the feature allows.
             Self::StandaloneSpecialKeys => {
@@ -990,6 +998,10 @@ static SCREEN_VOCABULARY: AtomicBool = AtomicBool::new(false);
 /// once per dictation, and the state word has no bit for it.
 static CURSOR_CONTEXT: AtomicBool = AtomicBool::new(false);
 
+/// Labs › Learn from corrections' switch: the paste worker reads it as a
+/// paste commits, and the state word has no bit for it.
+static LEARN_FROM_CORRECTIONS: AtomicBool = AtomicBool::new(false);
+
 /// Labs › Voice prompt's switch: the state word is full too, so it has its
 /// own atomic, written by [`state`] and [`apply`].
 static VOICE_PROMPT: AtomicBool = AtomicBool::new(false);
@@ -1053,6 +1065,8 @@ fn state() -> u64 {
                 PRINT_START.store(print_start_enabled(&saved), Ordering::Release);
                 SCREEN_VOCABULARY.store(screen_vocabulary_enabled(&saved), Ordering::Release);
                 CURSOR_CONTEXT.store(cursor_context_enabled(&saved), Ordering::Release);
+                LEARN_FROM_CORRECTIONS
+                    .store(learn_from_corrections_enabled(&saved), Ordering::Release);
                 VOICE_PROMPT.store(voice_prompt_enabled(&saved), Ordering::Release);
                 COPY_CAPTURE_ZIP.store(copy_capture_zip_enabled(&saved), Ordering::Release);
                 K_QUANT_MODELS.store(k_quant_models_enabled(&saved), Ordering::Release);
@@ -1094,6 +1108,16 @@ fn cursor_context_enabled(settings: &LabsSettings) -> bool {
     settings.cursor_context
         && Feature::CursorContext.shipped()
         && Feature::CursorContext.managed().is_none()
+}
+
+/// Whether `settings` turn on Labs › Learn from corrections in this build,
+/// before its managed lock (`DisableCorrections` or `DisableLabs`); the state
+/// word has no bit for it.
+fn learn_from_corrections_enabled(settings: &LabsSettings) -> bool {
+    settings.learn_from_corrections
+        && Feature::LearnFromCorrections.on_this_os()
+        && Feature::LearnFromCorrections.shipped()
+        && Feature::LearnFromCorrections.managed().is_none()
 }
 
 /// Whether `settings` turn on Labs › Voice prompt in this build, before its
@@ -1213,6 +1237,7 @@ pub(crate) fn apply(settings: &LabsSettings) {
     PRINT_START.store(print_start_enabled(settings), Ordering::Release);
     SCREEN_VOCABULARY.store(screen_vocabulary_enabled(settings), Ordering::Release);
     CURSOR_CONTEXT.store(cursor_context_enabled(settings), Ordering::Release);
+    LEARN_FROM_CORRECTIONS.store(learn_from_corrections_enabled(settings), Ordering::Release);
     VOICE_PROMPT.store(voice_prompt_enabled(settings), Ordering::Release);
     COPY_CAPTURE_ZIP.store(copy_capture_zip_enabled(settings), Ordering::Release);
     K_QUANT_MODELS.store(k_quant_models_enabled(settings), Ordering::Release);
@@ -1459,6 +1484,7 @@ pub fn log_launch() {
         vocabulary_biasing = vocabulary_biasing(),
         screen_vocabulary = screen_vocabulary(),
         cursor_context = cursor_context(),
+        learn_from_corrections = learn_from_corrections(),
         history_multi_select = history_multi_select(),
         "labs"
     );
@@ -2328,6 +2354,40 @@ mod tests {
         assert_eq!(Feature::CursorContext.group(), Group::Output);
         assert_eq!(Feature::CursorContext.settings_key(), "labs.cursor_context");
         assert_eq!(Feature::CursorContext.name(), "cursor-context");
+    }
+
+    #[test]
+    fn learn_from_corrections_off_by_default() {
+        let labs = LabsSettings::default();
+        assert!(!labs.learn_from_corrections);
+        assert!(!learn_from_corrections_enabled(&labs));
+        assert!(!Feature::LearnFromCorrections.on(&AppSettings::default()));
+        assert_eq!(Feature::LearnFromCorrections.audience(), Audience::Everyone);
+        assert_eq!(Feature::LearnFromCorrections.group(), Group::Dictation);
+        assert_eq!(
+            Feature::LearnFromCorrections.settings_key(),
+            "labs.learn_from_corrections"
+        );
+        assert_eq!(
+            Feature::LearnFromCorrections.name(),
+            "learn-from-corrections"
+        );
+    }
+
+    #[test]
+    fn learn_from_corrections_macos_only() {
+        let labs = LabsSettings {
+            learn_from_corrections: true,
+            ..LabsSettings::default()
+        };
+        assert_eq!(
+            Feature::LearnFromCorrections.on_this_os(),
+            cfg!(target_os = "macos")
+        );
+        assert_eq!(
+            learn_from_corrections_enabled(&labs),
+            cfg!(target_os = "macos")
+        );
     }
 
     #[test]
