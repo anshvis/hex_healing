@@ -92,28 +92,38 @@ def run_recorded(converter: dict, inputs: Inputs) -> None:
 
 def eval_parity(version: registry.Version, gguf: Path) -> dict:
     """The default parity check: `healing eval` (no vocabulary) of the rebuild on the golden and general
-    sets the version has recorded WERs for. A set whose manifest changed since it was scored is not
-    comparable and is skipped; at least one set must compare."""
+    sets the version has recorded WERs for, with the dataset store open as the eval CLI has it (golden is
+    a dataset set). A set whose manifest changed since it was scored, or whose identity is unknown on
+    either side, is not comparable and is skipped; at least one set must match and compare."""
     from healing.eval import run as eval_run
+    from healing.store import Store
 
     recorded = {s: version.scores[s] for s in PARITY_SETS if (version.scores.get(s) or {}).get("wer") is not None}
     if not recorded:
         raise RestoreError(f"{version.name} has no recorded golden or general WER to check parity against")
-    document = eval_run.evaluate([gguf], list(recorded), vocabulary="none")
+    store = Store(sweep=False)
+    try:
+        document = eval_run.evaluate([gguf], list(recorded), vocabulary="none", store=store)
+    finally:
+        store.close()
     manifests = {s["set"]: s["manifest_sha256"] for s in document["sets"]}
     scores = document["scores"][str(gguf)]
     return compare(recorded, {s: (scores[s]["wer"], manifests.get(s)) for s in scores})
 
 
 def compare(recorded: dict, rebuilt: dict) -> dict:
-    """`rebuilt` is `{set: (wer, manifest sha)}`. Passes when every comparable set is within tolerance."""
+    """`rebuilt` is `{set: (wer, manifest sha)}`. Passes when at least one set positively matches by
+    manifest hash and every matching set is within tolerance."""
     sets, skipped = {}, {}
     for name, score in recorded.items():
         if name not in rebuilt or rebuilt[name][0] is None:
             skipped[name] = "not scored now"
             continue
         wer, manifest = rebuilt[name]
-        if score.get("set_sha256") and manifest and score["set_sha256"] != manifest:
+        if not score.get("set_sha256") or not manifest:
+            skipped[name] = "cannot identify the set (no manifest hash recorded or reported)"
+            continue
+        if score["set_sha256"] != manifest:
             skipped[name] = "the set changed since it was scored"
             continue
         sets[name] = {"recorded": score["wer"], "rebuilt": wer, "delta_pt": round((wer - score["wer"]) * 100, 4)}
@@ -160,7 +170,8 @@ def restore(name: str, *, checkout: Path | None = None, converter: Converter = r
         if not output.is_file():
             raise RestoreError("the converter wrote no GGUF")
         rebuilt = objects.sha256_file(output)
-        event: dict = {"event": "restored", "version": version.name, "rebuilt_sha256": rebuilt}
+        # `gguf_sha256` is the version's GGUF from now on, whichever way the rebuild was checked
+        event: dict = {"event": "restored", "version": version.name, "rebuilt_sha256": rebuilt, "gguf_sha256": rebuilt}
         if rebuilt == expected:
             event["method"] = "sha256"
         else:
@@ -168,7 +179,7 @@ def restore(name: str, *, checkout: Path | None = None, converter: Converter = r
             if not result.get("passed"):
                 raise RestoreError(
                     f"the rebuild hashes to {rebuilt[:12]}, not {str(expected)[:12]}, and fails WER parity: {result}")
-            event.update(method="wer_parity", gguf_sha256=rebuilt, parity=result)
+            event.update(method="wer_parity", parity=result)
         with registry.lock():
             objects.put(output, rebuilt)
             registry.append(event)

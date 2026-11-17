@@ -123,15 +123,18 @@ class Version:
 
     @property
     def gguf(self) -> str | None:
-        """The GGUF Hex would run: the recorded one, or a parity-checked rebuild's after a restore."""
+        """The GGUF Hex would run: the latest successful restore's (a hash match is the recorded file, a
+        parity restore its rebuild), else the recorded one."""
         for restore in reversed(self.restores):
-            if restore.get("gguf_sha256"):
-                return restore["gguf_sha256"]
+            found = restore.get("gguf_sha256") or restore.get("rebuilt_sha256")
+            if found:
+                return found
         return self.artifact("gguf")
 
     def ggufs(self) -> set[str]:
         """Every GGUF hash that is this version: recorded and restored."""
-        return {s for s in [self.artifact("gguf"), *(r.get("gguf_sha256") for r in self.restores)] if s}
+        restored = [r.get("gguf_sha256") or r.get("rebuilt_sha256") for r in self.restores]
+        return {s for s in [self.artifact("gguf"), *restored] if s}
 
     def as_dict(self) -> dict:
         return {**self.record, "version": self.name, "state": self.state, "reason": self.reason,
@@ -194,6 +197,8 @@ def fold(events: list[dict]) -> State:
                 state.current = event.get("to") or _fallback(state, name)
         elif kind == "restored":
             version.restores.append({k: v for k, v in event.items() if k not in ("event", "version")})
+            for sha in (event.get("gguf_sha256"), event.get("rebuilt_sha256")):
+                version.pruned.pop(sha, None)  # the file is back; pruning it again is a new event
         elif kind == "pruned_artifact":
             version.pruned[event["sha256"]] = event["kind"]
     return state
@@ -225,18 +230,20 @@ def register(record: dict) -> str:
         return name
 
 
+# Every event names the resolved version (`v<n>`), never the alias `current`, which fold can't read.
+
 def record_scores(name: str, scores: dict) -> None:
     with lock():
-        load().get(name)
-        append({"event": "scored", "version": name, "scores": scores})
+        version = load().get(name)
+        append({"event": "scored", "version": version.name, "scores": scores})
 
 
 def promote(name: str, reason: str | None = None) -> None:
     with lock():
         version = load().get(name)
         if version.state != "candidate":
-            raise RegistryError(f"{name} is {version.state}; only a candidate is promoted")
-        append({"event": "promoted", "version": name, "reason": reason})
+            raise RegistryError(f"{version.name} is {version.state}; only a candidate is promoted")
+        append({"event": "promoted", "version": version.name, "reason": reason})
         retain()
 
 
@@ -244,20 +251,30 @@ def reject(name: str, reason: str) -> None:
     with lock():
         version = load().get(name)
         if version.state != "candidate":
-            raise RegistryError(f"{name} is {version.state}; only a candidate is rejected")
-        append({"event": "rejected", "version": name, "reason": reason})
+            raise RegistryError(f"{version.name} is {version.state}; only a candidate is rejected")
+        append({"event": "rejected", "version": version.name, "reason": reason})
         retain()
 
 
 def roll_back(name: str, reason: str, to: str | None = None) -> None:
+    """Roll back a promoted version. When it is current, a distinct, still-promoted successor (`to`, else
+    the latest other promoted version) becomes current, so exactly one version stays current."""
     with lock():
         state = load()
         version = state.get(name)
         if version.state != "promoted":
-            raise RegistryError(f"{name} is {version.state}; only a promoted version rolls back")
-        if to is not None and state.get(to).state != "promoted":
-            raise RegistryError(f"{to} is not promoted, so it cannot become current")
-        append({"event": "rolled_back", "version": name, "reason": reason, **({"to": to} if to else {})})
+            raise RegistryError(f"{version.name} is {version.state}; only a promoted version rolls back")
+        successor = state.get(to).name if to is not None else None
+        if successor == version.name:
+            raise RegistryError(f"{version.name} cannot roll back to itself")
+        if successor is not None and state.versions[successor].state != "promoted":
+            raise RegistryError(f"{successor} is not promoted, so it cannot become current")
+        if version.name == state.current and successor is None:
+            successor = _fallback(state, version.name)
+            if successor is None:
+                raise RegistryError(f"{version.name} is current and no other promoted version could take over")
+        append({"event": "rolled_back", "version": version.name, "reason": reason,
+                **({"to": successor} if successor else {})})
         retain()
 
 
@@ -297,7 +314,7 @@ def gguf_keepers(state: State) -> set[str]:
 
 def retain() -> list[tuple[str, str, str]]:
     """Delete the GGUFs (and merged NeMo checkpoints, dropped once exported) retention no longer keeps,
-    appending `pruned_artifact` for each file removed. Metadata, snapshots and LoRA deltas stay forever.
+    appending `pruned_artifact` (before the unlink) for each file removed. Metadata, snapshots and LoRA deltas stay forever.
     An object a kept version still names is not deleted, and a version restored on demand keeps its
     file only until the next state change. The caller holds `lock()`."""
     state = load()
@@ -312,8 +329,13 @@ def retain() -> list[tuple[str, str, str]]:
         if version.artifact("merged_nemo"):
             doomed.append(("merged_nemo", version.artifact("merged_nemo")))
         for kind, sha in doomed:
-            if sha in needed or not objects.remove(sha):
+            if sha in needed or not objects.path(sha).is_file():
                 continue
-            append({"event": "pruned_artifact", "version": version.name, "kind": kind, "sha256": sha})
-            pruned.append((version.name, kind, sha))
+            # The event is the intent and goes first: a crash before the unlink leaves an event whose
+            # file still exists, which the next retain removes without a second event.
+            if version.pruned.get(sha) != kind:
+                append({"event": "pruned_artifact", "version": version.name, "kind": kind, "sha256": sha})
+                version.pruned[sha] = kind
+                pruned.append((version.name, kind, sha))
+            objects.remove(sha)
     return pruned

@@ -233,7 +233,7 @@ def test_snapshot_from_a_train_row_and_reproducibility(env):
         candidate(env, 1, "--train", "train-v0-x")
         dataset = registry.load().get("v1").record["dataset"]
         assert dataset == {"snapshot_sha256": snap.sha256, "snapshot_path": f"snapshots/{snap.sha256}.jsonl.gz",
-                           "train_split": "train-v0-x", "train_n": 2, "strong_n": 1, "weak_n": 1}
+                           "train_split": "train-v0-x", "train_n": 2, "strong_n": 1, "weak_n": 1, "weights_frozen": False}
         assert snapshots.snapshot_path(snap.sha256).is_file()
         assert show(registry.load(), "v1")["reproducible"] == "partial"  # the weak clip's audio is gone
         candidate(env, 2, "--snapshot", snap.sha256)  # a stored snapshot, by hash
@@ -375,7 +375,7 @@ def test_restore_rebuilds_a_deleted_gguf_byte_identical(env, capsys):
     assert "sha256 matches" in capsys.readouterr().out
     assert objects.has(sha) and objects.sha256_file(objects.path(sha)) == sha
     (event,) = [e for e in registry.read_events() if e["event"] == "restored"]
-    assert event["method"] == "sha256" and event["rebuilt_sha256"] == sha and "gguf_sha256" not in event
+    assert event["method"] == "sha256" and event["rebuilt_sha256"] == sha and event["gguf_sha256"] == sha
 
 
 def test_restore_of_a_non_deterministic_converter_records_wer_parity(env, monkeypatch):
@@ -439,3 +439,174 @@ def test_restore_needs_the_base_and_delta_objects(env):
         restore_module.restore("v1")
     with pytest.raises(restore_module.RestoreError, match="base model"):
         restore_module.restore("v0")
+
+
+# ---- review fixes (Codex on 2f44f91c) -----------------------------------------------------------
+
+def test_register_base_resumes_an_init_interrupted_before_promotion(env, capsys):
+    sha = objects.sha256_file(env.catalog)
+    with registry.lock():  # a crash between the `registered` and `promoted` lines
+        registry.append({"event": "registered", "version": "v0", "base": {"catalog_id": CATALOG_ID, "gguf_sha256": sha},
+                         "parent": None, "arch": "parakeet-unified", "artifacts": {"lora_delta": None, "gguf": sha}})
+    assert registry.load().current is None
+    base(env)
+    state = registry.load()
+    assert state.current == "v0" and state.get("v0").state == "promoted" and objects.has(sha)
+    assert "resumed" in capsys.readouterr().out
+
+
+def test_parity_eval_scores_golden_with_the_dataset_store(env, monkeypatch, tmp_path):
+    from healing.eval import run as eval_run
+
+    gguf = env.write("rebuilt.gguf", b"x")
+    seen = {}
+
+    def evaluate(models, sets, **kwargs):
+        seen.update(kwargs)
+        golden = kwargs.get("store") is not None  # golden is a dataset set: unavailable without the store
+        return {"sets": [{"set": "golden", "manifest_sha256": "g" * 64}] if golden else [],
+                "scores": {str(gguf): {"golden": {"wer": 0.04}} if golden else {}}}
+
+    monkeypatch.setattr(eval_run, "evaluate", evaluate)
+    version = registry.Version("v1", {}, scores={"golden": {"wer": 0.0402, "set_sha256": "g" * 64}})
+    result = restore_module.eval_parity(version, gguf)
+    assert seen["store"] is not None and seen["vocabulary"] == "none"
+    assert result["passed"] and "golden" in result["sets"]
+
+
+def test_events_record_the_resolved_version_name(env):
+    base(env)
+    candidate(env, 1)
+    registry.promote("v1")
+    registry.record_scores("current", {"general": {"wer": 0.05}})
+    registry.roll_back("current", "worse after promotion")
+    events = registry.read_events()
+    assert "current" not in {e.get("version") for e in events}
+    state = registry.load()  # the log still reads
+    assert state.get("v1").scores["general"]["wer"] == 0.05 and state.current == "v0"
+
+
+def test_roll_back_needs_a_distinct_still_promoted_successor(env):
+    base(env)
+    with pytest.raises(registry.RegistryError, match="no other promoted"):
+        registry.roll_back("v0", "the only promoted version")
+    candidate(env, 1)
+    registry.promote("v1")
+    with pytest.raises(registry.RegistryError, match="itself"):
+        registry.roll_back("v1", "x", to="v1")
+    candidate(env, 2)
+    with pytest.raises(registry.RegistryError, match="not promoted"):
+        registry.roll_back("v1", "x", to="v2")
+    assert registry.load().current == "v1"
+    registry.roll_back("v1", "worse", to="v0")
+    assert registry.load().current == "v0"
+
+
+def test_snapshot_hashes_the_weights_the_train_row_froze(env):
+    from dataset import add_clip
+
+    store = Store()
+    try:
+        clip = add_clip(store, 1, raw="send it to kip", label="strong", reference="send it to kit")
+        store.db.execute("UPDATE clips SET weight = 1.0")
+        detail = {"members": {clip: ["send it to kit", "send it to kip"]}, "weights": {clip: 1.0}}
+        store.db.execute("INSERT INTO splits (split_id, kind, created_at_ms, frozen, detail) VALUES ('train-y', 'train', 1, 0, ?)",
+                         (json.dumps(detail),))
+        store.db.execute("UPDATE splits SET frozen = 1 WHERE split_id = 'train-y'")
+        first = snapshots.from_train(store.db, "train-y")
+        store.db.execute("UPDATE clips SET weight = 0.2, label = 'weak'")  # relabelled after training
+        again = snapshots.from_train(store.db, "train-y")
+        assert again.sha256 == first.sha256 and again.rows[0][3] == 1.0 and again.weights_frozen
+    finally:
+        store.close()
+
+
+def test_put_replaces_a_corrupt_stored_object(env):
+    source = env.write("model.gguf", b"good bytes")
+    sha = objects.put(source)
+    objects.path(sha).write_bytes(b"rotten bytes")
+    assert objects.put(source) == sha
+    assert objects.sha256_file(objects.path(sha)) == sha
+
+
+def test_a_corrupt_gguf_object_is_repaired_by_a_hash_restore(env):
+    base(env)
+    sha = candidate(env, 1)
+    objects.path(sha).write_bytes(b"bit rot")
+    assert restore_module.restore("v1")["method"] == "sha256"
+    assert objects.sha256_file(objects.path(sha)) == sha
+
+
+def test_a_later_hash_restore_supersedes_a_parity_restore(env, monkeypatch):
+    base(env)
+    original = candidate(env, 1)
+    registry.record_scores("v1", {"general": {"wer": 0.05, "set_sha256": "5" * 64}})
+    monkeypatch.setenv("NONDETERMINISTIC", "1")
+    parity = restore_module.restore(
+        "v1", parity=lambda v, g: restore_module.compare(v.scores, {"general": (0.05, "5" * 64)}))
+    assert registry.load().get("v1").gguf == parity["gguf_sha256"] != original
+    monkeypatch.delenv("NONDETERMINISTIC")
+    event = restore_module.restore("v1")
+    assert event["method"] == "sha256" and event["gguf_sha256"] == original
+    assert registry.load().get("v1").gguf == original
+
+
+def test_parity_ignores_scores_whose_set_cannot_be_identified():
+    unnamed = restore_module.compare({"general": {"wer": 0.05}}, {"general": (0.05, "a")})
+    assert not unnamed["passed"] and "identify" in unnamed["skipped"]["general"]
+    unknown_now = restore_module.compare({"general": {"wer": 0.05, "set_sha256": "a"}}, {"general": (0.05, None)})
+    assert not unknown_now["passed"] and "identify" in unknown_now["skipped"]["general"]
+
+
+def test_current_reports_an_unverifiable_v0_file(env, capsys):
+    base(env)
+    env.catalog.unlink()
+    capsys.readouterr()
+    code = cli("models", "current", "--hex", env.hex)
+    out = capsys.readouterr().out
+    assert code == 4 and "unverifiable" in out and "matches" not in out
+
+
+def test_a_prune_interrupted_by_a_crash_is_finished_and_recorded(env, monkeypatch):
+    base(env)
+    shas = {n: candidate(env, n) for n in (1, 2)}
+    real_append, real_remove = registry.append, objects.remove
+
+    def crash_on_prune(*events):
+        if any(e["event"] == "pruned_artifact" for e in events):
+            raise KeyboardInterrupt("crash")
+        real_append(*events)
+
+    monkeypatch.setattr(registry, "append", crash_on_prune)
+    with pytest.raises(KeyboardInterrupt):
+        registry.reject("v1", "failed the gate")
+    monkeypatch.setattr(registry, "append", real_append)
+
+    def crash_on_remove(sha):
+        raise KeyboardInterrupt("crash")
+
+    monkeypatch.setattr(objects, "remove", crash_on_remove)
+    with registry.lock(), pytest.raises(KeyboardInterrupt):
+        registry.retain()
+    monkeypatch.setattr(objects, "remove", real_remove)
+    with registry.lock():
+        registry.retain()
+    pruned = [e for e in registry.read_events() if e["event"] == "pruned_artifact"]
+    assert [(e["version"], e["sha256"]) for e in pruned] == [("v1", shas[1])]
+    assert not objects.has(shas[1]) and objects.has(shas[2])
+
+
+def test_new_object_folders_are_fsynced_in_their_parents(env, monkeypatch):
+    synced = []
+    real = objects.fsync_dir
+    monkeypatch.setattr(objects, "fsync_dir", lambda path: (synced.append(Path(path)), real(path)))
+    sha = objects.put(env.write("model.gguf", b"bytes"))
+    assert objects.registry_dir() in synced  # holds the new `objects` entry
+    assert objects.objects_dir() in synced  # holds the new `<aa>` entry
+    assert objects.path(sha).parent in synced  # holds the object
+
+
+def test_hexcli_reads_a_pretty_printed_reply():
+    from healing import hexcli
+
+    assert hexcli.reply('note\n{\n  "status": "models",\n  "models": []\n}\n') == {"status": "models", "models": []}

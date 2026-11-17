@@ -6,8 +6,8 @@ is over those uncompressed lines, so the order rows arrive in never changes it a
 compression. The file is `registry/snapshots/<sha>.jsonl.gz` (gzip at level 9 with no name or time in
 its header, D-42: stdlib only, no new dependency), written once.
 
-The reference text is the one the train row stored when it handed the clip out, not the clip's text
-now, so a later relabel cannot change what the snapshot says the model saw.
+The reference text and the weight are the ones the train row stored when it handed the clip out, not
+the clip's now, so a later relabel cannot change what the snapshot says the model saw.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ class Snapshot:
     strong_n: int = 0
     weak_n: int = 0
     split_id: str | None = None
+    weights_frozen: bool = True  # False for a train row made before `snapshot_train` stored weights
 
     @property
     def train_n(self) -> int:
@@ -64,26 +65,31 @@ def digest(rows) -> str:
 
 
 def from_train(db, split_id: str) -> Snapshot:
-    """The snapshot of a frozen `train` row: each member's audio hash, the reference text the row stored
-    for it, and its weight."""
+    """The snapshot of a frozen `train` row: each member's audio hash, and the reference text and weight
+    the row stored for it (D-44), so a relabel after training changes neither the lines nor the hash. A
+    row from before weights were stored falls back to the live weight and says so (`weights_frozen`)."""
     row = db.execute("SELECT kind, frozen, detail FROM splits WHERE split_id = ?", (split_id,)).fetchone()
     if row is None:
         raise SnapshotError(f"no split {split_id!r}")
     if row["kind"] != "train" or not row["frozen"]:
         raise SnapshotError(f"{split_id} is not a frozen train snapshot (`splits.snapshot_train` makes those)")
-    members = json.loads(row["detail"] or "{}").get("members", {})
+    detail = json.loads(row["detail"] or "{}")
+    members = detail.get("members", {})
+    frozen_weights = detail.get("weights")
     rows, strong, weak = [], 0, 0
     for clip_id, texts in members.items():
         clip = db.execute("SELECT audio_sha256, weight, label, raw_text FROM clips WHERE clip_id = ?", (clip_id,)).fetchone()
         if clip is None:
             raise SnapshotError(f"{split_id}: clip {clip_id} is gone from the dataset")
         reference = texts[0] if texts else clip["raw_text"]
-        rows.append((clip_id, clip["audio_sha256"], text_sha256(reference), float(clip["weight"])))
+        weight = frozen_weights.get(clip_id) if isinstance(frozen_weights, dict) else None
+        rows.append((clip_id, clip["audio_sha256"], text_sha256(reference), float(clip["weight"] if weight is None else weight)))
         strong += clip["label"] == "strong"
         weak += clip["label"] == "weak"
     if not rows:
         raise SnapshotError(f"{split_id} has no members")
-    return Snapshot(digest(rows), rows, strong, weak, split_id)
+    frozen = isinstance(frozen_weights, dict) and all(c in frozen_weights for c in members)
+    return Snapshot(digest(rows), rows, strong, weak, split_id, frozen)
 
 
 def write(snapshot: Snapshot) -> Path:

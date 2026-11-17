@@ -376,7 +376,7 @@ def snapshot_train(
     (`Zones.may_train`), read from live data inside one write transaction, so it is right after a
     review no build has seen and a concurrent golden review or snapshot cannot decide on stale facts.
     A frozen `train` row is written for `parent` whose members are exactly the returned clips (weak
-    ones too when asked), with `model`, `note` and each member's texts in its detail: `Zones` and
+    ones too when asked), with `model`, `note`, each member's texts and its weight in its detail: `Zones` and
     `verify` read those texts, not the clips' current ones. Every cluster in a recorded snapshot is then
     closed to golden, random review and test eligibility. Nothing is recorded when there is nothing
     to hand out.
@@ -394,6 +394,7 @@ def snapshot_train(
         detail = {
             "model": model, "note": note, "include_weak": include_weak,
             "members": {r["clip_id"]: _texts(r) for r in rows},
+            "weights": {r["clip_id"]: float(r["weight"]) for r in rows},  # what training weighs each by (D-44)
         }
         words = sum(len(normalized_words(r["reference_text"] or r["raw_text"])) for r in rows)
         db.execute(

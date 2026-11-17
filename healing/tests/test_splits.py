@@ -663,6 +663,7 @@ def test_a_clip_that_became_trainable_after_the_last_build_is_recorded_when_hand
     detail = json.loads(row_["detail"])
     assert (detail["model"], detail["note"], detail["include_weak"]) == ("m1", "first run", False)
     assert set(detail["members"]) == set(handed)
+    assert detail["weights"] == {c: row(store, c)["weight"] for c in handed}  # frozen for M5's snapshot (D-44)
     with pytest.raises(sqlite3.DatabaseError):
         store.db.execute("INSERT INTO split_members VALUES (?, ?)", (row_["split_id"], fresh + "x"))
     assert splits.verify(store) == []

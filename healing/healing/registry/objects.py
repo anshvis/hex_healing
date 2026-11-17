@@ -27,17 +27,27 @@ def objects_dir() -> Path:
     return registry_dir() / "objects"
 
 
-def owner_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path, 0o700)
-
-
 def fsync_dir(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def owner_dir(path: Path) -> None:
+    """Make `path` (0700) and any missing ancestors, fsyncing each new folder's parent so its entry is
+    durable, not only the files later written inside it."""
+    if path.is_dir():
+        os.chmod(path, 0o700)
+        return
+    owner_dir(path.parent)
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    os.chmod(path, 0o700)
+    fsync_dir(path.parent)
 
 
 def sha256_file(path: Path) -> str:
@@ -62,14 +72,15 @@ def has(sha256: str | None) -> bool:
 
 
 def put(source: Path, sha256: str | None = None) -> str:
-    """Store `source`; returns its SHA-256. A copy that does not hash to `sha256` (when given) is refused,
-    and an object already present is kept as it is."""
+    """Store `source`; returns its SHA-256. A copy that does not hash to `sha256` (when given) is refused.
+    An object already present is kept only when it still hashes to its name; otherwise it is atomically
+    replaced."""
     digest = sha256_file(source)
     if sha256 is not None and digest != sha256:
         raise ValueError(f"{source} hashes to {digest[:12]}, not {sha256[:12]}")
     target = path(digest)
-    if target.is_file():
-        return digest
+    if target.is_file() and sha256_file(target) == digest:
+        return digest  # a stored copy that no longer matches its name is replaced below
     owner_dir(objects_dir())
     owner_dir(target.parent)
     descriptor, scratch = tempfile.mkstemp(prefix=digest + ".", suffix=".tmp", dir=target.parent)

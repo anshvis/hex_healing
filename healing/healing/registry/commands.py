@@ -13,6 +13,7 @@ import shlex
 import sys
 from pathlib import Path
 
+from healing import hexcli
 from healing.paths import healing_home, hex_support_dir, repo_root
 from healing.registry import objects
 from healing.registry import restore as restore_module
@@ -23,6 +24,7 @@ from healing.registry.store import RegistryError
 ARCH_BY_CATALOG_ID = {"parakeet-unified-en-0.6b": "parakeet-unified", "parakeet-tdt-0.6b-v2": "tdt-v2"}
 ARCHES = ("parakeet-unified", "tdt-v2")
 SCORE_SETS = ("rolling", "golden", "general", "edited")
+EXIT_UNVERIFIABLE = 4  # `current`: Hex's file could not be checked (1 is a mismatch, 3 Hex not running)
 
 
 class CommandError(RuntimeError):
@@ -35,15 +37,13 @@ class CommandError(RuntimeError):
 
 def hex_models(binary: Path) -> list[dict]:
     """`hex model list --json` (`ControlReply::Models`, src/control.rs): `{status: "models", models: [...]}`."""
-    from healing.vocab.apply import ApplyError, HexNotRunning, _reply, _run
-
     try:
-        done = _run(binary, ["model", "list", "--json"])
-    except HexNotRunning as error:
-        raise CommandError(str(error), 3) from error
-    except ApplyError as error:
+        done = hexcli.run(binary, ["model", "list", "--json"])
+    except hexcli.HexNotRunning as error:
+        raise CommandError(str(error), hexcli.EXIT_NOT_RUNNING) from error
+    except hexcli.HexError as error:
         raise CommandError(str(error)) from error
-    reply = _reply(done.stdout)
+    reply = hexcli.reply(done.stdout)
     if not reply or reply.get("status") != "models" or not isinstance(reply.get("models"), list):
         raise CommandError("hex model list --json printed something this version cannot read")
     return reply["models"]
@@ -146,10 +146,10 @@ def register_base(binary: Path | None, gguf: Path | None, model_id: str | None, 
     with registry.lock():
         state = registry.load()
         if "v0" in state.versions:
-            pinned = state.versions["v0"].artifact("gguf")
-            if pinned == sha:
-                return [f"v0 is already {model_id} at {sha[:12]}"]
-            raise CommandError(f"v0 is pinned at {str(pinned)[:12]}; {gguf} is {sha[:12]}. v0 never moves")
+            v0 = state.versions["v0"]
+            if v0.artifact("gguf") != sha:
+                raise CommandError(f"v0 is pinned at {str(v0.artifact('gguf'))[:12]}; {gguf} is {sha[:12]}. v0 never moves")
+            return _resume_base(state, v0, gguf, sha, model_id, scores_file)
         objects.put(gguf, sha)
         scores = recorded_scores(sha, scores_file)
         registry.append(
@@ -164,6 +164,28 @@ def register_base(binary: Path | None, gguf: Path | None, model_id: str | None, 
     lines = [f"v0: {model_id}, gguf {sha[:12]} ({objects.hex_model_id(sha)}), current"]
     lines.append("scores: " + (", ".join(f"{k} {_pct(v.get('wer'))}" for k, v in scores.items()) or "none recorded"))
     return lines
+
+
+def _resume_base(state: registry.State, v0: registry.Version, gguf: Path, sha: str, model_id: str,
+                 scores_file: Path | None) -> list[str]:
+    """Finish an init a crash interrupted (between the `registered`, `promoted` and `scored` lines, or
+    before the object was stored); with nothing left to do, say v0 is already registered. The caller
+    holds the lock."""
+    done = []
+    if not objects.has(sha):
+        objects.put(gguf, sha)
+        done.append("stored its GGUF")
+    if state.current is None and not state.promotions and v0.state == "candidate":
+        registry.append({"event": "promoted", "version": "v0", "reason": "base"})
+        done.append("made it current")
+    if not v0.scores:
+        scores = recorded_scores(sha, scores_file)
+        if scores:
+            registry.append({"event": "scored", "version": "v0", "scores": scores})
+            done.append("recorded its scores")
+    if done:
+        return [f"v0 ({model_id} at {sha[:12]}): resumed an interrupted register-base: " + ", ".join(done)]
+    return [f"v0 is already {model_id} at {sha[:12]}"]
 
 
 def _dataset(train: str | None, snapshot_sha: str | None) -> dict | None:
@@ -184,7 +206,8 @@ def _dataset(train: str | None, snapshot_sha: str | None) -> dict | None:
         store.close()
     snapshots.write(snap)
     return {"snapshot_sha256": snap.sha256, "snapshot_path": str(snapshots.snapshot_path(snap.sha256).relative_to(objects.registry_dir())),
-            "train_split": train, "train_n": snap.train_n, "strong_n": snap.strong_n, "weak_n": snap.weak_n}
+            "train_split": train, "train_n": snap.train_n, "strong_n": snap.strong_n, "weak_n": snap.weak_n,
+            "weights_frozen": snap.weights_frozen}
 
 
 def register(args) -> list[str]:
@@ -259,7 +282,8 @@ def show(state: registry.State, name: str) -> dict:
 
 
 def current(binary: Path) -> tuple[list[str], int]:
-    """The current version against Hex's selected model. Exit 1 on a mismatch, never fixed here."""
+    """The current version against Hex's selected model. Exit 1 on a mismatch and `EXIT_UNVERIFIABLE` when
+    the catalog file Hex runs can't be hashed; neither is ever fixed here."""
     version = registry.load().get("current")
     lines = [f"current {version.name}, gguf {(version.gguf or '-')[:12]}"]
     model = selected_model(binary)
@@ -270,9 +294,11 @@ def current(binary: Path) -> tuple[list[str], int]:
         if model["id"] == (version.record.get("base") or {}).get("catalog_id"):
             try:
                 on_disk = objects.sha256_file(catalog_file(model["id"]))
-            except (CommandError, OSError):
-                on_disk = None
-            if on_disk and on_disk not in version.ggufs():
+            except (CommandError, OSError) as error:
+                lines.append(f"unverifiable: Hex runs {model['id']}, but its file could not be hashed ({error}), "
+                             f"so it may not be the pinned {(version.gguf or '-')[:12]}")
+                return lines, EXIT_UNVERIFIABLE
+            if on_disk not in version.ggufs():
                 lines.append(f"mismatch: Hex runs {model['id']}, but its file is now {on_disk[:12]}, not the pinned "
                              f"{(version.gguf or '-')[:12]} (a catalog update; not changed)")
                 return lines, 1
