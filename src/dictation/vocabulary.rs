@@ -504,6 +504,53 @@ pub fn add(
     }
 }
 
+/// Checks a whole list for `hex vocabulary set`, all or nothing, with the
+/// rules of [`add`], and returns it cleaned (whitespace collapsed, repeated
+/// spellings dropped). A second entry for a term already listed, in any
+/// case, is refused, and so is a list past [`MAX_ENTRIES`]; nothing is cut.
+/// The error names the entry's position (from 0) and the rule.
+pub fn validate_list(entries: &[VocabularyEntry]) -> Result<Vec<VocabularyEntry>, String> {
+    if entries.len() > MAX_ENTRIES {
+        return Err(format!(
+            "the vocabulary holds at most {MAX_ENTRIES} terms, not {}",
+            entries.len()
+        ));
+    }
+    let mut list: Vec<VocabularyEntry> = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        if contains(&list, &entry.term) {
+            return Err(format!(
+                "entry {index}: “{}” repeats an earlier term",
+                clean(&entry.term)
+            ));
+        }
+        add(&mut list, &entry.term, &entry.sounds_like)
+            .map_err(|message| format!("entry {index}: {message}"))?;
+    }
+    Ok(list)
+}
+
+/// The list `hex vocabulary set --file` names: a JSON array of terms.
+pub fn read_list_file(path: &Path) -> Result<Vec<VocabularyEntry>, String> {
+    // The cap is generous: 500 entries of 16 long spellings is far smaller.
+    const LIMIT: u64 = 4 * 1024 * 1024;
+    let mut text = String::new();
+    std::io::Read::read_to_string(
+        &mut std::io::Read::take(
+            std::fs::File::open(path)
+                .map_err(|error| format!("couldn't read {}: {error}", path.display()))?,
+            LIMIT + 1,
+        ),
+        &mut text,
+    )
+    .map_err(|error| format!("couldn't read {}: {error}", path.display()))?;
+    if text.len() as u64 > LIMIT {
+        return Err(format!("{} is larger than 4 MiB", path.display()));
+    }
+    serde_json::from_str(&text)
+        .map_err(|error| format!("{} isn't a JSON array of terms: {error}", path.display()))
+}
+
 /// Like [`add`], but keeps what fits instead of refusing: a long term is cut
 /// to its first 64 characters, and a long spelling or one past the 16th is
 /// left out. A full list still takes no new term. Returns whether anything
@@ -833,5 +880,52 @@ mod tests {
         std::fs::write(&path, "{").unwrap();
         assert!(read_from(&path).is_err());
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn validate_list_keeps_order_and_refuses_the_whole_list_on_one_bad_entry() {
+        let list = [entry("B", &["bee", "BEE"]), entry(" A  a ", &[])];
+        assert_eq!(
+            validate_list(&list).unwrap(),
+            [entry("B", &["bee"]), entry("A a", &[])]
+        );
+        let error = validate_list(&[entry("A", &[]), entry("a", &[])]).unwrap_err();
+        assert!(
+            error.starts_with("entry 1:") && error.contains("repeats"),
+            "{error}"
+        );
+        let error = validate_list(&[entry("A", &[]), entry(" ", &[])]).unwrap_err();
+        assert!(error.starts_with("entry 1:"), "{error}");
+        let long = "x".repeat(65);
+        assert!(
+            validate_list(&[entry("A", &[&long])])
+                .unwrap_err()
+                .starts_with("entry 0:")
+        );
+        let many: Vec<_> = (0..=MAX_ENTRIES)
+            .map(|n| entry(&format!("t{n}"), &[]))
+            .collect();
+        assert!(validate_list(&many).unwrap_err().contains("at most 500"));
+        assert_eq!(
+            validate_list(&many[..MAX_ENTRIES]).unwrap().len(),
+            MAX_ENTRIES
+        );
+    }
+
+    #[test]
+    fn list_file_reads_terms_and_objects_in_order_and_names_a_bad_file() {
+        let dir = std::env::temp_dir().join(format!("hex-vocab-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.json");
+        std::fs::write(&good, r#"["B", {"term": "A", "sounds_like": ["ay"]}]"#).unwrap();
+        assert_eq!(
+            read_list_file(&good).unwrap(),
+            [entry("B", &[]), entry("A", &["ay"])]
+        );
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, r#"{"term": "A"}"#).unwrap();
+        assert!(read_list_file(&bad).unwrap_err().contains("JSON array"));
+        assert!(read_list_file(&dir.join("missing.json")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
