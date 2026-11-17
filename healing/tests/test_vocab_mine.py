@@ -46,14 +46,14 @@ def terms(store, **kwargs):
 
 
 def test_twice_makes_candidate(store):
-    pairs(store, "kip", "Kit", 2)
-    c = terms(store)["Kit"]
+    pairs(store, "kip", "Kitt", 2)
+    c = terms(store)["Kitt"]
     assert c.sounds_like == ["kip"] and c.pair_count == 2 and c.source_split == "all"
-    assert vocab.line(c).startswith("Kit ← kip ×2")
+    assert vocab.line(c).startswith("Kitt ← kip ×2")
 
 
 def test_once_does_not(store):
-    pairs(store, "kip", "Kit", 1)
+    pairs(store, "kip", "Kitt", 1)
     assert terms(store) == {}
     assert vocab.mine(store, min_pairs=2, now=NOW).conflicts == []
 
@@ -75,7 +75,7 @@ def test_multi_word_term_is_not_judged_as_a_common_word(store):
 
 
 def test_conflict_yields_none(store):
-    pairs(store, "kip", "Kit", 2)
+    pairs(store, "kip", "Kitt", 2)
     pairs(store, "kip", "Kipp", 2)
     pairs(store, "roon", "Rune", 2)
     mined = vocab.mine(store, now=NOW)
@@ -84,18 +84,18 @@ def test_conflict_yields_none(store):
 
 
 def test_a_casing_only_target_contests_the_spelling_too(store):
-    pairs(store, "kip", "Kit", 2)
+    pairs(store, "kip", "Kitt", 2)
     pairs(store, "kip", "Kip", 2)  # you also kept "kip" as a name
     mined = vocab.mine(store, now=NOW)
     assert mined.candidates == [] and mined.conflicts
 
 
 def test_casing_variants_merge_and_the_most_frequent_wins(store):
-    pairs(store, "kip", "Kit", 2)
-    pairs(store, "kip", "KIT", 1)
-    pairs(store, "kipp", "kit", 1)
-    pairs(store, "kipp", "Kit", 1)
-    c = terms(store)["Kit"]
+    pairs(store, "kip", "Kitt", 2)
+    pairs(store, "kip", "KITT", 1)
+    pairs(store, "kipp", "kitt", 1)
+    pairs(store, "kipp", "Kitt", 1)
+    c = terms(store)["Kitt"]
     assert c.pair_count == 5 and c.spellings == (("kip", 3), ("kipp", 2))
 
 
@@ -114,7 +114,7 @@ def test_limits_apply(store):
 
 
 def test_only_strong_acoustic_evidence_counts(store):
-    pairs(store, "kip", "Kit", 2, label="weak")
+    pairs(store, "kip", "Kitt", 2, label="weak")
     pairs(store, "roon", "Rune", 1)
     cid = pairs(store, "roon", "Rune", 1)[0]
     store.db.execute("UPDATE edits SET kind = 'rewrite' WHERE clip_id = ?", (cid,))
@@ -122,13 +122,13 @@ def test_only_strong_acoustic_evidence_counts(store):
 
 
 def test_rank_is_decayed_recent_use_then_pairs(store):
-    pairs(store, "kip", "Kit", 2, age_days=2, about="send")
+    pairs(store, "kip", "Kitt", 2, age_days=2, about="send")
     pairs(store, "roon", "Rune", 2, age_days=25, about="ping")
     ranked = {c.term: c for c in vocab.mine(store, now=NOW).candidates}
     # a use two days ago outweighs the same use twenty-five days ago
-    assert ranked["Kit"].recent_uses == ranked["Rune"].recent_uses == 2
-    assert ranked["Kit"].score > ranked["Rune"].score
-    assert [c.term for c in vocab.mine(store, now=NOW).candidates] == ["Kit", "Rune"]
+    assert ranked["Kitt"].recent_uses == ranked["Rune"].recent_uses == 2
+    assert ranked["Kitt"].score > ranked["Rune"].score
+    assert [c.term for c in vocab.mine(store, now=NOW).candidates] == ["Kitt", "Rune"]
     pairs(store, "roon", "Rune", 3, age_days=25, about="ping")  # more pairs and more uses, but older
     add_clip(store, 5000, raw="x", final="we use Rune here", ts=NOW - 25 * DAY, label="weak", audio=False)
     ranked = {c.term: c for c in vocab.mine(store, now=NOW).candidates}
@@ -138,24 +138,24 @@ def test_rank_is_decayed_recent_use_then_pairs(store):
 
 
 def test_use_outside_the_window_scores_nothing_and_ranks_last(store):
-    pairs(store, "kip", "Kit", 2, age_days=60, final="x", about="send")
+    pairs(store, "kip", "Kitt", 2, age_days=60, final="x", about="send")
     pairs(store, "roon", "Rune", 2, age_days=1, about="ping")
     mined = vocab.mine(store, now=NOW)
-    assert [c.term for c in mined.candidates] == ["Rune", "Kit"]
+    assert [c.term for c in mined.candidates] == ["Rune", "Kitt"]
     assert mined.candidates[1].recent_uses == 0 and mined.candidates[1].score == 0
 
 
 def test_train_only_leaves_out_the_window_and_the_test_clusters(store):
-    pairs(store, "kip", "Kit", 2, age_days=30, about="send")
-    recent = pairs(store, "kip", "Kit", 3, age_days=2, about="ping")  # inside the 14-day window
-    assert terms(store)["Kit"].pair_count == 5
-    train = terms(store, train_only=True)["Kit"]
+    pairs(store, "kip", "Kitt", 2, age_days=30, about="send")
+    recent = pairs(store, "kip", "Kitt", 3, age_days=2, about="ping")  # inside the 14-day window
+    assert terms(store)["Kitt"].pair_count == 5
+    train = terms(store, train_only=True)["Kitt"]
     assert train.pair_count == 2 and train.source_split == "train"
     assert recent  # none of them counted, in the pairs or in the use
 
 
 def test_save_and_load_round_trip(store):
-    pairs(store, "kip", "Kit", 2)
+    pairs(store, "kip", "Kitt", 2)
     pairs(store, "rune", "Rune", 2)
     mined = vocab.mine(store, now=NOW)
     vocab.save(store, mined, "all")
@@ -173,12 +173,12 @@ def test_the_miner_reads_the_classifier_and_the_cli_prints_the_candidate(store, 
     monkeypatch.setattr(time, "time", lambda: NOW / 1000)
     for n in (1, 2, 3):
         add_clip(store, 100 + n, raw="send it to kip", final="Send it to kip.", ts=NOW - DAY + n, outcome="edited",
-                 edited="Send it to Kit.", audio=False)
+                 edited="Send it to Kitt.", audio=False)
     add_clip(store, 200, raw="send it to kip", final="Send it to kip.", ts=NOW - DAY, outcome="unchanged", audio=False)
     store.db.commit()
     assert main(["vocab", "mine"]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("Kit ← kip ×3  [3 pairs, ") and "1 candidate(s)" in out
+    assert out.startswith("Kitt ← kip ×3  [3 pairs, ") and "1 candidate(s)" in out
     assert main(["vocab", "mine", "--json", "--train-only"]) == 0
     assert json.loads(capsys.readouterr().out) == []  # all three sit in the 14-day window
     assert main(["vocab", "mine", "--min-pairs", "1"]) == 2
@@ -201,4 +201,5 @@ def test_limits_match_rust_constants():
 
 def test_common_words_list_is_lowercase_and_leaves_names_out():
     words = vocab.common_words()
-    assert {"the", "water", "open", "code"} <= words and not {"kit", "rune", "kip"} & words
+    assert len(words) >= 4500  # the vendored wordfreq top 5,000, not a hand-written list
+    assert {"the", "water", "open", "code"} <= words and not {"kitt", "rune", "kip"} & words
