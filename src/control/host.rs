@@ -246,16 +246,16 @@ fn command(host: &dyn Host, command: ControlCommand) -> ControlReply {
         ControlCommand::VocabularyList => reply(load().map(|settings| ControlReply::Vocabulary {
             entries: settings.vocabulary,
         })),
-        ControlCommand::VocabularyAdd { .. } | ControlCommand::VocabularyRemove { .. } => {
-            reply(load().and_then(|mut settings| {
-                let base = settings.clone();
-                let reply = super::edit_vocabulary(&mut settings.vocabulary, &command)?;
-                if matches!(reply, ControlReply::Done { changed: true, .. }) {
-                    host.save(&base, settings)?;
-                }
-                Ok(reply)
-            }))
-        }
+        ControlCommand::VocabularyAdd { .. }
+        | ControlCommand::VocabularyRemove { .. }
+        | ControlCommand::VocabularySet { .. } => reply(load().and_then(|mut settings| {
+            let base = settings.clone();
+            let reply = super::edit_vocabulary(&mut settings.vocabulary, &command)?;
+            if matches!(reply, ControlReply::Done { changed: true, .. }) {
+                host.save(&base, settings)?;
+            }
+            Ok(reply)
+        })),
         ControlCommand::Screenshot { .. } => reply(Err(ControlError::new(
             "unsupported",
             "screenshots are macOS only",

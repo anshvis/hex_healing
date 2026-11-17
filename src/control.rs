@@ -170,6 +170,10 @@ pub enum ControlCommand {
     VocabularyRemove {
         term: String,
     },
+    /// Replace the whole shared list, in this order, in one save.
+    VocabularySet {
+        entries: Vec<VocabularyEntry>,
+    },
     /// A Scrawl capture (the `capture` experiment).
     ScrawlCapture {
         action: ScrawlCaptureAction,
@@ -1000,7 +1004,7 @@ pub fn check_quit(
     }
 }
 
-/// Carries out `hex vocabulary add|remove` on the saved list. The reply's
+/// Carries out `hex vocabulary add|remove|set` on the saved list. The reply's
 /// `changed` says whether the list needs saving.
 pub fn edit_vocabulary(
     list: &mut Vec<VocabularyEntry>,
@@ -1026,6 +1030,17 @@ pub fn edit_vocabulary(
                     true => ControlReply::done(format!("Added “{}”", term.trim())),
                 },
             )
+        }
+        ControlCommand::VocabularySet { entries } => {
+            let entries = vocabulary::validate_list(entries)
+                .map_err(|message| ControlError::new("invalid-vocabulary", message))?;
+            Ok(if *list == entries {
+                ControlReply::unchanged("The vocabulary already holds exactly that list")
+            } else {
+                let count = entries.len();
+                *list = entries;
+                ControlReply::done(format!("Set the vocabulary to {count} terms"))
+            })
         }
         ControlCommand::VocabularyRemove { term } => Ok(if vocabulary::remove(list, term) {
             ControlReply::done(format!("Removed “{}”", term.trim()))
@@ -1316,6 +1331,12 @@ mod tests {
             ControlCommand::VocabularyRemove {
                 term: "cappuccino".into(),
             },
+            ControlCommand::VocabularySet {
+                entries: vec![VocabularyEntry {
+                    term: "cappuccino".into(),
+                    sounds_like: vec!["capuchin".into()],
+                }],
+            },
         ] {
             round_trip_request(command);
         }
@@ -1329,6 +1350,64 @@ mod tests {
                 sounds_like: vec![],
             }
         );
+    }
+
+    fn vocab(terms: &[&str]) -> Vec<VocabularyEntry> {
+        terms
+            .iter()
+            .map(|&term| VocabularyEntry {
+                term: term.into(),
+                sounds_like: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn set(terms: &[&str]) -> ControlCommand {
+        ControlCommand::VocabularySet {
+            entries: vocab(terms),
+        }
+    }
+
+    #[test]
+    fn vocabulary_set_replaces_in_order() {
+        let mut list = vocab(&["A", "B", "mined1"]);
+        let reply = edit_vocabulary(&mut list, &set(&["A", "B", "mined2", "mined1", "C"])).unwrap();
+        assert_eq!(reply, ControlReply::done("Set the vocabulary to 5 terms"));
+        assert_eq!(list, vocab(&["A", "B", "mined2", "mined1", "C"]));
+        let mut list = vocab(&["A"]);
+        edit_vocabulary(&mut list, &set(&[])).unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn vocabulary_set_invalid_saves_nothing() {
+        let before = vocab(&["A", "B"]);
+        for bad in [set(&["X", " "]), set(&["X", "x"])] {
+            let mut list = before.clone();
+            let error = edit_vocabulary(&mut list, &bad).unwrap_err();
+            assert_eq!(error.code, "invalid-vocabulary");
+            assert!(error.message.contains("entry 1"), "{}", error.message);
+            assert_eq!(list, before);
+        }
+        let many: Vec<String> = (0..501).map(|n| format!("t{n}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let mut list = before.clone();
+        assert_eq!(
+            edit_vocabulary(&mut list, &set(&many)).unwrap_err().code,
+            "invalid-vocabulary"
+        );
+        assert_eq!(list, before);
+    }
+
+    #[test]
+    fn vocabulary_set_idempotent() {
+        let mut list = vocab(&["A", "B"]);
+        let reply = edit_vocabulary(&mut list, &set(&["A", "B"])).unwrap();
+        assert!(matches!(reply, ControlReply::Done { changed: false, .. }));
+        // Order is part of the list.
+        let reply = edit_vocabulary(&mut list, &set(&["B", "A"])).unwrap();
+        assert!(matches!(reply, ControlReply::Done { changed: true, .. }));
+        assert_eq!(list, vocab(&["B", "A"]));
     }
 
     #[test]

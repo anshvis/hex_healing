@@ -132,6 +132,11 @@ hex vocabulary                           // vocabulary.cli
 ├── add <term> [--sounds-like a,b] -> New term, or new spellings merged into it
 │   └── Already there, nothing new -> changed: false
 ├── remove <term> -> Any case
+├── set --file <list.json> -> Replaces the list, in the file's order, in one save
+│   ├── An invalid entry, a repeated term, or over 500 entries -> invalid-vocabulary
+│   │   naming the entry; nothing saved
+│   ├── Same list in the same order -> changed: false
+│   └── Mode vocabularies untouched
 └── Running Hex saves and reloads settings; an open window adopts the change
 
 A mode's own vocabulary                  // vocabulary.modes; DictationMode::vocabulary
