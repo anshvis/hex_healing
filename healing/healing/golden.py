@@ -2,8 +2,8 @@
 
 You confirm clips in a terminal review (play, see the text, accept or fix); each confirmed clip
 joins `golden-v1`. At `splits.GOLDEN_SIZE` (200) the set freezes on its own: its manifest and WAVs
-are written, its SHA-256 is pinned in `sets/golden-v1/manifest.sha256` (the registry, once M5
-lands) and in the `splits` row, and the schema refuses every later change to that row or its
+are written, its SHA-256 is pinned in `sets/golden-v1/manifest.sha256`, in the model registry's
+`golden_frozen` event and in the `splits` row, and the schema refuses every later change to that row or its
 members. Until then it is pending and evaluates as n/a.
 
 Candidates are random clips, one per split-cluster and spread across apps and months, so 200 clips
@@ -101,9 +101,22 @@ def freeze_if_full(store: Store) -> bool:
     """Freeze a full, unfrozen golden set. Idempotent, so a freeze that failed is retried by the next
     `add` or `run` and the confirmed 200th clip never strands the set."""
     current = splits.golden_row(store.db)
-    if current is None or current["frozen"] or len(splits.golden_members(store.db)) < splits.GOLDEN_SIZE:
+    if current is not None and current["frozen"]:
+        pin(current["manifest_sha256"], current["n_clips"])  # a pin a crash missed after the freeze
+        return False
+    if current is None or len(splits.golden_members(store.db)) < splits.GOLDEN_SIZE:
         return False
     return freeze(store)
+
+
+def pin(sha256: str, n: int) -> None:
+    """Pin the frozen set's manifest hash in the model registry (G-10); a different pin is refused."""
+    from healing.registry.store import RegistryError, pin_golden
+
+    try:
+        pin_golden(sha256, n)
+    except RegistryError as error:
+        raise GoldenError(str(error)) from error
 
 
 def freeze(store: Store) -> bool:
@@ -125,6 +138,7 @@ def freeze(store: Store) -> bool:
             " n_words = ?, frozen = 1 WHERE split_id = ?",
             (str(info.path), info.manifest_sha256, info.sidecar_sha256, len(ids), info.n_words, splits.GOLDEN_ID),
         )
+    pin(info.manifest_sha256, len(ids))
     return True
 
 

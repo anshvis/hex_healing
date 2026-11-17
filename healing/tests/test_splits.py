@@ -351,6 +351,9 @@ def test_golden_freeze_pins_hash(store, home, small_golden):
     folder = home / "sets" / "golden-v1"
     digest = (folder / "manifest.sha256").read_text().split()[0]
     assert digest == pinned["manifest_sha256"] == general.verify(folder)
+    from healing.registry import store as registry
+
+    assert registry.load().golden == {"sha256": digest, "n": 5, "at_ms": registry.load().golden["at_ms"]}  # G-10 pin
     assert store.db.execute("SELECT COUNT(*) FROM clips WHERE golden = 1").fetchone()[0] == 5
     # one per split-cluster, every one random and verified
     members = [r[0] for r in store.db.execute("SELECT clip_id FROM split_members WHERE split_id = 'golden-v1'")]

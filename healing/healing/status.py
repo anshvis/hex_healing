@@ -15,6 +15,7 @@ from pathlib import Path
 from healing.budget import DEFAULT_BUDGET
 from healing.clean import DEFAULT_MIN_FREE, free_bytes, index_problems
 from healing.labels import LABELS
+from healing.registry import objects as registry_objects
 from healing.store import Store, now_ms
 
 DAY_MS = 24 * 3600 * 1000
@@ -73,6 +74,7 @@ class Status:
     free_bytes: int = 0
     min_free: int = DEFAULT_MIN_FREE
     last_clean: dict | None = None
+    registry_object_bytes: int = 0  # the model registry's objects store (GGUFs and LoRA deltas)
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -88,6 +90,7 @@ class Status:
             "free_bytes": self.free_bytes,
             "min_free": self.min_free,
             "last_clean": self.last_clean,
+            "registry_object_bytes": self.registry_object_bytes,
             "warnings": self.warnings,
         }
 
@@ -111,6 +114,7 @@ class Status:
             )
         else:
             lines.append("last clean never")
+        lines.append(f"registry objects {self.registry_object_bytes} bytes")
         if self.oldest_uncollected_risk_ms is not None:
             lines.append(f"oldest uncollected risk {self.oldest_uncollected_risk_ms}")
         lines += [f"warning {code}: {WARNINGS[code]}" for code in self.warnings]
@@ -151,6 +155,7 @@ def compute(
             for key in ("at_ms", "orphans_moved", "missing_marked", "mismatched_marked",
                         "temp_removed", "freed_bytes", "free_bytes_after")
         }
+    status.registry_object_bytes = registry_objects.total_bytes()
     status.clips = db.execute("SELECT COUNT(*) FROM clips").fetchone()[0]
     status.with_audio = db.execute(
         "SELECT COUNT(*) FROM clips c JOIN audio a ON a.sha256 = c.audio_sha256"
