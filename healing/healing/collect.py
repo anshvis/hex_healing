@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from healing.corrections import label_reset
+from healing import labels
+from healing.corrections import forget
 from healing.eval.bench import BenchError, history_hex
 from healing.store import Store, StoreError, process_lock, clip_id, now_ms, read_wav
 
@@ -161,10 +162,12 @@ def collect(
         error = str(failure)
         raise
     except BaseException as failure:
-        # Name only the type: a message could carry transcript text (G-4).
+        # Name only the type: a message could carry transcript text (G-4). A labelling failure is
+        # one of these: it is what ended the run, and is raised as such.
         error = type(failure).__name__
         raise
     finally:
+        store.db.rollback()  # a batch cut short by a failure is dropped whole; the next run stores it again
         store.db.execute(
             "UPDATE runs SET seen = ?, new = ?, audio_new = ?, missing_audio = ?, error = ?"
             " WHERE run_id = ?",
@@ -184,18 +187,22 @@ def _collect_pages(
         entries = document.get("entries", [])
         fresh = [e for e in entries if (e["id"], e["timestamp_ms"]) not in seen]
         for start in range(0, len(fresh), BATCH):
+            touched = []
             for entry in fresh[start : start + BATCH]:
                 seen.add((entry["id"], entry["timestamp_ms"]))
-                _store_entry(store, epochs, entry, summary, copy_audio)
+                if clip := _store_entry(store, epochs, entry, summary, copy_audio):
+                    touched.append(clip)
             store.db.commit()
+            labels.refresh(store, touched)  # labels follow the batch just committed, once, never per row
         if not fresh or not (document.get("truncated") or len(entries) >= PAGE_LIMIT):
             return
         since = rfc3339(entries[-1]["timestamp_ms"])
 
 
 def _store_entry(
-    store: Store, epochs: Epochs, entry: dict, summary: Summary, copy_audio: bool = True
-) -> None:
+    store: Store, epochs: Epochs, entry: dict, summary: Summary, copy_audio: bool = True,
+) -> str | None:
+    """Store one History entry; the id of the clip it inserted or changed, else None."""
     summary.seen += 1
     hex_id, timestamp = entry["id"], entry["timestamp_ms"]
     epoch = epochs.assign(hex_id, timestamp)
@@ -242,27 +249,22 @@ def _store_entry(
                 fields["edited_text"],
             ),
         )
-        return
+        return clip_id(epoch, hex_id)
     changed = {k: v for k, v in fields.items() if existing[k] != v}
     changed = _correction_changes(existing, correction, observed, changed)
     if audio_sha != existing["audio_sha256"]:
         changed["audio_sha256"] = audio_sha
     if not changed:
-        return
-    if "raw_text" in changed and existing["label"] != "verified":
-        changed["label"] = "unlabelled"  # M3 recomputes labels from the new raw text
+        return None
     if any(name in changed for name in CLASSIFICATION_INPUTS):
         # Hex added or changed the correction: `label corrections` classifies it again.
-        store.db.execute("DELETE FROM edits WHERE clip_id = ?", (existing["clip_id"],))
-        changed["reference_text"] = None
-        changed["classified_at_ms"] = None
-        if (label := label_reset(existing["label"])) != existing["label"]:
-            changed["label"] = label
+        forget(store.db, existing["clip_id"], changed)
     assignments = ", ".join(f"{name} = ?" for name in changed)
     store.db.execute(
         f"UPDATE clips SET {assignments} WHERE hex_epoch_ms = ? AND hex_id = ?",
         (*changed.values(), epoch, hex_id),
     )
+    return existing["clip_id"]
 
 
 def _correction_changes(existing, correction: dict | None, observed: dict, changed: dict) -> dict:

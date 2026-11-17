@@ -12,12 +12,13 @@ repair the cleanup step's mistakes. Only `acoustic` edits make a training refere
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
-from healing import phonetic
+from healing import phonetic, wer
 from healing.store import Store, now_ms
 
 MAX_ACOUSTIC_WORDS = 4  # a longer replaced span is a rewrite, however it sounds
@@ -143,42 +144,51 @@ def find_edits(raw_text: str, final_text: str, edited_text: str) -> list[Edit]:
     return edits
 
 
-def label_after(label: str, acoustic: bool) -> str:
-    """A clip's label once its corrections are classified (or, with `acoustic` false, unknown).
-
-    An acoustic edit makes a clip `strong` unless it was `verified`; a `strong` clip with none
-    (or whose classification was thrown away) falls back to `unlabelled`.
-    """
-    if acoustic and label != "verified":
-        return "strong"
-    if not acoustic and label == "strong":
-        return "unlabelled"
-    return label
-
-
-def label_reset(label: str) -> str:
-    """The label once a clip's classification is thrown away: `strong` no longer holds."""
-    return label_after(label, False)
-
-
-def reference_text(raw_text: str, edits: list[Edit]) -> str | None:
+def reference_with_spans(raw_text: str, edits: list[Edit]) -> tuple[str | None, list[tuple[int, int]]]:
     """`raw_text` with only the acoustic edits applied, or None when no edit is acoustic.
 
     The person's own span replaces each one, as they typed it ("can't", "five"); only its case
-    follows the raw text, which the speech model writes in lower case.
+    follows the raw text, which the speech model writes in lower case. Also the character span
+    each replacement occupies in the result, in reading order.
     """
-    acoustic = sorted((e for e in edits if e.kind == "acoustic"), key=lambda e: e.raw_span[0], reverse=True)
+    acoustic = sorted((e for e in edits if e.kind == "acoustic"), key=lambda e: e.raw_span[0])
     if not acoustic:
-        return None
-    result = raw_text
+        return None, []
+    pieces: list[str] = []
+    spans: list[tuple[int, int]] = []
+    cursor, length = 0, 0
     for edit in acoustic:
         replacement = edit.to_text.lower() if edit.raw_from == edit.raw_from.lower() else edit.to_text
-        result = result[: edit.raw_span[0]] + replacement + result[edit.raw_span[1] :]
-    return result
+        before = raw_text[cursor : edit.raw_span[0]]
+        pieces += [before, replacement]
+        length += len(before)
+        spans.append((length, length + len(replacement)))
+        length += len(replacement)
+        cursor = edit.raw_span[1]
+    pieces.append(raw_text[cursor:])
+    return "".join(pieces), spans
+
+
+def reference_text(raw_text: str, edits: list[Edit]) -> str | None:
+    return reference_with_spans(raw_text, edits)[0]
+
+
+def forget(db, clip_id: str, changed: dict) -> None:
+    """Throw away a clip's classification: its edit rows go and `changed` gains the classifier's own
+    columns cleared (`acoustic_reference`, `edited_positions`, `classified_at_ms`), so the next
+    `label corrections` classifies it again and `labels.refresh` derives its label without it. The one
+    place that knows which columns the classifier owns."""
+    db.execute("DELETE FROM edits WHERE clip_id = ?", (clip_id,))
+    changed.update({"acoustic_reference": None, "edited_positions": None, "classified_at_ms": None})
 
 
 def label_corrections(store: Store, since_ms: int | None = None, recompute: bool = False) -> Counter:
-    """Classify every edited, un-rewritten clip not yet classified. Counts by kind."""
+    """Classify every edited, un-rewritten clip not yet classified. Counts by kind.
+
+    Writes the edits, `acoustic_reference` and `edited_positions` only: the classifier's own output,
+    which nothing else overwrites. `labels.refresh` is the one writer of `label` and of
+    `reference_text`, which it derives from the label.
+    """
     where = "correction_outcome = 'edited' AND edited_text IS NOT NULL AND rewritten = 0"
     parameters: list = []
     if not recompute:
@@ -188,7 +198,7 @@ def label_corrections(store: Store, since_ms: int | None = None, recompute: bool
         parameters.append(since_ms)
     counts: Counter = Counter()
     rows = store.db.execute(
-        f"SELECT clip_id, raw_text, final_text, edited_text, label, audio_sha256 FROM clips WHERE {where}",
+        f"SELECT clip_id, raw_text, final_text, edited_text, audio_sha256 FROM clips WHERE {where}",
         parameters,
     ).fetchall()
     for row in rows:
@@ -207,9 +217,11 @@ def label_corrections(store: Store, since_ms: int | None = None, recompute: bool
             )
             counts[edit.kind] += 1
         acoustic = any(e.kind == "acoustic" for e in edits)
+        reference, spans = reference_with_spans(row["raw_text"], edits)
+        positions = wer.positions_of(reference, spans) if reference is not None else []
         store.db.execute(
-            "UPDATE clips SET reference_text = ?, label = ?, classified_at_ms = ? WHERE clip_id = ?",
-            (reference_text(row["raw_text"], edits), label_after(row["label"], acoustic), now_ms(), row["clip_id"]),
+            "UPDATE clips SET acoustic_reference = ?, edited_positions = ?, classified_at_ms = ? WHERE clip_id = ?",
+            (reference, json.dumps(positions) if positions else None, now_ms(), row["clip_id"]),
         )
         counts["clips"] += 1
         if acoustic:

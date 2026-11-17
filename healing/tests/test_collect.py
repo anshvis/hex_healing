@@ -115,6 +115,10 @@ def test_replace_updates_raw_text_and_model_id_and_marks_labels_stale(world):
     store = Store()
     store.db.execute("UPDATE clips SET label = 'strong', cluster_id = 'c1', golden = 1 WHERE hex_id = 1")
     store.db.execute("UPDATE clips SET label = 'verified' WHERE hex_id = 2")
+    store.db.execute(  # a verified label is a review: collect leaves it to `labels.refresh`
+        "INSERT INTO reviews (clip_id, reviewed_at_ms, action, text, strategy)"
+        " SELECT clip_id, 1, 'accept', raw_text, 'random' FROM clips WHERE hex_id = 2"
+    )
     store.db.commit()
     store.close()
     world.doc["entries"][0].update(raw_text="hello their", model_id="whisper-large")
@@ -305,3 +309,59 @@ def test_log_has_no_transcript_text(world, capsys, monkeypatch):
     seen = capsys.readouterr()
     for text in texts:
         assert text not in seen.out + seen.err
+
+
+def test_labels_follow_a_run_once_not_per_row(world, monkeypatch):
+    from healing import labels
+
+    calls = []
+    real = labels.refresh
+    monkeypatch.setattr(labels, "refresh", lambda store, ids=None: (calls.append(list(ids or [])), real(store, ids))[1])
+    world.run()
+    assert len(calls) == 1 and len(calls[0]) == 3  # one refresh, every inserted clip
+    calls.clear()
+    world.doc["entries"][0].update(raw_text="hello their")
+    world.save()
+    world.run()
+    assert len(calls) == 1 and len(calls[0]) == 1  # one refresh, the one clip it changed
+
+
+def _last_run(world):
+    store = Store()
+    try:
+        return dict(store.db.execute("SELECT * FROM runs ORDER BY run_id DESC LIMIT 1").fetchone())
+    finally:
+        store.close()
+
+
+def test_a_labelling_failure_ends_the_run_with_its_type_and_a_runs_row(world, monkeypatch):
+    from healing import labels
+
+    monkeypatch.setattr(labels, "refresh", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("derive broke")))
+    with pytest.raises(RuntimeError, match="derive broke"):
+        world.run()
+    last = _last_run(world)
+    assert last["seen"] == 3 and last["new"] == 3 and last["error"] == "RuntimeError"
+
+
+def test_a_run_cut_short_drops_its_partial_batch_and_still_writes_its_row(world, monkeypatch):
+    from healing import collect as collect_module
+
+    real = collect_module._store_entry
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 3:
+            raise OSError("history vanished")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(collect_module, "_store_entry", flaky)
+    store = Store()
+    try:
+        with pytest.raises(OSError, match="history vanished"):
+            collect_module.collect(store, world.hex)
+        assert store.db.execute("SELECT COUNT(*) FROM clips").fetchone()[0] == 0  # the whole batch, never half
+    finally:
+        store.close()
+    assert _last_run(world)["error"] == "history vanished"

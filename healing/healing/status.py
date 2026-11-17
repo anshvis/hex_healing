@@ -14,6 +14,7 @@ from pathlib import Path
 
 from healing.budget import DEFAULT_BUDGET
 from healing.clean import DEFAULT_MIN_FREE, free_bytes, index_problems
+from healing.labels import LABELS
 from healing.store import Store, now_ms
 
 DAY_MS = 24 * 3600 * 1000
@@ -138,9 +139,10 @@ def compute(
         "SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM audio WHERE evicted_at_ms IS NULL"
     ).fetchone()
     status.audio_bytes = kept[1]
-    status.labels = {
-        row[0]: row[1] for row in db.execute("SELECT label, COUNT(*) FROM clips GROUP BY label")
-    }
+    status.labels = {label: 0 for label in LABELS}
+    status.labels.update(
+        {row[0]: row[1] for row in db.execute("SELECT label, COUNT(*) FROM clips GROUP BY label")}
+    )
     status.clusters = db.execute("SELECT COUNT(*) FROM clusters").fetchone()[0]
     run = db.execute("SELECT * FROM runs ORDER BY run_id DESC LIMIT 1").fetchone()
     if run:

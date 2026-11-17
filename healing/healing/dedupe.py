@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -82,6 +83,72 @@ def compatible(a: str, b: str) -> bool:
     return jaccard(ga, gb) >= JACCARD
 
 
+class LshIndex:
+    """MinHash bands over token 3-grams: `query` finds earlier items that may be near-duplicates."""
+
+    def __init__(self) -> None:
+        self.buckets: dict[tuple[int, bytes], list[int]] = {}
+
+    def add(self, index: int, grams: frozenset[str]) -> list[bytes]:
+        """Index `grams` and return its bands, which `query_bands` can reuse without signing again."""
+        bands = _bands(signature(grams))
+        for band, value in enumerate(bands):
+            self.buckets.setdefault((band, value), []).append(index)
+        return bands
+
+    def query(self, grams: frozenset[str]) -> set[int]:
+        return self.query_bands(_bands(signature(grams)))
+
+    def query_bands(self, bands: list[bytes]) -> set[int]:
+        return {i for band, value in enumerate(bands) for i in self.buckets.get((band, value), [])}
+
+
+class NearIndex:
+    """Normalized texts indexed once for near-duplicate queries.
+
+    Equal texts and texts whose 3-gram Jaccard is at least `JACCARD` are near; texts under 3 tokens
+    have no 3-grams and are near only when equal. Built once, queried many times: a verify of 2,000
+    members against 2,000 texts builds this once, and a key that is itself indexed is not signed again.
+    """
+
+    def __init__(self, keys: Iterable[str]):
+        self.keys = sorted(set(keys))
+        self.position = {key: i for i, key in enumerate(self.keys)}
+        self.grams: dict[int, frozenset[str]] = {}
+        self.bands: dict[int, list[bytes]] = {}
+        self.index = LshIndex()
+        for position, key in enumerate(self.keys):
+            found = shingles(key)
+            if found is not None:
+                self.grams[position] = found
+                self.bands[position] = self.index.add(position, found)
+
+    def near(self, key: str) -> Iterator[str]:
+        """Indexed texts equal to `key` (itself, when indexed) or near-duplicates of it, in order."""
+        own = self.position.get(key)
+        if own is not None:
+            yield key
+        found = self.grams[own] if own in self.grams else shingles(key)
+        if found is None:
+            return
+        candidates = self.index.query_bands(self.bands[own]) if own in self.bands else self.index.query(found)
+        for other in sorted(candidates):
+            if self.keys[other] != key and jaccard(self.grams[other], found) >= JACCARD:
+                yield self.keys[other]
+
+
+def near_duplicate_pairs(keys: Iterable[str]) -> Iterator[tuple[str, str]]:
+    """Pairs of distinct normalized texts whose 3-gram Jaccard is at least `JACCARD`.
+
+    Texts under 3 tokens have no 3-grams and pair with nothing here (callers match them by equality).
+    """
+    near = NearIndex(keys)
+    for position, key in enumerate(near.keys):
+        for other in near.near(key):
+            if near.position[other] < position:
+                yield other, key
+
+
 @dataclass
 class _Rep:
     cluster_id: str
@@ -93,7 +160,7 @@ class _Rep:
 class Clusterer:
     def __init__(self, reps: list[Clip] = ()):
         self.reps: list[_Rep] = []
-        self.buckets: dict[tuple[int, bytes], list[int]] = {}
+        self.index = LshIndex()
         self.short: dict[str, list[int]] = {}
         for rep in reps:
             self._add(rep.clip_id, rep.text, rep.audio_ms)
@@ -106,8 +173,7 @@ class Clusterer:
         if grams is None:
             self.short.setdefault(key, []).append(index)
             return
-        for band, value in enumerate(_bands(signature(grams))):
-            self.buckets.setdefault((band, value), []).append(index)
+        self.index.add(index, grams)
 
     def assign(self, clip: Clip) -> str | None:
         key = normalize(clip.text)
@@ -118,13 +184,8 @@ class Clusterer:
         if grams is None:
             candidates = {i: 1.0 for i in self.short.get(key, [])}
         else:
-            found = {
-                i
-                for band, value in enumerate(_bands(signature(grams)))
-                for i in self.buckets.get((band, value), [])
-            }
             candidates = {}
-            for i in found:
+            for i in self.index.query(grams):
                 score = jaccard(grams, self.reps[i].grams)
                 if score >= JACCARD:
                     candidates[i] = score

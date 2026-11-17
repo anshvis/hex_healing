@@ -3,7 +3,7 @@ from pathlib import Path
 
 from healing import corrections
 from healing.cli import main
-from healing.corrections import find_edits, label_after, label_corrections, observation_report, reference_text
+from healing.corrections import find_edits, label_corrections, observation_report, reference_text
 from healing.store import Store, clip_id
 
 from test_collect import world  # noqa: F401  (the fake-hex fixture)
@@ -63,14 +63,6 @@ def test_reference_keeps_what_the_person_typed():
     assert reference_text(raw, []) is None
 
 
-def test_label_after_is_the_one_rule():
-    assert label_after("unlabelled", True) == "strong"
-    assert label_after("verified", True) == "verified"
-    assert label_after("strong", False) == "unlabelled"
-    assert label_after("verified", False) == "verified"
-    assert label_after("unlabelled", False) == "unlabelled"
-
-
 def _entry(i, **extra):
     base = {"id": i, "timestamp_ms": 1760000000000 + i * 1000, "application": "Notes", "kind": "dictation",
             "raw_text": "send it to kip", "final_text": "Send it to Kip.", "model_id": "m"}
@@ -108,9 +100,9 @@ def test_collect_stores_correction_and_label_corrections(world, capsys):  # noqa
     assert rows[1]["label"] == "unlabelled" and rows[1]["reference_text"] is None
     assert main(["label", "corrections"]) == 0
     rows = {r["hex_id"]: dict(r) for r in world.db().execute("SELECT * FROM clips")}
-    assert rows[4]["label"] == "strong" and rows[1]["label"] == "unlabelled"
-    # Processed, nothing acoustic: no reference, and not classified again.
-    assert rows[1]["reference_text"] is None and rows[1]["classified_at_ms"] is not None
+    assert rows[4]["label"] == "strong" and rows[1]["label"] == "weak"  # edited back to what Hex pasted
+    # Processed, nothing acoustic: weak, its reference what Hex heard, and not classified again.
+    assert rows[1]["reference_text"] == "send it to kip" and rows[1]["classified_at_ms"] is not None
     assert label_corrections(Store())["clips"] == 0
 
 
@@ -164,7 +156,7 @@ def test_v4_dataset_with_rows_migrates_to_the_current_schema(tmp_path):
     db.close()
 
     store = Store(root)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION == 6
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION
     row = store.db.execute("SELECT * FROM clips").fetchone()
     assert (row["clip_id"], row["raw_text"], row["label"], row["collected_at_ms"]) == (
         "a", "send it to kip", "verified", 5
@@ -178,8 +170,8 @@ def test_v4_dataset_with_rows_migrates_to_the_current_schema(tmp_path):
         "UPDATE clips SET correction_outcome = 'edited', edited_text = 'Send it to Kit.' WHERE clip_id = 'a'"
     )
     assert label_corrections(store)["acoustic"] == 1
-    row = store.db.execute("SELECT label, reference_text FROM clips").fetchone()
-    assert (row["label"], row["reference_text"]) == ("verified", "send it to kit")
+    row = store.db.execute("SELECT label, acoustic_reference FROM clips").fetchone()
+    assert (row["label"], row["acoustic_reference"]) == ("verified", "send it to kit")  # the label is not the classifier's
 
 
 def test_v5_dataset_made_before_the_classified_marker_migrates_to_v6(tmp_path):
@@ -204,7 +196,7 @@ def test_v5_dataset_made_before_the_classified_marker_migrates_to_v6(tmp_path):
     db.close()
 
     store = Store(root)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION
     row = store.db.execute("SELECT * FROM clips").fetchone()
     assert row["classified_at_ms"] is None and row["reference_text"] == "send it to kit"
     Store(root).close()  # opening again is a no-op

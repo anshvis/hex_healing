@@ -64,3 +64,41 @@ def test_twenty_thousand_clips_cluster_fast():
     start = time.time()
     cluster(items)
     assert time.time() - start < 30
+
+
+def test_near_duplicate_pairs_finds_the_clusterers_matches():
+    from healing.dedupe import near_duplicate_pairs
+
+    base = " ".join(f"w{i}" for i in range(14)) + " kip " + " ".join(f"v{i}" for i in range(14))
+    near = base.replace("kip", "kit")
+    keys = [base, near, "something else entirely here and there again", "hi", "hi"]
+    assert list(near_duplicate_pairs(keys)) == [(base, near)] or list(near_duplicate_pairs(keys)) == [(near, base)]
+
+
+def test_a_near_index_answers_directly_not_transitively():
+    from healing.dedupe import NearIndex
+
+    a = " ".join(f"w{i}" for i in range(30))
+    b = " ".join(f"w{i}" for i in range(2, 32))   # close to a
+    c = " ".join(f"w{i}" for i in range(4, 34))   # close to b, further from a
+    far = " ".join(f"z{i}" for i in range(30))
+    index = NearIndex([b, c, far])
+    assert list(index.near(a)) == [b]  # a union-find would join all three
+    assert list(NearIndex([a, far]).near(a)) == [a]
+    assert list(NearIndex(["hi", "ho"]).near("hi")) == ["hi"]
+    assert list(index.near(b)) == [b, c]  # an indexed key reuses its bands and finds the same neighbours
+
+
+def test_an_indexed_key_is_not_signed_again_when_it_is_queried(monkeypatch):
+    from healing import dedupe
+
+    keys = [" ".join(f"w{i}x{k}" for k in range(14)) for i in range(50)]
+    index = dedupe.NearIndex(keys)
+    calls = []
+    real = dedupe.signature
+    monkeypatch.setattr(dedupe, "signature", lambda grams: (calls.append(1), real(grams))[1])
+    for key in keys:
+        list(index.near(key))
+    assert calls == []  # their bands were kept when they were indexed
+    list(index.near("a brand new text that was never indexed at all, with enough words in it"))
+    assert len(calls) == 1

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -20,6 +21,10 @@ INSTALLED_HEX = Path("/Applications/Hex.app/Contents/MacOS/hex")
 
 class BenchError(RuntimeError):
     pass
+
+
+class VocabularyUnsupported(BenchError):
+    """The hex binary predates `benchmark-transcription --vocabulary` (T3.4)."""
 
 
 @dataclass(frozen=True)
@@ -106,11 +111,22 @@ def isolated_env() -> dict[str, str]:
 
 
 def benchmark_command(
-    manifest: Path, *, model: Path | None, runs: int, warmups: int, binary: Path | None = None
+    manifest: Path,
+    *,
+    model: Path | None,
+    runs: int,
+    warmups: int,
+    binary: Path | None = None,
+    vocabulary: Path | None = None,
+    boost: str | None = None,
 ) -> list[str]:
     command = [str(binary or hex_binary()), "benchmark-transcription", str(manifest)]
     if model is not None:
         command += ["--model", str(model)]
+    if vocabulary is not None:
+        command += ["--vocabulary", str(vocabulary)]
+        if boost:
+            command += ["--boost", boost]
     return command + ["--runs", str(runs), "--warmups", str(warmups)]
 
 
@@ -121,13 +137,62 @@ def run_benchmark(
     runs: int = 1,
     warmups: int = 1,
     output: Path | None = None,
+    vocabulary: Path | None = None,
+    boost: str | None = None,
 ) -> tuple[BenchRun, list[str]]:
-    command = benchmark_command(manifest, model=model, runs=runs, warmups=warmups)
+    command = benchmark_command(
+        manifest, model=model, runs=runs, warmups=warmups, vocabulary=vocabulary, boost=boost
+    )
     completed = subprocess.run(command, capture_output=True, text=True, env=isolated_env())
     if completed.returncode != 0:
         tail = "\n".join(completed.stderr.strip().splitlines()[-15:])
+        if vocabulary is not None and "--vocabulary" in completed.stderr and (
+            "unexpected argument" in completed.stderr or "unrecognized" in completed.stderr
+        ):
+            raise VocabularyUnsupported(
+                f"{command[0]} doesn't accept --vocabulary yet (it needs the T3.4 build). "
+                "Rerun with --vocabulary none to score without your vocabulary."
+            )
         raise BenchError(f"benchmark exited {completed.returncode}:\n{tail}")
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(completed.stdout)
     return parse_jsonl(completed.stdout), command
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        while chunk := file.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def hex_version(binary: str) -> str:
+    completed = subprocess.run([binary, "--version"], capture_output=True, text=True, env=isolated_env())
+    return completed.stdout.strip()
+
+
+def git_sha() -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repo_root()), "rev-parse", "HEAD"], capture_output=True, text=True
+    )
+    return completed.stdout.strip()
+
+
+def built_here(binary: str) -> bool:
+    """Whether `binary` is this checkout's own release build (so `git_sha` names its source)."""
+    return Path(binary).resolve() == (repo_root() / "target" / "release" / "hex").resolve()
+
+
+def wer_by_source(run: BenchRun, sources: dict[str, str]) -> dict[str, dict]:
+    """The run's word errors summed per clip source (the general set's `librispeech` and `ami`)."""
+    totals: dict[str, list[int]] = {}
+    for clip in run.clips:
+        errors_words = totals.setdefault(sources[clip["id"]], [0, 0])
+        errors_words[0] += clip["word_errors"]
+        errors_words[1] += clip["reference_words"]
+    return {
+        source: {"wer": errors / words, "word_errors": errors, "reference_words": words}
+        for source, (errors, words) in sorted(totals.items())
+    }

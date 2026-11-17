@@ -1,17 +1,20 @@
-"""`healing eval baseline`: the shipped model's scores on the general set."""
+"""`healing eval baseline`: the shipped model's scores on the general set.
+
+An alias of `healing eval --model <gguf> --sets general --vocabulary none` (one eval path), kept so
+T0.3's recorded baseline and its commands still work: it writes the same `baseline.json`, with the
+per-source WER breakdown the general set carries.
+"""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shlex
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from healing.eval.bench import BenchRun, isolated_env, run_benchmark
-from healing.paths import healing_home, repo_root
-from healing.sets.general import sources_by_clip, verify
+from healing.eval import run as eval_run
+from healing.eval.bench import git_sha, hex_binary
+from healing.paths import repo_root
 
 DEFAULT_MODEL_ID = "parakeet-unified-en-0.6b"
 DEFAULT_GGUF = (
@@ -20,46 +23,32 @@ DEFAULT_GGUF = (
 )
 
 
-def wer_by_source(run: BenchRun, sources: dict[str, str]) -> dict[str, dict]:
-    totals: dict[str, list[int]] = {}
-    for clip in run.clips:
-        errors_words = totals.setdefault(sources[clip["id"]], [0, 0])
-        errors_words[0] += clip["word_errors"]
-        errors_words[1] += clip["reference_words"]
-    return {
-        source: {"wer": errors / words, "word_errors": errors, "reference_words": words}
-        for source, (errors, words) in sorted(totals.items())
-    }
+class BaselineError(RuntimeError):
+    pass
 
 
 def baseline(model: Path, model_id: str, output: Path) -> dict:
-    set_dir = healing_home() / "sets" / "general"
-    manifest = set_dir / "manifest.json"
-    if not manifest.is_file():
-        raise SystemExit("no general set: run `healing sets build-general` first")
-    set_sha = verify(set_dir)
-    jsonl = healing_home() / "evals" / f"baseline-{_stamp()}.jsonl"
-    run, command = run_benchmark(manifest, model=model, output=jsonl)
-    sources = sources_by_clip(set_dir)
+    document = eval_run.evaluate([model], ["general"], vocabulary="none")
+    if "general" in document["unavailable_sets"]:
+        raise BaselineError(document["unavailable_sets"]["general"])
+    scores = document["scores"][str(model)]["general"]
+    (ref,) = document["sets"]
     result = {
         "model": model_id,
-        "gguf_sha256": _sha256(model),
-        "set_sha256": set_sha,
-        "clips": run.summary["clips"],
-        "reference_words": run.summary["reference_words"],
-        "wer": run.summary["wer"],
-        "wer_by_source": wer_by_source(run, sources),
-        "median_rtf": run.summary["median_rtf"],
-        "load_ms": run.summary["load_ms"],
-        "hex_binary": command[0],
-        "hex_version": _hex_version(command[0]),
-        "hex_binary_sha256": _sha256(Path(command[0])),
-        # The checkout's commit when the binary is its own release build (it may
-        # predate HEAD; `hex_binary_sha256` names the exact binary). An
-        # installed Hex records only its version.
-        "hex_sha": _git_sha() if _built_here(command[0]) else None,
-        "repo_sha": _git_sha(),
-        "command": shlex.join(command),
+        "gguf_sha256": document["models"][0]["gguf_sha256"],
+        "set_sha256": ref["manifest_sha256"],
+        "clips": ref["n"],
+        "reference_words": scores["ref_words"],
+        "wer": scores["wer"],
+        "wer_by_source": scores["wer_by_source"],
+        "median_rtf": scores["median_rtf"],
+        "load_ms": scores["load_ms"],
+        "hex_binary": str(hex_binary()),
+        "hex_version": document["hex_version"],
+        "hex_binary_sha256": document["hex_binary_sha256"],
+        "hex_sha": document["hex_sha"],
+        "repo_sha": git_sha(),
+        "command": shlex.join(["healing", "eval", "--model", str(model), "--sets", "general", "--vocabulary", "none"]),
         "measured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -69,33 +58,3 @@ def baseline(model: Path, model_id: str, output: Path) -> dict:
 
 def default_output() -> Path:
     return repo_root() / "healing" / "eval" / "baseline.json"
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as file:
-        while chunk := file.read(1 << 20):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _hex_version(binary: str) -> str:
-    completed = subprocess.run(
-        [binary, "--version"], capture_output=True, text=True, env=isolated_env()
-    )
-    return completed.stdout.strip()
-
-
-def _git_sha() -> str:
-    completed = subprocess.run(
-        ["git", "-C", str(repo_root()), "rev-parse", "HEAD"], capture_output=True, text=True
-    )
-    return completed.stdout.strip()
-
-
-def _built_here(binary: str) -> bool:
-    return Path(binary).resolve() == (repo_root() / "target" / "release" / "hex").resolve()
-
-
-def _stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
