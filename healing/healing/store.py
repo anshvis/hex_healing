@@ -21,7 +21,7 @@ import soundfile
 from healing.paths import healing_home
 
 SAMPLE_RATE = 16_000
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA = """
 CREATE TABLE audio (
@@ -176,6 +176,20 @@ WHEN (SELECT frozen FROM splits WHERE split_id = OLD.split_id) = 1
 BEGIN SELECT RAISE(ABORT, 'a frozen split never changes'); END;
 """
 
+# v8 (M4): the miner's latest candidates (`healing vocab mine`); a recomputed table, not evidence.
+SCHEMA_V8 = """
+CREATE TABLE IF NOT EXISTS vocab_candidates (
+    term TEXT PRIMARY KEY,
+    sounds_like TEXT NOT NULL,
+    pair_count INTEGER NOT NULL CHECK (pair_count >= 2),
+    recent_uses INTEGER NOT NULL,
+    score REAL NOT NULL,
+    first_seen_ms INTEGER NOT NULL,
+    last_seen_ms INTEGER NOT NULL,
+    source_split TEXT NOT NULL CHECK (source_split IN ('train', 'all'))
+);
+"""
+
 
 # `splits` columns beyond the table's base layout, defined once and always added by the guarded loop below:
 # the pin of the sidecar, and a train snapshot's record (model, note, each member's texts).
@@ -225,7 +239,7 @@ def _migrate_m3(db: sqlite3.Connection) -> None:
     reset_stale_classifications(db)
 
 
-MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, _migrate_m3]
+MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, _migrate_m3, SCHEMA_V8]
 
 
 class StoreError(Exception):
@@ -346,7 +360,7 @@ class Store:
 
         The exclusive lock covers reading the version, the backup and the steps, and the version is
         read again once it is held, so a second opener finds the work done instead of repeating it.
-        A file already at the current version still has its M3 schema checked and repaired.
+        A file already past the M3 step still has its M3 schema checked and repaired.
         """
         with locked(self.root / ".migrate.lock", wait=True):
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
@@ -361,7 +375,7 @@ class Store:
                 else:
                     self.db.executescript(migration)
                 self.db.execute(f"PRAGMA user_version = {step + 1}")
-            if version == SCHEMA_VERSION:  # no step ran: still check the M3 schema and its reset
+            if version >= 7:  # the M3 step did not run above: still check its schema and its reset
                 _migrate_m3(self.db)
             self.db.commit()
 
