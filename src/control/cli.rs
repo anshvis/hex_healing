@@ -13,6 +13,7 @@ mod human;
 mod prepare;
 mod progress;
 mod transcribe;
+mod vocabulary_set;
 
 use clap::{Args, Subcommand};
 
@@ -413,6 +414,8 @@ pub enum VocabularyCommand {
         #[command(flatten)]
         output: Output,
     },
+    /// Replace the whole list with a JSON file's, in its order, in one save.
+    Set(vocabulary_set::VocabularySetArgs),
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -570,6 +573,7 @@ pub fn run(command: ControlCli, top_level: impl FnOnce() -> clap::Command) -> u8
             VocabularyCommand::Remove { term, output } => {
                 send(ControlCommand::VocabularyRemove { term }, output)
             }
+            VocabularyCommand::Set(args) => vocabulary_set::run(args),
         },
         ControlCli::Logs {
             process,

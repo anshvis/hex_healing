@@ -241,6 +241,14 @@ overrides only the language, and must be one the model supports.
 running Hex, which saves settings and reloads them as a window edit would.
 Terms match in any case; `add` of a term already listed only merges new
 spellings, and replies `changed: false` when there are none.
+`vocabulary set --file list.json` replaces the whole list in one save, in the
+file's order: a JSON array whose items are a term string or
+`{"term": "...", "sounds_like": ["..."]}`. It is all or nothing: an invalid
+entry (empty, over 64 characters, over 16 spellings), a term listed twice (any
+case), or more than 500 entries answers `invalid-vocabulary` naming the entry
+(from 0) and nothing is saved. The same list, in the same order, replies
+`changed: false`. Per-mode vocabularies are untouched. Like `add`, it needs the
+running Hex.
 
 `quit` and `restart` without `--force` are refused with `busy` when the
 listener doesn't answer whether it's recording; no listener, or one waiting for
@@ -376,6 +384,7 @@ window-show {pane?} | window-hide | window-story {story, variant?, play}
 onboarding-reset
 history-clear | check-for-updates | launch-at-login {enabled?}
 vocabulary-list | vocabulary-add {term, sounds_like} | vocabulary-remove {term}
+vocabulary-set {entries}                         replaces the list; error code invalid-vocabulary
 scrawl-capture {action}                          action: start | stop | cancel | status; `capture` experiment
 scrawl-capture-list {limit?} | scrawl-capture-show {capture}
 scrawl-capture-send {capture, to?, always?} | scrawl-capture-route {capture, ask_jev}
