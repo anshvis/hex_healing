@@ -180,7 +180,7 @@ def test_a_v5_dataset_migrates(tmp_path, monkeypatch):
     assert {"weight", "edited_positions", "review_strategy"} <= columns
     tables = {r[0] for r in migrated.db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"reviews", "splits", "split_members"} <= tables
-    assert migrated.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION == 7
+    assert migrated.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION == 8
     kept = migrated.db.execute("SELECT raw_text, weight, label FROM clips").fetchone()
     assert tuple(kept) == ("a b c", 0, "unlabelled")
     # idempotent: a run that stopped part-way finishes on the next open

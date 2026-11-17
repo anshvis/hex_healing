@@ -103,6 +103,25 @@ def main(argv: list[str] | None = None) -> int:
     observation = report.add_parser("observation", help="per app: pastes observed and edited")
     observation.add_argument("--json", action="store_true")
 
+    vocab = commands.add_parser("vocab").add_subparsers(dest="command", required=True)
+    mine = vocab.add_parser("mine", help="corrections you made twice become candidate vocabulary terms")
+    mine.add_argument("--min-pairs", type=int, default=2)
+    mine.add_argument("--window", default="30d", help="how far back a term's recent use is counted: 30d, a date or RFC 3339")
+    mine.add_argument("--train-only", action="store_true", help="only clips outside the test clusters (the A/B needs this)")
+    mine.add_argument("--json", action="store_true")
+    apply = vocab.add_parser("apply", help="write your terms, then the mined ones by rank, into Hex's vocabulary")
+    apply.add_argument("--dry-run", action="store_true")
+    apply.add_argument("--max-biased", type=int, default=64, help="slots Hex biases, for the report (Hex's own cap is 64)")
+    apply.add_argument("--force", action="store_true", help="write even without a passing A/B at Hex's boost (logged)")
+    apply.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
+    ab = vocab.add_parser("ab", help="score the current GGUF with and without the mined terms (needs the T3.4 hex)")
+    ab.add_argument("--boost", choices=["light", "normal", "strong"], default="normal")
+    ab.add_argument("--model", type=Path, default=None, help="GGUF to score (default: the catalog Unified)")
+    ab.add_argument("--parent", default="current", help="whose rolling set to score")
+    ab.add_argument("--hex", type=Path, default=None, help="path to the hex binary that reads your vocabulary")
+    revert = vocab.add_parser("revert", help="remove the terms healing still owns by content, in one write")
+    revert.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
+
     protocol = commands.add_parser("protocol").add_subparsers(dest="command", required=True)
     seeded = protocol.add_parser("corrections", help="the seeded edit-recall protocol (X-3)")
     seeded.add_argument("step", choices=["plan", "run", "score"])
@@ -125,6 +144,15 @@ def main(argv: list[str] | None = None) -> int:
         from healing import golden as golden_module
 
         return golden_module.main(args)
+    if args.group == "vocab":
+        from healing.vocab import apply as apply_module
+        from healing.vocab import mine as mine_module
+
+        if args.command == "ab":
+            from healing.vocab import ab as ab_module
+
+            return ab_module.main(args)
+        return (mine_module if args.command == "mine" else apply_module).main(args)
     if args.group == "report":
         return _report(args)
     if args.group == "protocol":
