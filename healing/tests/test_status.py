@@ -148,3 +148,15 @@ def test_status_does_not_sweep_temporaries(tmp_path, monkeypatch):
     assert leftover.exists()
     Store().close()
     assert not leftover.exists()
+
+
+def test_vocabulary_warnings_only_after_apply(world):
+    from healing.vocab import apply as vocab_apply
+
+    world.settings(**{"labs.vocabulary_biasing": False})
+    assert codes(world) == []  # never applied: nothing to warn about
+    vocab_apply.save_applied(vocab_apply.Applied(1, [], [], None, 64))
+    assert codes(world) == ["your_terms_fill_bias", "vocabulary_biasing_off"]
+    world.settings(**{"labs.vocabulary_biasing": True})
+    vocab_apply.save_applied(vocab_apply.Applied(1, [], [], None, 3))
+    assert codes(world) == []

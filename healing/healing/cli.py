@@ -109,6 +109,12 @@ def main(argv: list[str] | None = None) -> int:
     mine.add_argument("--window", default="30d", help="how far back a term's recent use is counted: 30d, a date or RFC 3339")
     mine.add_argument("--train-only", action="store_true", help="only clips outside the test clusters (the A/B needs this)")
     mine.add_argument("--json", action="store_true")
+    apply = vocab.add_parser("apply", help="write your terms, then the mined ones by rank, into Hex's vocabulary")
+    apply.add_argument("--dry-run", action="store_true")
+    apply.add_argument("--max-biased", type=int, default=64, help="slots Hex biases, for the report (Hex's own cap is 64)")
+    apply.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
+    revert = vocab.add_parser("revert", help="remove the terms healing still owns by content, in one write")
+    revert.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
 
     protocol = commands.add_parser("protocol").add_subparsers(dest="command", required=True)
     seeded = protocol.add_parser("corrections", help="the seeded edit-recall protocol (X-3)")
@@ -133,9 +139,10 @@ def main(argv: list[str] | None = None) -> int:
 
         return golden_module.main(args)
     if args.group == "vocab":
+        from healing.vocab import apply as apply_module
         from healing.vocab import mine as mine_module
 
-        return mine_module.main(args)
+        return (mine_module if args.command == "mine" else apply_module).main(args)
     if args.group == "report":
         return _report(args)
     if args.group == "protocol":

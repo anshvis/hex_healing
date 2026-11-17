@@ -31,6 +31,8 @@ WARNINGS = {
     "recordings_hidden": "Keep recordings is off but earlier WAVs still exist; hex history hides them",
     "disk_below_floor": "free space on the dataset's volume is under the floor: no audio is being copied",
     "index_mismatch": "the audio index and the disk disagree; run healing clean",
+    "vocabulary_biasing_off": "healing vocab apply wrote terms but Labs > Vocabulary biasing is off, so none take effect",
+    "your_terms_fill_bias": "your own vocabulary terms take all 64 bias slots, so no mined term is biased",
     "settings_unreadable": "could not read Hex's settings (is Hex running?), so some warnings are unknown",
 }
 
@@ -115,6 +117,25 @@ class Status:
         return "\n".join(lines)
 
 
+def _vocabulary_warnings(binary: Path, warnings: list[str]) -> None:
+    """Only for someone who has used `healing vocab apply` (its record exists)."""
+    from healing.vocab import apply as vocab_apply
+
+    try:
+        applied = vocab_apply.load_applied()
+    except vocab_apply.ApplyError:
+        return
+    if not vocab_apply.applied_path().exists():
+        return
+    if applied.user_terms >= vocab_apply.BIAS_SLOTS:
+        warnings.append("your_terms_fill_bias")
+    try:
+        if hex_setting(binary, "labs.vocabulary_biasing") is False:
+            warnings.append("vocabulary_biasing_off")
+    except SettingsUnavailable:
+        pass  # settings_unreadable already says so
+
+
 def compute(
     store: Store, binary: Path, budget: int = DEFAULT_BUDGET, now: int | None = None,
     min_free: int = DEFAULT_MIN_FREE, free_fn=None,
@@ -171,6 +192,7 @@ def compute(
             warnings.append("gap_exceeds_retention")
     if retention == "day":
         warnings.append("history_retention_day")
+    _vocabulary_warnings(binary, warnings)
     if status.audio_bytes > 0.9 * budget:
         warnings.append("budget_over_90pct")
     missing = db.execute(
