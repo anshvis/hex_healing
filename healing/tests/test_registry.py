@@ -26,11 +26,18 @@ CATALOG_ID = "parakeet-unified-en-0.6b"
 FAKE_HEX = """#!{python}
 import json, os, sys
 args = sys.argv[1:]
-if args[:2] != ["model", "list"]:
-    sys.exit(2)
 if os.environ.get("FAKE_HEX_DOWN"):
     sys.exit(3)
 selected = os.environ["FAKE_SELECTED"]
+if args[:1] == ["status"]:
+    fallback = os.environ.get("FAKE_FALLBACK")
+    model = {{"id": selected, "name": selected, "language": "en", "installed": not os.environ.get("FAKE_NOT_INSTALLED"),
+             "preparing": None, "downloaded_bytes": 0, "error": None,
+             "fallback": {{"id": fallback, "name": fallback, "language": "en", "reason": "missing"}} if fallback else None}}
+    print(json.dumps({{"version": 4, "status": "status", "app_version": "x", "pid": 1, "model": model}}, indent=2))
+    sys.exit(0)
+if args[:2] != ["model", "list"]:
+    sys.exit(2)
 models = [{{"id": i, "name": i, "languages": ["en"], "size": "700 MB", "installed": True, "selected": i == selected,
            "streams": True, "vocabulary": "bias", "supports_recognition_hints": False, "source": "hex"}}
           for i in ["{catalog}", "parakeet-tdt-0.6b-v2", selected] if i]
@@ -381,7 +388,7 @@ def test_restore_rebuilds_a_deleted_gguf_byte_identical(env, capsys):
 def test_restore_of_a_non_deterministic_converter_records_wer_parity(env, monkeypatch):
     base(env)
     candidate(env, 1)
-    registry.record_scores("v1", {"general": {"wer": 0.0575, "set_sha256": "5" * 64}})
+    registry.record_scores("v1", {"general": {"wer": 0.0575, "set_sha256": "5" * 64, "vocabulary_terms": 0}})
     original = delete_every_copy(env, 1)
     monkeypatch.setenv("NONDETERMINISTIC", "1")
     seen = []
@@ -410,7 +417,8 @@ def test_restore_of_a_non_deterministic_converter_records_wer_parity(env, monkey
 
 
 def test_parity_compare_skips_a_changed_set_and_needs_one():
-    recorded = {"general": {"wer": 0.05, "set_sha256": "a"}, "golden": {"wer": 0.04, "set_sha256": "b"}}
+    recorded = {"general": {"wer": 0.05, "set_sha256": "a", "vocabulary_terms": 0},
+                "golden": {"wer": 0.04, "set_sha256": "b", "vocabulary_terms": 0}}
     result = restore_module.compare(recorded, {"general": (0.0504, "a"), "golden": (0.09, "changed")})
     assert result["passed"] and result["skipped"] == {"golden": "the set changed since it was scored"}
     assert not restore_module.compare(recorded, {"golden": (0.04, "changed")})["passed"]
@@ -468,7 +476,7 @@ def test_parity_eval_scores_golden_with_the_dataset_store(env, monkeypatch, tmp_
                 "scores": {str(gguf): {"golden": {"wer": 0.04}} if golden else {}}}
 
     monkeypatch.setattr(eval_run, "evaluate", evaluate)
-    version = registry.Version("v1", {}, scores={"golden": {"wer": 0.0402, "set_sha256": "g" * 64}})
+    version = registry.Version("v1", {}, scores={"golden": {"wer": 0.0402, "set_sha256": "g" * 64, "vocabulary_terms": 0}})
     result = restore_module.eval_parity(version, gguf)
     assert seen["store"] is not None and seen["vocabulary"] == "none"
     assert result["passed"] and "golden" in result["sets"]
@@ -540,7 +548,7 @@ def test_a_corrupt_gguf_object_is_repaired_by_a_hash_restore(env):
 def test_a_later_hash_restore_supersedes_a_parity_restore(env, monkeypatch):
     base(env)
     original = candidate(env, 1)
-    registry.record_scores("v1", {"general": {"wer": 0.05, "set_sha256": "5" * 64}})
+    registry.record_scores("v1", {"general": {"wer": 0.05, "set_sha256": "5" * 64, "vocabulary_terms": 0}})
     monkeypatch.setenv("NONDETERMINISTIC", "1")
     parity = restore_module.restore(
         "v1", parity=lambda v, g: restore_module.compare(v.scores, {"general": (0.05, "5" * 64)}))
@@ -552,9 +560,10 @@ def test_a_later_hash_restore_supersedes_a_parity_restore(env, monkeypatch):
 
 
 def test_parity_ignores_scores_whose_set_cannot_be_identified():
-    unnamed = restore_module.compare({"general": {"wer": 0.05}}, {"general": (0.05, "a")})
+    unnamed = restore_module.compare({"general": {"wer": 0.05, "vocabulary_terms": 0}}, {"general": (0.05, "a")})
     assert not unnamed["passed"] and "identify" in unnamed["skipped"]["general"]
-    unknown_now = restore_module.compare({"general": {"wer": 0.05, "set_sha256": "a"}}, {"general": (0.05, None)})
+    unknown_now = restore_module.compare({"general": {"wer": 0.05, "set_sha256": "a", "vocabulary_terms": 0}},
+                                         {"general": (0.05, None)})
     assert not unknown_now["passed"] and "identify" in unknown_now["skipped"]["general"]
 
 
@@ -610,3 +619,130 @@ def test_hexcli_reads_a_pretty_printed_reply():
     from healing import hexcli
 
     assert hexcli.reply('note\n{\n  "status": "models",\n  "models": []\n}\n') == {"status": "models", "models": []}
+
+
+# ---- review fixes, round 2 (Codex on 954ad580) --------------------------------------------------
+
+def converter_args(env) -> list:
+    return ["--converter-repo", "r", "--converter-rev", env.rev, "--converter-dir", env.checkout,
+            "--export-command", f"{sys.executable} convert.py {{base}} {{delta}} {{config}} {{output}}"]
+
+
+def test_candidate_objects_are_published_under_the_registry_lock(env):
+    import threading
+
+    base(env)
+    shared = candidate(env, 1)  # v1's GGUF; v2 registers the same file with another delta
+    real_put = objects.put
+    racer = {}
+
+    def put(source, sha256=None):
+        digest = real_put(source, sha256)
+        if "thread" not in racer:  # a concurrent `reject v1` (retention) right after the first put
+            racer["thread"] = threading.Thread(target=registry.reject, args=("v1", "failed the gate"))
+            racer["thread"].start()
+            racer["thread"].join(0.5)
+        return digest
+
+    import healing.registry.objects as objects_module
+
+    objects_module.put = put
+    try:
+        assert cli("models", "register", "--gguf", env.root / "v1.gguf", "--delta", env.write("d2", b"other delta"),
+                   "--config", env.root / "config-1.yaml", *converter_args(env)) == 0
+    finally:
+        objects_module.put = real_put
+        racer["thread"].join()
+    assert registry.load().get("v2").artifact("gguf") == shared
+    assert objects.has(shared)  # the registered candidate still has its GGUF
+
+
+def test_owner_dir_leaves_existing_ancestors_alone(env, tmp_path, monkeypatch):
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o755)
+    shared.chmod(0o755)
+    monkeypatch.setenv("HEALING_HOME", str(shared / "new" / "home"))
+    synced = []
+    real = objects.fsync_dir
+    monkeypatch.setattr(objects, "fsync_dir", lambda path: (synced.append(Path(path)), real(path)))
+    objects.put(env.write("model.gguf", b"bytes"))
+    assert shared.stat().st_mode & 0o777 == 0o755  # an ancestor it did not create keeps its mode
+    assert (shared / "new").stat().st_mode & 0o777 == 0o700
+    assert tmp_path not in synced  # nothing was created in it
+
+
+def test_current_does_not_match_a_saved_import_hex_cannot_run(env, capsys, monkeypatch):
+    base(env)
+    sha = candidate(env, 1)
+    registry.promote("v1")
+    monkeypatch.setenv("FAKE_SELECTED", "custom-" + sha[:16])
+    monkeypatch.setenv("FAKE_FALLBACK", "parakeet-tdt-0.6b-v2")  # the import is missing; Hex runs its default
+    capsys.readouterr()
+    assert cli("models", "current", "--hex", env.hex) == 1
+    out = capsys.readouterr().out
+    assert "mismatch" in out and "parakeet-tdt-0.6b-v2" in out and "matches" not in out
+    monkeypatch.delenv("FAKE_FALLBACK")
+    monkeypatch.setenv("FAKE_NOT_INSTALLED", "1")
+    assert cli("models", "current", "--hex", env.hex) == 4
+    assert "unverifiable" in capsys.readouterr().out
+
+
+def test_parity_counts_only_vocabulary_free_scores(env):
+    from healing.registry.commands import scores_from
+
+    gguf_sha = "a" * 64
+    document = {"models": [{"gguf_path": "/m", "gguf_sha256": gguf_sha}], "vocabulary": {"mode": "current", "terms": 12, "boost": "normal"},
+                "sets": [{"set": "general", "manifest_sha256": "5" * 64}], "scores": {"/m": {"general": {"wer": 0.05}}}}
+    biased = scores_from(document, gguf_sha, "eval.json")
+    assert biased["general"]["vocabulary_terms"] == 12
+    result = restore_module.compare(biased, {"general": (0.05, "5" * 64)})
+    assert not result["passed"] and "vocabulary" in result["skipped"]["general"]
+    document["vocabulary"] = {"mode": "none", "terms": 0, "boost": None}
+    assert restore_module.compare(scores_from(document, gguf_sha, "eval.json"), {"general": (0.05, "5" * 64)})["passed"]
+    baseline = scores_from({"wer": 0.05, "set_sha256": "5" * 64, "gguf_sha256": gguf_sha}, gguf_sha, "baseline.json")
+    assert baseline["general"]["vocabulary_terms"] == 0  # `eval baseline` is `--vocabulary none`
+
+
+def test_every_deletion_of_a_recreated_object_is_recorded(env):
+    base(env)
+    shared = candidate(env, 1)
+    registry.reject("v1", "failed")
+    assert not objects.has(shared)
+    assert cli("models", "register", "--gguf", env.export("again.gguf", b"delta 1", "lora: {rank: 16}\n"),
+               "--delta", env.write("d2", b"other delta"), "--config", env.root / "config-1.yaml", *converter_args(env)) == 0
+    assert objects.has(shared)  # recreated for v2
+    registry.reject("v2", "failed again")
+    assert not objects.has(shared)
+    pruned = [(e["version"], e["sha256"]) for e in registry.read_events() if e["event"] == "pruned_artifact"]
+    assert pruned.count(("v1", shared)) == 2 and pruned.count(("v2", shared)) == 1
+
+
+def test_register_base_retry_repairs_a_corrupt_v0_object(env):
+    base(env)
+    sha = objects.sha256_file(env.catalog)
+    objects.path(sha).write_bytes(b"bit rot")
+    base(env)
+    assert objects.sha256_file(objects.path(sha)) == sha
+
+
+def test_restore_resolves_a_relative_converter_checkout(env, monkeypatch):
+    base(env)
+    gguf = env.export("v1.gguf", b"delta 1", "c\n")
+    assert cli("models", "register", "--gguf", gguf, "--delta", env.write("d1", b"delta 1"), "--config", env.write("c1", b"c\n"),
+               "--converter-repo", "r", "--converter-rev", env.rev, "--converter-dir", env.checkout,
+               "--export-command", f"{sys.executable} {{checkout}}/convert.py {{base}} {{delta}} {{config}} {{output}}") == 0
+    monkeypatch.chdir(env.root)
+    assert restore_module.restore("v1", checkout=Path("converter"))["method"] == "sha256"
+    monkeypatch.setenv("HEALING_CONVERTER_DIR", "converter")
+    assert restore_module.restore("v1")["method"] == "sha256"
+
+
+def test_a_bad_scores_file_registers_nothing(env, capsys):
+    base(env)
+    bad = env.write("bad.json", b"{not json")
+    gguf = env.export("v1.gguf", b"delta 1", "c\n")
+    code = cli("models", "register", "--gguf", gguf, "--delta", env.write("d1", b"delta 1"), "--config", env.write("c1", b"c\n"),
+               "--converter-repo", "r", "--converter-rev", env.rev, "--converter-dir", env.checkout,
+               "--export-command", "x", "--scores", bad)
+    assert code == 1 and set(registry.load().versions) == {"v0"}
+    assert not objects.has(objects.sha256_file(gguf))

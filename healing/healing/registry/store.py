@@ -177,6 +177,7 @@ def fold(events: list[dict]) -> State:
             if name in state.versions:
                 raise RegistryError(f"{name} is registered twice")
             state.versions[name] = Version(name, {k: v for k, v in event.items() if k not in ("event", "version")})
+            _republished(state, (event.get("artifacts") or {}).values())
             continue
         if kind not in EVENTS:
             continue  # a newer healing's event: leave it to that healing
@@ -197,11 +198,19 @@ def fold(events: list[dict]) -> State:
                 state.current = event.get("to") or _fallback(state, name)
         elif kind == "restored":
             version.restores.append({k: v for k, v in event.items() if k not in ("event", "version")})
-            for sha in (event.get("gguf_sha256"), event.get("rebuilt_sha256")):
-                version.pruned.pop(sha, None)  # the file is back; pruning it again is a new event
+            _republished(state, (event.get("gguf_sha256"), event.get("rebuilt_sha256")))
         elif kind == "pruned_artifact":
             version.pruned[event["sha256"]] = event["kind"]
     return state
+
+
+def _republished(state: State, shas) -> None:
+    """An event that stores an object (a registration, a restore) recreates it: every earlier prune of it
+    is complete, so deleting it again is a new deletion with its own events. A prune marker left
+    standing therefore means only a pending unlink (a crash between the event and the unlink)."""
+    for sha in filter(None, shas):
+        for version in state.versions.values():
+            version.pruned.pop(sha, None)
 
 
 def _fallback(state: State, leaving: str) -> str | None:
@@ -218,14 +227,19 @@ def load() -> State:
 
 # ---- writes -------------------------------------------------------------------------------------
 
-def register(record: dict) -> str:
-    """Append a `registered` event for the next version number; returns the name. Holds the lock."""
+def register(record: dict, publish: list[tuple[Path, str]] = (), scores: dict | None = None) -> str:
+    """Store `publish` (each `(file, sha256)`) as objects and append the `registered` event (and `scored`,
+    when given) for the next version number, all under one hold of the lock, so retention can never
+    delete an object between its store and the event that names it. Returns the name."""
     with lock():
         state = load()
         name = state.next_name()
         if record.get("parent") and record["parent"] not in state.versions:
             raise RegistryError(f"parent {record['parent']} is not registered")
-        append({"event": "registered", "version": name, **record})
+        for source, sha in publish:
+            objects.put(source, sha)
+        append({"event": "registered", "version": name, **record},
+               *([{"event": "scored", "version": name, "scores": scores}] if scores else []))
         retain()
         return name
 
@@ -321,21 +335,23 @@ def retain() -> list[tuple[str, str, str]]:
     keepers = gguf_keepers(state)
     needed = {sha for name in keepers for sha in state.versions[name].ggufs()}
     needed |= {v.artifact("lora_delta") for v in state.versions.values()} - {None}
-    pruned = []
+    holders: dict[str, list[tuple[Version, str]]] = {}  # sha -> every (version, kind) that lets it go
     for version in state.ordered():
-        doomed = []
         if version.name not in keepers:
-            doomed += [("gguf", sha) for sha in sorted(version.ggufs())]
+            for sha in sorted(version.ggufs()):
+                holders.setdefault(sha, []).append((version, "gguf"))
         if version.artifact("merged_nemo"):
-            doomed.append(("merged_nemo", version.artifact("merged_nemo")))
-        for kind, sha in doomed:
-            if sha in needed or not objects.path(sha).is_file():
-                continue
-            # The event is the intent and goes first: a crash before the unlink leaves an event whose
-            # file still exists, which the next retain removes without a second event.
+            holders.setdefault(version.artifact("merged_nemo"), []).append((version, "merged_nemo"))
+    pruned = []
+    for sha, who in holders.items():
+        if sha in needed or not objects.path(sha).is_file():
+            continue
+        # The events are the intent and go first, one per version naming the file: a crash before the
+        # unlink leaves markers whose file still exists, which the next retain removes with no new events.
+        for version, kind in who:
             if version.pruned.get(sha) != kind:
                 append({"event": "pruned_artifact", "version": version.name, "kind": kind, "sha256": sha})
                 version.pruned[sha] = kind
                 pruned.append((version.name, kind, sha))
-            objects.remove(sha)
+        objects.remove(sha)
     return pruned

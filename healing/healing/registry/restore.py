@@ -112,14 +112,18 @@ def eval_parity(version: registry.Version, gguf: Path) -> dict:
 
 
 def compare(recorded: dict, rebuilt: dict) -> dict:
-    """`rebuilt` is `{set: (wer, manifest sha)}`. Passes when at least one set positively matches by
-    manifest hash and every matching set is within tolerance."""
+    """`rebuilt` is `{set: (wer, manifest sha)}`, scored with no vocabulary. Passes when at least one
+    vocabulary-free recorded set positively matches by manifest hash and every matching set is within
+    tolerance."""
     sets, skipped = {}, {}
     for name, score in recorded.items():
         if name not in rebuilt or rebuilt[name][0] is None:
             skipped[name] = "not scored now"
             continue
         wer, manifest = rebuilt[name]
+        if score.get("vocabulary_terms") != 0:  # parity scores the rebuild with no vocabulary
+            skipped[name] = "scored with a vocabulary, or with no record of one"
+            continue
         if not score.get("set_sha256") or not manifest:
             skipped[name] = "cannot identify the set (no manifest hash recorded or reported)"
             continue
@@ -136,7 +140,7 @@ def converter_checkout(version: registry.Version, named: Path | None) -> Path:
     found = found or (Path(version.record["converter"]["checkout"]) if (version.record.get("converter") or {}).get("checkout") else None)
     if found is None:
         raise RestoreError("no converter checkout: pass --converter-dir or set HEALING_CONVERTER_DIR")
-    return found
+    return found.expanduser().resolve()  # absolute, so `{checkout}/…` still names it from cwd=checkout
 
 
 def _object(sha: str | None, what: str) -> Path:

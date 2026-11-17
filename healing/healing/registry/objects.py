@@ -36,17 +36,17 @@ def fsync_dir(path: Path) -> None:
 
 
 def owner_dir(path: Path) -> None:
-    """Make `path` (0700) and any missing ancestors, fsyncing each new folder's parent so its entry is
-    durable, not only the files later written inside it."""
+    """Make `path` and any missing ancestors (0700), fsyncing each new folder's parent so its entry is
+    durable. Folders that already exist, `path` included, are left exactly as they are: their mode is
+    not this code's to change (a shared `/tmp`, a user's own folder)."""
     if path.is_dir():
-        os.chmod(path, 0o700)
         return
     owner_dir(path.parent)
     try:
         path.mkdir(mode=0o700)
     except FileExistsError:
-        pass
-    os.chmod(path, 0o700)
+        return  # another process made it
+    os.chmod(path, 0o700)  # mkdir's mode is masked by the umask
     fsync_dir(path.parent)
 
 

@@ -70,8 +70,10 @@ def catalog_file(model_id: str) -> Path:
 
 # ---- scores -------------------------------------------------------------------------------------
 
-def _set_score(scores: dict, set_sha: str | None, source: str) -> dict:
-    out = {"wer": scores.get("wer"), "source": source}
+def _set_score(scores: dict, set_sha: str | None, source: str, vocabulary_terms: int | None) -> dict:
+    """One set's score with what identifies it: the set's manifest hash and how many vocabulary terms the
+    model was biased with (0 is none; None is unknown). Only vocabulary-free scores count for parity."""
+    out = {"wer": scores.get("wer"), "source": source, "vocabulary_terms": vocabulary_terms}
     for key in ("ref_words", "reference_words", "formatting_error", "term_error", "edited_span_error"):
         if scores.get(key) is not None:
             out[key] = scores[key]
@@ -86,15 +88,18 @@ def scores_from(document: dict, gguf_sha: str, source: str) -> dict:
     if "wer" in document and "set_sha256" in document:  # baseline.json: the general set
         if document.get("gguf_sha256") not in (None, gguf_sha):
             return {}
-        return {"general": _set_score({**document, "ref_words": document.get("reference_words")}, document["set_sha256"], source)}
+        # `healing eval baseline` is `healing eval --vocabulary none`
+        return {"general": _set_score({**document, "ref_words": document.get("reference_words")}, document["set_sha256"], source, 0)}
     if isinstance(document.get("models"), list) and isinstance(document.get("scores"), dict):
         paths = [m["gguf_path"] for m in document["models"] if m.get("gguf_sha256") == gguf_sha]
         if not paths:
             return {}
         manifests = {s["set"]: s.get("manifest_sha256") for s in document.get("sets", [])}
         found = document["scores"].get(paths[0], {})
-        return {name: _set_score(s, manifests.get(name), source) for name, s in found.items() if s.get("wer") is not None}
-    return {name: _set_score(s, s.get("set_sha256"), source) for name, s in document.items()
+        vocabulary = document.get("vocabulary")
+        terms = vocabulary.get("terms") if isinstance(vocabulary, dict) else None
+        return {name: _set_score(s, manifests.get(name), source, terms) for name, s in found.items() if s.get("wer") is not None}
+    return {name: _set_score(s, s.get("set_sha256"), source, s.get("vocabulary_terms")) for name, s in document.items()
             if name in SCORE_SETS and isinstance(s, dict)}
 
 
@@ -172,8 +177,9 @@ def _resume_base(state: registry.State, v0: registry.Version, gguf: Path, sha: s
     before the object was stored); with nothing left to do, say v0 is already registered. The caller
     holds the lock."""
     done = []
-    if not objects.has(sha):
-        objects.put(gguf, sha)
+    whole = objects.has(sha) and objects.sha256_file(objects.path(sha)) == sha
+    objects.put(gguf, sha)  # validates a stored copy and replaces a damaged one
+    if not whole:
         done.append("stored its GGUF")
     if state.current is None and not state.promotions and v0.state == "candidate":
         registry.append({"event": "promoted", "version": "v0", "reason": "base"})
@@ -226,8 +232,9 @@ def register(args) -> list[str]:
     if missing:
         raise CommandError(f"no converter {', '.join(missing)} recorded: pass --converter-repo, --converter-rev and --export-command", 2)
     config_text = Path(args.config).read_text()
-    gguf_sha = objects.put(Path(args.gguf))
-    delta_sha = objects.put(Path(args.delta))
+    gguf_sha = objects.sha256_file(Path(args.gguf))
+    delta_sha = objects.sha256_file(Path(args.delta))
+    scores = recorded_scores(gguf_sha, args.scores) if args.scores else {}  # read and checked before any write
     record = {
         "base": parent.record.get("base"), "parent": parent.name, "arch": args.arch or parent.record.get("arch"),
         "dataset": _dataset(args.train, args.snapshot),
@@ -235,10 +242,7 @@ def register(args) -> list[str]:
         "code_sha": code_shas(args.hex_sha), "converter": converter, "quantization": args.quantization,
         "artifacts": {"lora_delta": delta_sha, "merged_nemo": None, "gguf": gguf_sha},
     }
-    name = registry.register(record)
-    scores = recorded_scores(gguf_sha, args.scores) if args.scores else {}
-    if scores:
-        registry.record_scores(name, scores)
+    name = registry.register(record, publish=[(Path(args.gguf), gguf_sha), (Path(args.delta), delta_sha)], scores=scores)
     return [f"{name}: candidate from {parent.name}, gguf {gguf_sha[:12]} ({objects.hex_model_id(gguf_sha)}), delta {delta_sha[:12]}"]
 
 
@@ -281,32 +285,61 @@ def show(state: registry.State, name: str) -> dict:
     return out
 
 
+def running_model(binary: Path) -> dict:
+    """What Hex runs, from `hex status --json`'s `model` (`ModelReport`, src/control.rs): the saved `id`,
+    whether it is `installed`, and the `fallback` Hex runs in its place while a saved import is missing,
+    changed or switched off (`custom_models::fallback_reason`). `hex model list` keeps such an import
+    `selected`, so it can't say what runs."""
+    try:
+        done = hexcli.run(binary, ["status", "--json"])
+    except hexcli.HexNotRunning as error:
+        raise CommandError(str(error), hexcli.EXIT_NOT_RUNNING) from error
+    except hexcli.HexError as error:
+        raise CommandError(str(error)) from error
+    reply = hexcli.reply(done.stdout)
+    model = reply.get("model") if reply and reply.get("status") == "status" else None
+    if not isinstance(model, dict) or not isinstance(model.get("id"), str):
+        raise CommandError("hex status --json printed no model this version can read")
+    return model
+
+
 def current(binary: Path) -> tuple[list[str], int]:
-    """The current version against Hex's selected model. Exit 1 on a mismatch and `EXIT_UNVERIFIABLE` when
-    the catalog file Hex runs can't be hashed; neither is ever fixed here."""
+    """The current version against what Hex really runs. Exit 1 on a mismatch and `EXIT_UNVERIFIABLE` when
+    it can't be checked (the saved model isn't installed, or v0's catalog file can't be hashed); neither is
+    ever fixed here."""
     version = registry.load().get("current")
     lines = [f"current {version.name}, gguf {(version.gguf or '-')[:12]}"]
-    model = selected_model(binary)
+    model = running_model(binary)
+    catalog_id = (version.record.get("base") or {}).get("catalog_id")
     expected = {objects.hex_model_id(sha) for sha in version.ggufs()}
-    if version.name == "v0" or not version.artifact("lora_delta"):
-        expected.add((version.record.get("base") or {}).get("catalog_id"))
-    if model["id"] in expected:
-        if model["id"] == (version.record.get("base") or {}).get("catalog_id"):
-            try:
-                on_disk = objects.sha256_file(catalog_file(model["id"]))
-            except (CommandError, OSError) as error:
-                lines.append(f"unverifiable: Hex runs {model['id']}, but its file could not be hashed ({error}), "
-                             f"so it may not be the pinned {(version.gguf or '-')[:12]}")
-                return lines, EXIT_UNVERIFIABLE
-            if on_disk not in version.ggufs():
-                lines.append(f"mismatch: Hex runs {model['id']}, but its file is now {on_disk[:12]}, not the pinned "
-                             f"{(version.gguf or '-')[:12]} (a catalog update; not changed)")
-                return lines, 1
-        lines.append(f"Hex runs {model['id']}: matches")
-        return lines, 0
-    lines.append(f"mismatch: Hex runs {model['id']}, but the registry's current {version.name} is "
-                 + " or ".join(sorted(e for e in expected if e)) + " (not changed; pick it in Hex or promote what Hex runs)")
-    return lines, 1
+    if not version.artifact("lora_delta"):
+        expected.add(catalog_id)
+    fallback = model.get("fallback")
+    if isinstance(fallback, dict) and fallback.get("id"):
+        running = fallback["id"]
+        note = f"Hex saved {model['id']} but runs {running} in its place ({fallback.get('reason', 'unknown')})"
+    elif model.get("installed") is not True:
+        lines.append(f"unverifiable: Hex's saved model {model['id']} is not installed, so it is not running it")
+        return lines, EXIT_UNVERIFIABLE
+    else:
+        running, note = model["id"], f"Hex runs {model['id']}"
+    if running not in expected:
+        lines.append(f"mismatch: {note}, but the registry's current {version.name} is "
+                     + " or ".join(sorted(e for e in expected if e)) + " (not changed; pick it in Hex or promote what Hex runs)")
+        return lines, 1
+    if running == catalog_id:
+        try:
+            on_disk = objects.sha256_file(catalog_file(running))
+        except (CommandError, OSError) as error:
+            lines.append(f"unverifiable: {note}, but its file could not be hashed ({error}), "
+                         f"so it may not be the pinned {(version.gguf or '-')[:12]}")
+            return lines, EXIT_UNVERIFIABLE
+        if on_disk not in version.ggufs():
+            lines.append(f"mismatch: {note}, but its file is now {on_disk[:12]}, not the pinned "
+                         f"{(version.gguf or '-')[:12]} (a catalog update; not changed)")
+            return lines, 1
+    lines.append(f"{note}: matches")
+    return lines, 0
 
 
 def pin_golden() -> str:
