@@ -178,6 +178,23 @@ meant. The rules that bound what a region can take in (R1 to R9, D-8):
   outside the region ("Hanks Smith tail" to "Hanks  secret tail": "Smith"
   taken out and "secret " typed before "tail"): it is lost.
 
+- **R11, a read that could have been made another way (round 11).** After
+  landing, a read is followed only if its change from the last read has one
+  reading. The words of the change slid along equal words (a word taken out of
+  "a a a") must sit on the same side of the region in every alignment; the
+  region's first or last word may not equal the word beside it, nor may the
+  words put in or taken out equal the words kept beside them ("Yes" to "No"
+  with " No" after it: "No" is the word that was there, or the replacement),
+  and new words standing where the paste's did may not equal the words beside
+  them. Reads of more than one character also lose the region when they type
+  a copy of its text (glued to it or not, "Ikip hanks kip hanks"), put in a
+  word near one of its words again (one or two letters off), or take out and
+  type letters in one read where no word changed. A change of one key is held
+  only to the first three.
+- **R12, line breaks.** Words put in at an open edge, or over a word at an
+  edge, that have a line break among them lose the region: what follows the
+  break is a new line, not the replacement carried on.
+
 A region that has lost every word (replaced by attachments, an emoji) has no
 edge to open: what is typed beside it is outside.
 
@@ -195,7 +212,7 @@ words (exact or near, one letter off in a word of three or more) in order, two
 of them exact. An empty region is the paste deleted, and a paste wholly
 replaced by unrelated words, both `span_not_found`.
 
-`property_tests.rs` checks the invariant over generated cases (36 actions),
+`property_tests.rs` checks the invariant over generated cases (41 actions, among them a copy of the paste typed with a key glued to it and a word changed in one read, glue and a space in one read, the paste replaced by the word beside it, two words replaced by "word, line break, word", and two ordinary changes in one read),
 each run with the caret known, with it a few units off, with none, with an app
 that collapses blank lines, and with a field too large to read whole. The paste
 sits between corpus sentences or unique words (some sharing its words, some
@@ -240,7 +257,12 @@ by the origin of each character and runs the reviewer's four fuzzers, and
 whether or not the tracker landed), 300,000 cases each, 0 leaks (the round 9
 code leaks in them within 20,000 cases). `recall_tests.rs` measures every way
 of fixing each word of 12 pastes (64,701 fixes): 64,059 (99.0%) stored
-exactly, none stored as anything but the fix: the same as round 9.
+exactly, none stored as anything but the fix: the same as round 9. Round 11
+measures 63,039 (97.4%): see below. `cell_fuzz_tests.rs` (the reviewer's `fz8`)
+tracks every character's origin through sessions of typing, deleting, typing
+over and pasting a copy again, with reads coalesced one in three or eight and a
+two-letter alphabet; 1,500,000 sessions in each of six configurations, 0 leaks
+(the round 10 code leaks in 140 to 309 of them in the coalesced ones).
 
 The recall cost of round 9, stated plainly: 21 fewer fixes of 64,701, all a first
 word backspaced to part of a word and retyped two keys at a time ("the", "t",
@@ -257,7 +279,14 @@ followed; a one-character paste into a field read empty first is lost (a typed
 key looks the same); keys with a blank among them glued to the paste in one
 read are lost. The generator's known-good count fell (44,911 to 32,024)
 because glued and periodic cases are excluded from it; recall on the 64,701
-fixes did not change. A missed correction costs one training example; a stored wrong one teaches the
+fixes did not change.
+
+Round 11 recall cost: 63,039 of 64,701 fixes stored exactly (97.4%, from
+99.0%), none wrong. The 1,662 lost are fixes whose reads are ambiguous in the
+sense of R11 (typing a letter of the region's own text in a coalesced read; a
+replacement that is a word elsewhere in the paste or beside it; a retyped word
+that is the word before the paste), and in the property generator 182 of 28,181
+known-good edits (0.65%) plus 310 edge-ambiguous ones. A missed correction costs one training example; a stored wrong one teaches the
 model text the person never meant.
 
 Known limits, stated plainly: a send button without a Return loses the
