@@ -120,6 +120,12 @@ struct Manifest {
     /// could run, so they read as false.
     #[serde(default)]
     k_quants: bool,
+    /// The streaming catalog model whose architecture and variant its
+    /// header names (a fine-tune of it): with Labs › Stream imported models
+    /// on, it streams once its smoke stream passes. Older manifests read it
+    /// from their architecture and variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    streams_like: Option<String>,
 }
 
 /// The receipt every model file has: the size and digest Hex checked, and
@@ -186,8 +192,130 @@ pub struct Imported {
 struct Entry {
     id: CustomModelId,
     manifest: Manifest,
+    /// Its definition while it doesn't stream, and the one while it does
+    /// ([`streams_where`]), built only for an import that streams like a
+    /// catalog model.
     definition: &'static ModelDefinition,
+    streaming: Option<&'static ModelDefinition>,
     receipt: Option<Receipt>,
+}
+
+impl Entry {
+    /// Its definition with Labs › Stream imported models `lab`.
+    fn current(&self, lab: bool) -> &'static ModelDefinition {
+        match self.streaming {
+            Some(streaming)
+                if streams_where(
+                    lab,
+                    self.manifest.streams_like.is_some(),
+                    stream_smoke(self.id),
+                ) =>
+            {
+                streaming
+            }
+            _ => self.definition,
+        }
+    }
+}
+
+/// Each import's last smoke stream, by ID: whether a live stream ran on the
+/// device its model loaded on. Run when the model loads, so a process that
+/// never loaded an import has none.
+static STREAM_SMOKE: LazyLock<Mutex<HashMap<CustomModelId, bool>>> = LazyLock::new(Mutex::default);
+
+fn stream_smoke(id: CustomModelId) -> Option<bool> {
+    STREAM_SMOKE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&id)
+        .copied()
+}
+
+/// Whether an import streams: Labs › Stream imported models is on, its
+/// header names a streaming catalog model's architecture and variant, and
+/// its smoke stream passed. A CPU never runs one (`GgufSession::probe_stream`),
+/// so an import never streams there.
+fn streams_where(lab: bool, streams_like: bool, smoke: Option<bool>) -> bool {
+    lab && streams_like && smoke == Some(true)
+}
+
+/// The streaming catalog model with `architecture` and `variant`, by ID.
+fn streams_like(architecture: &str, variant: &str) -> Option<String> {
+    super::models::MODELS
+        .iter()
+        .filter(|model| model.streams)
+        .find(|model| {
+            matches!(model.runtime, ModelRuntime::Gguf(artifact)
+                if artifact.architecture == architecture && artifact.variant == variant)
+        })
+        .map(|model| model.id.as_str().to_owned())
+}
+
+/// Whether `id` names an import made from a streaming catalog model (the
+/// same architecture and variant), whether or not it streams now.
+pub fn streams_like_a_catalog_model(id: CustomModelId) -> bool {
+    registry()
+        .entry(id)
+        .is_some_and(|entry| entry.manifest.streams_like.is_some())
+}
+
+/// Runs `probe`, the stream smoke test a model gets as it loads, unless
+/// `selection` is an import Labs › Stream imported models keeps offline:
+/// with the lab off, or for an import that streams like no catalog model,
+/// it never runs and the model transcribes whole clips. An import's result
+/// is kept for [`definition`]; a failed one falls back to whole clips.
+pub(crate) fn smoke_stream<T>(
+    selection: &TranscriptionSelection,
+    probe: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    smoke_stream_where(selection, crate::labs::stream_imported_models(), probe)
+}
+
+/// [`smoke_stream`] against `lab` rather than this process's switch.
+fn smoke_stream_where<T>(
+    selection: &TranscriptionSelection,
+    lab: bool,
+    probe: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    let TranscriptionModelId::Custom(id) = selection.model else {
+        return probe();
+    };
+    let streams_like = registry()
+        .entry(id)
+        .and_then(|entry| entry.manifest.streams_like.clone());
+    let Some(streams_like) = streams_like else {
+        tracing::info!(
+            id = id.as_str(),
+            "this imported model streams like no catalog model; transcribing whole clips"
+        );
+        return None;
+    };
+    if !lab {
+        tracing::info!(
+            id = id.as_str(),
+            streams_like,
+            "an imported streaming model transcribes whole clips while Labs › Stream imported models is off"
+        );
+        return None;
+    }
+    let stream = probe();
+    STREAM_SMOKE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(id, stream.is_some());
+    match &stream {
+        Some(_) => tracing::info!(
+            id = id.as_str(),
+            streams_like,
+            "an imported model passed its smoke stream; it streams"
+        ),
+        None => tracing::warn!(
+            id = id.as_str(),
+            streams_like,
+            "an imported model's smoke stream failed (or its device is a CPU); transcribing whole clips"
+        ),
+    }
+    stream
 }
 
 #[derive(Default)]
@@ -198,7 +326,7 @@ struct Registry {
     /// Definitions built so far, by ID, name, and the file it uses: a
     /// rename, an in-place change, or a re-import builds one, and every
     /// other read reuses it.
-    built: HashMap<(CustomModelId, String, Option<PathBuf>), &'static ModelDefinition>,
+    built: HashMap<(CustomModelId, String, Option<PathBuf>, bool), &'static ModelDefinition>,
     placeholders: HashMap<CustomModelId, &'static ModelDefinition>,
 }
 
@@ -251,14 +379,21 @@ impl Registry {
                 let manifest = fs::read(&path)
                     .ok()
                     .and_then(|data| serde_json::from_slice::<Manifest>(&data).ok());
-                let Some(manifest) = manifest else {
+                let Some(mut manifest) = manifest else {
                     tracing::warn!(path = %path.display(), "ignoring an unreadable imported model manifest");
                     continue;
                 };
-                let definition = *self
-                    .built
-                    .entry((id, manifest.name.clone(), manifest.path.clone()))
-                    .or_insert_with(|| build(id, &manifest));
+                if manifest.streams_like.is_none() {
+                    manifest.streams_like = streams_like(&manifest.architecture, &manifest.variant);
+                }
+                let mut built = |streams: bool| {
+                    *self
+                        .built
+                        .entry((id, manifest.name.clone(), manifest.path.clone(), streams))
+                        .or_insert_with(|| build(id, &manifest, streams))
+                };
+                let definition = built(false);
+                let streaming = manifest.streams_like.is_some().then(|| built(true));
                 let receipt = fs::read(receipt_path(&model_file(&directory, id)))
                     .ok()
                     .and_then(|data| serde_json::from_slice::<Receipt>(&data).ok())
@@ -267,6 +402,7 @@ impl Registry {
                     id,
                     manifest,
                     definition,
+                    streaming,
                     receipt,
                 });
             }
@@ -308,9 +444,9 @@ fn receipt_path(model: &Path) -> PathBuf {
 }
 
 /// A `'static` definition for `manifest`, as the catalog's are. Each is
-/// built once per ID and name, so the few bytes it keeps are bounded by the
-/// imports and renames a person makes.
-fn build(id: CustomModelId, manifest: &Manifest) -> &'static ModelDefinition {
+/// built once per ID, name, and whether it streams, so the few bytes it
+/// keeps are bounded by the imports and renames a person makes.
+fn build(id: CustomModelId, manifest: &Manifest, streams: bool) -> &'static ModelDefinition {
     let leak = |text: &str| -> &'static str { Box::leak(text.to_owned().into_boxed_str()) };
     let languages: Vec<&'static str> = manifest
         .languages
@@ -345,7 +481,7 @@ fn build(id: CustomModelId, manifest: &Manifest) -> &'static ModelDefinition {
         name: leak(&manifest.name),
         realtime: "Unknown",
         word_error_rate: None,
-        streams: false,
+        streams,
         runtime: ModelRuntime::Gguf(artifact),
         languages,
         accepts_language_hint: takes_language_hint(architecture),
@@ -360,9 +496,14 @@ fn build(id: CustomModelId, manifest: &Manifest) -> &'static ModelDefinition {
 /// available when nothing is imported under it (a deleted import, or an ID
 /// from another machine's settings).
 pub fn definition(id: CustomModelId) -> &'static ModelDefinition {
+    definition_where(id, crate::labs::stream_imported_models())
+}
+
+/// [`definition`] with Labs › Stream imported models `lab`.
+fn definition_where(id: CustomModelId, lab: bool) -> &'static ModelDefinition {
     let mut registry = registry();
     if let Some(entry) = registry.entry(id) {
-        return entry.definition;
+        return entry.current(lab);
     }
     registry.placeholders.entry(id).or_insert_with(|| {
         build(
@@ -383,7 +524,9 @@ pub fn definition(id: CustomModelId) -> &'static ModelDefinition {
                 path: None,
                 origin: None,
                 k_quants: false,
+                streams_like: None,
             },
+            false,
         )
     })
 }
@@ -427,11 +570,12 @@ pub fn usable(id: CustomModelId) -> bool {
 
 /// Every import and found file in use, ready or not, by name.
 pub fn imported() -> Vec<Imported> {
+    let lab = crate::labs::stream_imported_models();
     registry()
         .entries
         .iter()
         .map(|entry| Imported {
-            definition: entry.definition,
+            definition: entry.current(lab),
             architecture: match entry.definition.runtime {
                 ModelRuntime::Gguf(artifact) => artifact.architecture,
                 ModelRuntime::AppleSpeech => "",
@@ -548,6 +692,8 @@ pub(crate) struct Profile {
     /// Its weights include K-quant tensors, so it runs only while Labs ›
     /// Smaller model files is on.
     pub(crate) k_quants: bool,
+    /// The streaming catalog model with its architecture and variant.
+    pub(crate) streams_like: Option<String>,
 }
 
 /// The tensor types this process can run: Labs › Smaller model files adds
@@ -627,6 +773,7 @@ fn profile(header: &GgufHeader, file_name: &str, types: TensorTypes) -> Result<P
         license: header.string("general.license").map(str::to_owned),
         repository: header.string("general.repo_url").map(str::to_owned),
         k_quants: header.uses_k_quants(),
+        streams_like: streams_like(architecture, variant),
     })
 }
 
@@ -773,6 +920,7 @@ fn copy_and_record(
             path: None,
             origin: None,
             k_quants: profile.k_quants,
+            streams_like: profile.streams_like,
         },
     )?;
     tracing::info!(id = id.as_str(), bytes, "imported a speech model");
@@ -964,6 +1112,7 @@ fn record_in_place(
             path: Some(path.to_path_buf()),
             origin: origin.map(str::to_owned),
             k_quants: profile.k_quants,
+            streams_like: profile.streams_like,
         },
     )?;
     // The same file imported by copy before: the file in place replaces
@@ -1159,6 +1308,139 @@ mod tests {
         assert!(source.is_file());
         assert_eq!(super::definition(id).name, "Imported model");
         assert!(!super::definition(id).available());
+        super::super::models::set_test_models_dir(None);
+        fs::remove_dir_all(models).unwrap();
+    }
+
+    /// A fine-tune of Parakeet Unified English: the base's architecture and
+    /// variant, so the same tensor names (T0.4).
+    fn unified(name: &str) -> Vec<u8> {
+        gguf(
+            &[
+                ("general.architecture", "parakeet"),
+                ("general.name", name),
+                ("stt.variant", "unified-en-0.6b"),
+            ],
+            &[("general.languages", &["en"])],
+            &[],
+            &[("encoder.weight", 8, 64), ("norm", 0, 16)],
+        )
+    }
+
+    fn selection(id: CustomModelId) -> TranscriptionSelection {
+        TranscriptionSelection {
+            model: TranscriptionModelId::Custom(id),
+            language: "en".into(),
+        }
+    }
+
+    #[test]
+    fn streams_like_set_for_matching_variant() {
+        let models = temporary_models_dir();
+        let source = models.join("unified-finetune-Q8_0.gguf");
+        fs::write(&source, unified("Unified fine-tune")).unwrap();
+        let id = import(&source, None, &AtomicBool::new(false)).unwrap();
+        let manifest: Manifest =
+            serde_json::from_slice(&fs::read(manifest_file(&directory().unwrap(), id)).unwrap())
+                .unwrap();
+        assert_eq!(
+            manifest.streams_like.as_deref(),
+            Some("parakeet_unified_en")
+        );
+        // A variant no streaming catalog model has streams like nothing.
+        let offline = models.join("primeline-Q8_0.gguf");
+        fs::write(&offline, parakeet("Parakeet primeLine")).unwrap();
+        let offline = import(&offline, None, &AtomicBool::new(false)).unwrap();
+        let manifest: Manifest = serde_json::from_slice(
+            &fs::read(manifest_file(&directory().unwrap(), offline)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.streams_like, None);
+        assert_eq!(streams_like("whisper", "unified-en-0.6b"), None);
+        assert_eq!(
+            streams_like("parakeet", "nemotron-3.5-asr-streaming-0.6b").as_deref(),
+            Some(TranscriptionModelId::Nemotron35Asr.as_str())
+        );
+        // With the lab on and its smoke stream passed, the import streams;
+        // the offline one never runs a smoke stream at all.
+        assert!(!definition_where(id, true).streams, "no smoke stream yet");
+        assert_eq!(
+            smoke_stream_where(&selection(id), true, || Some(())),
+            Some(())
+        );
+        assert!(definition_where(id, true).streams);
+        assert_eq!(definition_where(id, true).name, "Unified fine-tune");
+        assert_eq!(
+            smoke_stream_where(&selection(offline), true, || -> Option<()> {
+                panic!("an import that streams like nothing is never probed")
+            }),
+            None
+        );
+        assert!(!definition_where(offline, true).streams);
+        super::super::models::set_test_models_dir(None);
+        fs::remove_dir_all(models).unwrap();
+    }
+
+    #[test]
+    fn streams_false_with_lab_off() {
+        let models = temporary_models_dir();
+        let source = models.join("unified-finetune-Q8_0.gguf");
+        fs::write(&source, unified("Unified fine-tune")).unwrap();
+        let id = import(&source, None, &AtomicBool::new(false)).unwrap();
+        // Off, the smoke stream never runs, so the model never streams.
+        assert_eq!(
+            smoke_stream_where(&selection(id), false, || -> Option<()> {
+                panic!("the lab is off, so nothing streams")
+            }),
+            None
+        );
+        assert!(!definition_where(id, false).streams);
+        // A smoke stream that passed while it was on stops counting once
+        // it is off.
+        assert_eq!(
+            smoke_stream_where(&selection(id), true, || Some(())),
+            Some(())
+        );
+        assert!(definition_where(id, true).streams);
+        assert!(!definition_where(id, false).streams);
+        assert!(!streams_where(false, true, Some(true)));
+        assert!(!streams_where(true, false, Some(true)));
+        assert!(!streams_where(true, true, None));
+        assert!(streams_where(true, true, Some(true)));
+        // A catalog model is probed as before, lab or not.
+        let catalog = TranscriptionSelection {
+            model: TranscriptionModelId::ParakeetUnifiedEnglish,
+            language: "en".into(),
+        };
+        assert_eq!(smoke_stream_where(&catalog, false, || Some(7)), Some(7));
+        super::super::models::set_test_models_dir(None);
+        fs::remove_dir_all(models).unwrap();
+    }
+
+    #[test]
+    fn smoke_failure_falls_back() {
+        let models = temporary_models_dir();
+        let source = models.join("unified-finetune-Q8_0.gguf");
+        fs::write(&source, unified("Unified fine-tune")).unwrap();
+        let id = import(&source, None, &AtomicBool::new(false)).unwrap();
+        // A GPU that can't stream it (or a CPU): whole clips, never broken.
+        assert_eq!(
+            smoke_stream_where(&selection(id), true, || None::<()>),
+            None
+        );
+        assert_eq!(stream_smoke(id), Some(false));
+        assert!(!definition_where(id, true).streams);
+        // The next load's smoke stream decides again.
+        assert_eq!(
+            smoke_stream_where(&selection(id), true, || Some(())),
+            Some(())
+        );
+        assert!(definition_where(id, true).streams);
+        assert_eq!(
+            smoke_stream_where(&selection(id), true, || None::<()>),
+            None
+        );
+        assert!(!definition_where(id, true).streams);
         super::super::models::set_test_models_dir(None);
         fs::remove_dir_all(models).unwrap();
     }
@@ -1434,8 +1716,13 @@ mod tests {
             path: None,
             origin: None,
             k_quants: false,
+            streams_like: None,
         };
-        let definition = build(CustomModelId::from_sha256(&manifest.sha256), &manifest);
+        let definition = build(
+            CustomModelId::from_sha256(&manifest.sha256),
+            &manifest,
+            false,
+        );
         assert!(!definition.accepts_language_hint);
         assert!(
             definition.supports_language_detection,
@@ -1453,6 +1740,7 @@ mod tests {
                 detects_language: false,
                 ..manifest
             },
+            false,
         );
         assert!(whisper.accepts_language_hint);
         assert!(!whisper.supports_language_detection);
