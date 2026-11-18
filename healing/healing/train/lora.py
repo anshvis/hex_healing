@@ -270,6 +270,31 @@ def attach(model, groups, rank: int, alpha: float, dropout: float) -> tuple[dict
     return wrappers, resolved
 
 
+def rng_state() -> dict:
+    """Every generator a step draws from: the CPU's, and CUDA's or MPS's when the device exists, so
+    LoRA dropout on an accelerator resumes with the same masks."""
+    import torch
+
+    state = {"cpu": torch.get_rng_state()}
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        state["mps"] = torch.mps.get_rng_state()
+    return state
+
+
+def set_rng_state(state) -> None:
+    import torch
+
+    if not isinstance(state, dict):  # a checkpoint from before accelerator state: the CPU's alone
+        state = {"cpu": state}
+    torch.set_rng_state(state["cpu"])
+    if "cuda" in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["cuda"])
+    if "mps" in state and torch.backends.mps.is_available():
+        torch.mps.set_rng_state(state["mps"])
+
+
 def lora_state(wrappers: dict) -> dict:
     return {f"{name}{suffix}": getattr(w, part).detach().clone().contiguous()
             for name, w in wrappers.items() for suffix, part in ((".lora_a", "a"), (".lora_b", "b"))}
@@ -411,7 +436,7 @@ class Trainer:
         path = self.work / "checkpoint.pt"
         tmp = path.with_suffix(".tmp")
         torch.save({**state, "key": self.job["key"], "lora": lora_state(self.wrappers), "optimizer": self.optimizer.state_dict(),
-                    "rng": torch.get_rng_state()}, tmp)
+                    "rng": rng_state()}, tmp)
         os.replace(tmp, path)
 
     def run(self) -> int:
@@ -441,7 +466,8 @@ class Trainer:
         self.optimizer = torch.optim.AdamW(trainable, lr=float(cfg["lr"]), weight_decay=0.0)
 
         state = {"step": 0, "epoch": 0, "batch": 0, "log": [], "best": None, "best_step": None, "best_loss": None,
-                 "stale": 0, "active_seconds": 0.0, "resumes": 0, "probe": None, "peak_rss_bytes": 0}
+                 "stale": 0, "active_seconds": 0.0, "resumes": 0, "probe": None, "peak_rss_bytes": 0,
+                 "pending_losses": []}  # train losses since the last validation: they pick the best step
         path = self.work / "checkpoint.pt"
         if path.exists():
             saved = torch.load(path, map_location="cpu", weights_only=False)
@@ -450,15 +476,15 @@ class Trainer:
                 return BAD_JOB
             load_lora_state(self.wrappers, saved["lora"])
             self.optimizer.load_state_dict(saved["optimizer"])
-            torch.set_rng_state(saved["rng"])
-            state = {k: saved[k] for k in state}
+            set_rng_state(saved["rng"])
+            state = {k: saved.get(k, state[k]) for k in state}
             state["resumes"] += 1
             _say(f"resumed at step {state['step']} (epoch {state['epoch'] + 1}, batch {state['batch']})")
 
         max_steps = int(cfg.get("max_steps") or 0)
         epochs, every, validate_every = int(cfg["epochs"]), int(cfg["checkpoint_every"]), int(cfg["validate_every"])
         patience = int(cfg["early_stopping_patience"])
-        segment, losses, stopped = started, [], None
+        segment, losses, stopped = started, state["pending_losses"], None
         if max_steps and state["step"] >= max_steps:
             stopped = "max_steps"
         elif self.val_idx and state["stale"] >= patience:
@@ -550,11 +576,11 @@ class Trainer:
 
         indices = longest_batch(self.durations, float(self.cfg["batch_seconds"]), int(self.cfg["batch_max_clips"]))
         self.watch(0, indices)
-        rng = torch.get_rng_state()
+        rng = rng_state()
         loss = self.loss(indices)
         loss.backward()
         self.optimizer.zero_grad(set_to_none=True)
-        torch.set_rng_state(rng)
+        set_rng_state(rng)
         peak = self.check_memory(0, indices)
         seconds = self.padded_seconds(indices)
         _say(f"memory probe: {len(indices)} longest clips ({seconds:.1f} s padded), peak {peak / (1 << 30):.2f} GB")

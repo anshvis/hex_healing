@@ -320,9 +320,9 @@ def test_no_text_in_train_log_or_stdout(tmp_path):
     log_text = (tmp_path / "r/out/train_log.json").read_text()
     texts = [json.loads(line)["text"] for line in (bundle / "manifest.jsonl").read_text().splitlines()]
     assert not any(t in log_text or t in done.stdout for t in texts)
-    from healing.train.run import log_strings
+    from healing.train.run import log_problems
 
-    assert log_strings(json.loads(log_text)) == []
+    assert log_problems(json.loads(log_text)) == []  # the real trainer writes exactly the schema
 
 
 @needs_torch
@@ -331,3 +331,56 @@ def test_memory_limit_fails_the_round_with_a_message(tmp_path):
     done = run_torch(tmp_path, LOOP, str(job(tmp_path, "m", bundle, max_rss_gb=0.001)), "-1")
     assert done.returncode == lora.MEMORY
     assert "passed the 0.001 GB limit at step 0" in done.stdout and "lower batch_seconds" in done.stdout
+
+
+@needs_torch
+def test_resume_keeps_the_losses_since_the_last_validation(tmp_path):
+    """Without a validation slice the train loss picks the best step, so the losses taken since the last
+    validation must survive an interruption: stopped at step 4 (between validations at 3 and 6), the
+    resumed log and delta equal an uninterrupted run's."""
+    bundle = tiny_bundle(tmp_path / "bundle")
+    settings = {"validation_share": 0.0, "validate_every": 3, "max_steps": 6, "checkpoint_every": 2, "early_stopping_patience": 1}
+    interrupted = job(tmp_path, "interrupted", bundle, **settings)
+    first = run_torch(tmp_path, LOOP, str(interrupted), "4")
+    assert first.returncode == lora.INTERRUPTED, first.stdout + first.stderr
+    second = run_torch(tmp_path, LOOP, str(interrupted), "-1")
+    assert second.returncode == 0 and "resumed at step 4" in second.stdout, second.stdout + second.stderr
+    straight = job(tmp_path, "straight", bundle, **settings)
+    assert run_torch(tmp_path, LOOP, str(straight), "-1").returncode == 0
+
+    def entries(name):
+        log = json.loads((tmp_path / name / "out/train_log.json").read_text())
+        return [{k: v for k, v in e.items() if k != "seconds"} for e in log["entries"]], log["best_step"]
+
+    assert entries("interrupted") == entries("straight")
+    assert tensors(tmp_path / "interrupted/out/lora_delta.safetensors") == tensors(tmp_path / "straight/out/lora_delta.safetensors")
+
+
+ACCELERATOR = '''
+    device = sys.argv[2]
+    torch.manual_seed(1)
+    saved = lora.rng_state()
+    first = (torch.rand(4).tolist(), torch.rand(4, device=device).cpu().tolist())
+    lora.set_rng_state(saved)
+    again = (torch.rand(4).tolist(), torch.rand(4, device=device).cpu().tolist())
+    print(json.dumps({"same": first == again, "keys": sorted(saved)}))
+'''
+
+
+def accelerator() -> str | None:
+    done = subprocess.run([str(NEMO_PYTHON), "-c", "import torch; print('cuda' if torch.cuda.is_available() else "
+                           "'mps' if torch.backends.mps.is_available() else '')"], capture_output=True, text=True)
+    return done.stdout.strip() or None
+
+
+@needs_torch
+def test_rng_state_covers_the_accelerator(tmp_path):
+    """The checkpoint and the memory probe save and restore the accelerator's generator too, so LoRA
+    dropout masks on CUDA or MPS come back the same after a resume."""
+    device = accelerator()
+    if device is None:
+        pytest.skip("no CUDA or MPS device")
+    done = run_torch(tmp_path, ACCELERATOR, device)
+    assert done.returncode == 0, done.stderr
+    result = json.loads(done.stdout.strip().splitlines()[-1])
+    assert result["same"] and "cpu" in result["keys"] and device in result["keys"]
