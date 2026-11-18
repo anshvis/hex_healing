@@ -284,15 +284,20 @@ def export(delta: Path, config_path: Path, snapshot: str, parent: str = "current
     objects.owner_dir(root)
     with tempfile.TemporaryDirectory(prefix=f"export-{version}-", dir=root) as scratch:
         folder = Path(scratch)
-        config_copy, output = folder / "config.yaml", folder / "model.gguf"
+        config_copy, output, frozen = folder / "config.yaml", folder / "model.gguf", folder / "lora_delta.safetensors"
         config_copy.write_text(text)
+        # One frozen copy is checked, built, hashed and published, so a delta replaced under its path
+        # while this runs can't be recorded against a GGUF built from another one.
+        shutil.copyfile(delta, frozen)
+        check_delta(frozen, config)
+        delta_sha = objects.sha256_file(frozen)
         say(f"building {name} from {delta} (converter {rev[:12]})")
         try:
-            restore.run_recorded(converter, restore.Inputs(base_gguf, delta, config_copy, output, checkout))
+            restore.run_recorded(converter, restore.Inputs(base_gguf, frozen, config_copy, output, checkout))
         except restore.RestoreError as error:
             raise ExportError(str(error)) from error
         check_header(output, name)
-        sha, delta_sha = objects.sha256_file(output), objects.sha256_file(delta)
+        sha = objects.sha256_file(output)
         line = importer(output, name, sha, hex_binary, folder)
         record = {
             "base": origin.record.get("base"), "parent": origin.name, "arch": config["arch"], "dataset": dataset,
@@ -301,7 +306,7 @@ def export(delta: Path, config_path: Path, snapshot: str, parent: str = "current
             "artifacts": {"lora_delta": delta_sha, "merged_nemo": None, "gguf": sha},
             "gguf_name": name,
         }
-        registered = registry.register(record, publish=[(output, sha), (delta, delta_sha)], expect=version)
+        registered = registry.register(record, publish=[(output, sha), (frozen, delta_sha)], expect=version)
     return {"version": registered, "gguf_sha256": sha, "delta_sha256": delta_sha, "import": line}
 
 

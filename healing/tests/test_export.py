@@ -293,3 +293,19 @@ def test_set_string_keeps_the_tensor_data(tmp_path):
 
 def test_the_pinned_rev_is_one_full_sha():
     assert len(export.pinned_rev()) == 40
+
+
+def test_a_delta_replaced_during_the_build_does_not_change_what_is_registered(env, monkeypatch):
+    """Export builds, hashes and publishes one frozen copy of the delta, so a file swapped in under the
+    input path mid-build is never recorded against a GGUF built from the old one."""
+    original = objects.sha256_file(env.delta)
+    real = restore.run_recorded
+
+    def swap_after_merge(converter, inputs):
+        real(converter, inputs)
+        env.delta.write_bytes(env.delta.read_bytes() + b"\0")  # replaced after the merge read it
+
+    monkeypatch.setattr(restore, "run_recorded", swap_after_merge)
+    result = run_export(env)
+    assert result["delta_sha256"] == original
+    assert registry.load().get("v1").record["artifacts"]["lora_delta"] == original
