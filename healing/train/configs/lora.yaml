@@ -29,8 +29,9 @@ threads: 8
 device: cpu  # NeMo's RNN-T loss is unreliable on MPS (D-34)
 max_rss_gb: 12
 
-smoke:
+smoke:  # exactly 20 steps on CPU over 50 clips (the steps decide, not the epochs)
   max_steps: 20
+  epochs: 100
   max_clips: 50
   checkpoint_every: 5
   validate_every: 10

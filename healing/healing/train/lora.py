@@ -10,12 +10,12 @@ then `restore_from`), the same `LoraLinear`, the same forward and RNN-T loss. Wh
 - targets resolved from the loaded model by name, per group, failing on any that match nothing:
   the encoder's attention q/k/v/out, its feed-forward linears and the joint's linears (D-31, D-47);
 - LoRA dropout (the base stays in eval mode: no SpecAugment, no dropout, as in M0);
-- a `WeightedRandomSampler` over the bundle's weights, an epoch at a time, batched by audio seconds;
+- a `WeightedRandomSampler` over the bundle's weights, an epoch at a time, batched by padded audio seconds;
 - a validation slice of the train bundle (whole storage clusters, never a test set), its loss and
   WER logged and used for early stopping; the best step's LoRA is the delta;
 - a checkpoint (LoRA, optimizer, RNG, position) every `checkpoint_every` steps and on SIGINT or
   SIGTERM, so a rerun resumes exactly where the sampler was;
-- a memory probe on the longest clips before step 1, and a peak-RSS check after every step;
+- a memory probe on the longest clips before step 1, and a footprint watchdog that stops the round before it swaps;
 - outputs `out/lora_delta.safetensors` (LoRA tensors only) and `out/train_log.json` (numbers only).
 
 No text reaches stdout or the log: NeMo's `log_prediction` is off and only numbers are printed.
@@ -35,6 +35,7 @@ import re
 import resource
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -99,16 +100,18 @@ def validation_split(entries: list[dict], share: float, seed: int) -> tuple[list
 
 
 def batches_by_seconds(order: list[int], durations: list[float], max_seconds: float, max_clips: int) -> list[list[int]]:
-    """Consecutive batches of `order` whose audio adds up to at most `max_seconds` (and at most
-    `max_clips` clips). A clip longer than the budget is a batch by itself."""
-    batches, current, seconds = [], [], 0.0
+    """Consecutive batches of `order` whose padded audio, clips × the longest clip, is at most
+    `max_seconds` (and at most `max_clips` clips). Padded, not summed: every clip in a batch is padded to
+    the longest, and RNN-T's joint is batch × frames × tokens × vocabulary, so one 27 s clip among 15
+    short ones costs about 16 × 27 s (D-49). A clip longer than the budget is a batch by itself."""
+    batches, current, longest = [], [], 0.0
     for index in order:
         length = durations[index]
-        if current and (seconds + length > max_seconds or len(current) >= max_clips):
+        if current and ((len(current) + 1) * max(longest, length) > max_seconds or len(current) >= max_clips):
             batches.append(current)
-            current, seconds = [], 0.0
+            current, longest = [], 0.0
         current.append(index)
-        seconds += length
+        longest = max(longest, length)
     if current:
         batches.append(current)
     return batches
@@ -118,6 +121,18 @@ def longest_batch(durations: list[float], max_seconds: float, max_clips: int) ->
     """The batch the memory probe runs: the longest clips, filled up to the batch budget."""
     order = sorted(range(len(durations)), key=lambda i: -durations[i])
     return batches_by_seconds(order, durations, max_seconds, max_clips)[0] if order else []
+
+
+def smoke_subset(entries: list[dict], limit: int, cfg: dict) -> list[dict]:
+    """At most `limit` entries (0: all): the longest batch's clips first, so the memory probe still
+    measures the longest audio, then the rest in an order fixed by the seed."""
+    if not limit or len(entries) <= limit:
+        return entries
+    longest = set(longest_batch([float(e["duration"]) for e in entries], float(cfg["batch_seconds"]),
+                                int(cfg["batch_max_clips"]))[:limit])
+    rest = sorted((i for i in range(len(entries)) if i not in longest),
+                  key=lambda i: hashlib.sha256(f"{cfg['seed']}:{entries[i]['id']}".encode()).hexdigest())
+    return [entries[i] for i in sorted(longest)] + [entries[i] for i in rest[: limit - len(longest)]]
 
 
 def delta_problems(names, targets: list[str]) -> list[str]:
@@ -157,6 +172,49 @@ def peak_rss_bytes() -> int:
     """This process's peak resident memory (macOS reports bytes, Linux kilobytes)."""
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return int(peak if sys.platform == "darwin" else peak * 1024)
+
+
+def footprint_bytes() -> int:
+    """This process's memory now, swapped and compressed pages included: macOS's phys_footprint
+    (`proc_pid_rusage`, what Activity Monitor shows), Linux's VmRSS + VmSwap. RSS alone falls while a
+    process swaps, so it cannot see a swap storm; this can."""
+    if sys.platform == "darwin":
+        import ctypes
+
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+        buffer = ctypes.create_string_buffer(512)  # rusage_info_v2; phys_footprint is the 8th u64 after the uuid
+        if libproc.proc_pid_rusage(os.getpid(), 2, buffer) == 0:
+            return int.from_bytes(buffer.raw[72:80], "little")
+        return peak_rss_bytes()
+    try:
+        fields = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines() if ":" in line)
+        return sum(int(fields.get(k, "0 kB").split()[0]) * 1024 for k in ("VmRSS", "VmSwap"))
+    except OSError:
+        return peak_rss_bytes()
+
+
+def memory_message(peak: int, limit_gb, step: int, clips: int, seconds: float) -> str:
+    return (f"memory {peak / (1 << 30):.1f} GB passed the {limit_gb} GB limit at step {step} "
+            f"(a batch of {clips} clips, {seconds:.0f} s of audio padded); lower batch_seconds in the config")
+
+
+class Watchdog(threading.Thread):
+    """Samples the footprint four times a second, keeps its peak, and ends the process (exit 3) the
+    moment it passes the limit, mid-step, before the Mac starts swapping. The last checkpoint stands."""
+
+    def __init__(self, limit: int, limit_gb):
+        super().__init__(daemon=True)
+        self.limit, self.limit_gb, self.peak = limit, limit_gb, 0
+        self.step, self.clips, self.seconds = 0, 0, 0.0
+
+    def run(self) -> None:
+        while True:
+            now = footprint_bytes()
+            self.peak = max(self.peak, now)
+            if now > self.limit:
+                _say(memory_message(now, self.limit_gb, self.step, self.clips, self.seconds))
+                os._exit(MEMORY)
+            time.sleep(0.25)
 
 
 def _atomic_json(path: Path, value) -> None:
@@ -262,13 +320,11 @@ class Trainer:
         self.device = torch.device(self.cfg.get("device", "cpu"))
         self.max_rss = int(float(self.cfg["max_rss_gb"]) * (1 << 30))
         self.stop = False
+        self.watchdog: Watchdog | None = None
         entries = [json.loads(line) for line in (self.bundle / "manifest.jsonl").read_text().splitlines() if line]
-        limit = int(self.cfg.get("max_clips") or 0)
-        if limit:
-            entries = sorted(entries, key=lambda e: hashlib.sha256(f"{self.cfg['seed']}:{e['id']}".encode()).hexdigest())[:limit]
-        self.entries = entries
-        self.durations = [float(e["duration"]) for e in entries]
-        self.train_idx, self.val_idx = validation_split(entries, float(self.cfg["validation_share"]), int(self.cfg["seed"]))
+        self.entries = smoke_subset(entries, int(self.cfg.get("max_clips") or 0), self.cfg)
+        self.durations = [float(e["duration"]) for e in self.entries]
+        self.train_idx, self.val_idx = validation_split(self.entries, float(self.cfg["validation_share"]), int(self.cfg["seed"]))
         if not self.train_idx:
             raise TargetError("the bundle has no training entries")
 
@@ -312,13 +368,18 @@ class Trainer:
                                   targets=transcript, targets_lengths=transcript_len)
         return loss
 
+    def padded_seconds(self, indices: list[int]) -> float:
+        return len(indices) * max(self.durations[i] for i in indices)
+
+    def watch(self, step: int, indices: list[int]) -> None:
+        """Tell the watchdog which batch is running, for its message."""
+        if self.watchdog:
+            self.watchdog.step, self.watchdog.clips, self.watchdog.seconds = step, len(indices), self.padded_seconds(indices)
+
     def check_memory(self, step: int, indices: list[int]) -> int:
-        peak = peak_rss_bytes()
+        peak = max(peak_rss_bytes(), footprint_bytes(), self.watchdog.peak if self.watchdog else 0)
         if peak > self.max_rss:
-            seconds = sum(self.durations[i] for i in indices)
-            raise MemoryLimit(f"peak memory {peak / (1 << 30):.1f} GB passed the {self.cfg['max_rss_gb']} GB limit "
-                              f"at step {step} (a batch of {len(indices)} clips, {seconds:.0f} s of audio); "
-                              f"lower batch_seconds in the config")
+            raise MemoryLimit(memory_message(peak, self.cfg["max_rss_gb"], step, len(indices), self.padded_seconds(indices)))
         return peak
 
     def set_lora_training(self, on: bool) -> None:
@@ -336,6 +397,7 @@ class Trainer:
         with torch.no_grad():
             for indices in batches_by_seconds(self.val_idx, self.durations, float(self.cfg["batch_seconds"]),
                                               int(self.cfg["batch_max_clips"])):
+                self.watch(-1, indices)
                 losses.append(float(self.loss(indices, wer=True)))
                 weights.append(len(indices))
         wer_value = self.model.wer.compute()[0]
@@ -358,6 +420,8 @@ class Trainer:
         cfg = self.cfg
         torch.manual_seed(int(cfg["seed"]))
         torch.set_num_threads(int(cfg["threads"]))
+        self.watchdog = Watchdog(self.max_rss, cfg["max_rss_gb"])
+        self.watchdog.start()
         started = time.monotonic()
         self.model = load_model(Path(self.job["base"]), Path(self.job["transcribe_cpp"]))
         self.model.eval()  # no SpecAugment and no base dropout, as in M0; only LoRA's dropout trains
@@ -407,7 +471,7 @@ class Trainer:
             val_loss, val_wer = self.validate()
             train_loss = sum(losses) / len(losses) if losses else None
             losses.clear()
-            state["log"].append({"step": state["step"], "epoch": state["epoch"] + 1, "train_loss": train_loss,
+            state["log"].append({"step": state["step"], "epoch": min(state["epoch"] + 1, epochs), "train_loss": train_loss,
                                  "val_loss": val_loss, "val_wer": val_wer, "seconds": round(elapsed(), 1)})
             _say(f"step {state['step']} train_loss {train_loss if train_loss is None else round(train_loss, 4)} "
                  f"val_loss {val_loss if val_loss is None else round(val_loss, 4)} "
@@ -428,6 +492,7 @@ class Trainer:
                 batches = self.epoch_batches(state["epoch"])
                 while state["batch"] < len(batches):
                     indices = batches[state["batch"]]
+                    self.watch(state["step"] + 1, indices)
                     loss = self.loss(indices)
                     self.optimizer.zero_grad()
                     loss.backward()
@@ -484,15 +549,16 @@ class Trainer:
         import torch
 
         indices = longest_batch(self.durations, float(self.cfg["batch_seconds"]), int(self.cfg["batch_max_clips"]))
+        self.watch(0, indices)
         rng = torch.get_rng_state()
         loss = self.loss(indices)
         loss.backward()
         self.optimizer.zero_grad(set_to_none=True)
         torch.set_rng_state(rng)
         peak = self.check_memory(0, indices)
-        seconds = sum(self.durations[i] for i in indices)
-        _say(f"memory probe: {len(indices)} longest clips ({seconds:.1f} s), peak {peak / (1 << 30):.2f} GB")
-        return {"clips": len(indices), "audio_seconds": round(seconds, 1), "peak_rss_bytes": peak}
+        seconds = self.padded_seconds(indices)
+        _say(f"memory probe: {len(indices)} longest clips ({seconds:.1f} s padded), peak {peak / (1 << 30):.2f} GB")
+        return {"clips": len(indices), "padded_seconds": round(seconds, 1), "peak_rss_bytes": peak}
 
 
 def environment() -> dict:

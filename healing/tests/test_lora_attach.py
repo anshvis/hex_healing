@@ -101,14 +101,31 @@ def test_delta_contains_only_lora_tensors(tmp_path):
 
 
 def test_batches_by_audio_seconds():
+    """Padded seconds: clips × the batch's longest clip stay within the budget."""
     durations = [10.0, 25.0, 30.0, 5.0, 5.0, 70.0, 1.0]
     batches = lora.batches_by_seconds(list(range(7)), durations, max_seconds=60, max_clips=16)
-    assert batches == [[0, 1], [2, 3, 4], [5], [6]]  # a 70 s clip alone; none over 60 s otherwise
+    assert batches == [[0, 1], [2, 3], [4], [5], [6]]  # a 70 s clip alone
     for batch in batches:
-        assert len(batch) == 1 or sum(durations[i] for i in batch) <= 60
+        assert len(batch) == 1 or len(batch) * max(durations[i] for i in batch) <= 60
+    # a long clip never shares a batch with many short ones (step 1 of the first live smoke run did: 24 GB)
+    mixed = [27.0] + [3.0] * 15
+    assert [len(b) for b in lora.batches_by_seconds(list(range(16)), mixed, 60, 16)] == [2, 14]
     assert lora.batches_by_seconds([0, 1, 2], [1.0, 1.0, 1.0], 60, 2) == [[0, 1], [2]]  # clip cap too
     assert lora.longest_batch(durations, 60, 16) == [5]
-    assert lora.longest_batch([3.0, 29.0, 28.0, 1.0], 60, 16) == [1, 2, 0]
+    assert lora.longest_batch([3.0, 29.0, 28.0, 1.0], 60, 16) == [1, 2]
+
+
+def test_footprint_is_measured():
+    assert lora.footprint_bytes() >= 1 << 20  # this Python process, swapped pages included
+
+
+def test_smoke_subset_keeps_the_longest_clips():
+    entries = [{"id": f"c{i}", "duration": 2.0} for i in range(60)] + [{"id": "long", "duration": 29.0}]
+    cfg = {"batch_seconds": 60, "batch_max_clips": 16, "seed": 13}
+    subset = lora.smoke_subset(entries, 50, cfg)
+    assert len(subset) == 50 and "long" in [e["id"] for e in subset]
+    assert lora.smoke_subset(entries, 50, cfg) == subset
+    assert lora.smoke_subset(entries, 0, cfg) == entries
 
 
 def test_validation_takes_whole_clusters():
@@ -298,7 +315,7 @@ def test_resumes_from_checkpoint(tmp_path):
 @needs_torch
 def test_no_text_in_train_log_or_stdout(tmp_path):
     bundle = tiny_bundle(tmp_path / "bundle")
-    done = run_torch(tmp_path, LOOP, str(job(tmp_path, "r", bundle)), "-1")
+    done = run_torch(tmp_path, LOOP, str(job(tmp_path, "r", bundle, max_clips=10)), "-1")  # a smoke subset too
     assert done.returncode == 0, done.stderr
     log_text = (tmp_path / "r/out/train_log.json").read_text()
     texts = [json.loads(line)["text"] for line in (bundle / "manifest.jsonl").read_text().splitlines()]
