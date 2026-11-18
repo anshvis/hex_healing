@@ -17,8 +17,10 @@ The round (D-51, D-52): `prepare` (T6.1), then the runner. `local` (the default)
 (T6.5), exports and registers a candidate (T6.3) and scores it with `healing eval` (M3), recording
 the scores on the version; then it stops and prints `healing gate v<n>`, which M7 will add. Kaggle
 (T6.2) is not built: a remote runner stops after prepare, before anything could be uploaded (G-3,
-X-6). The round's `work/` scratch (about 10 GB) is removed when the round ends, pass or fail; `out/`
-and what the registry recorded stay.
+X-6). The round holds its `round.lock` from training through export, eval and cleanup, and its `work/`
+scratch (about 10 GB) is removed under it when the round ends, pass or fail; `out/` and what the
+registry recorded stay. A round another `healing train --local` holds fails at train and keeps its
+scratch. The round's parent is the current version's name, resolved once at the start.
 
 `$HEALING_HOME/train-auto.yaml` (optional, the `lora.yaml` subset) picks the runner:
 `runner: local | kaggle` and `allow_upload: true | false` (default `local`, `false`).
@@ -37,6 +39,7 @@ from typing import Callable
 from healing.export import ExportError
 from healing.paths import healing_home
 from healing.store import Store, StoreError, locked, lock_free
+from healing.train.manifest import TrainError
 
 MINUTES = 200  # D-33
 SAMPLE_RATE = 16_000
@@ -180,10 +183,17 @@ def _open_round(bundle: Path):
     return train_run.open_round(bundle)
 
 
-def _train(round_) -> int:
+def _lock(folder: Path):
     from healing.train import run as train_run
 
-    return train_run.train_round(round_, say=_stderr)
+    return train_run.round_lock(folder)
+
+
+def _train(round_) -> int:
+    """Train with the round's lock already held (`_round` holds it)."""
+    from healing.train import run as train_run
+
+    return train_run.train_held(round_, say=_stderr)
 
 
 def _export(delta: Path, config: Path, snapshot: str, parent: str) -> dict:
@@ -218,6 +228,7 @@ class Steps:
 
     prepare: Callable = _prepare  # (parent) -> Prepared (.path, .train_split)
     open_round: Callable = _open_round  # (bundle) -> Round (.folder, .work, .out)
+    lock: Callable = _lock  # (round folder) -> the round's lock, held from train to the scratch's removal
     train: Callable = _train  # (round) -> exit code
     export: Callable = _export  # (delta, config, snapshot, parent) -> {version, gguf_sha256, ...}
     evaluate: Callable = _evaluate  # (version, gguf_sha256, parent) -> a summary line
@@ -253,24 +264,30 @@ def _round(steps: Steps, settings: Settings, parent: str, say) -> int:
         return _remote(settings, prepared, say)
     step = "train"
     round_ = steps.open_round(prepared.path)
-    try:
-        code = steps.train(round_)
-        if code != 0:
-            say(f"round failed at train (exit {code}); nothing registered, the next run tries again")
-            return code
-        step = "export"
-        result = steps.export(round_.out / DELTA, round_.out / EFFECTIVE, prepared.train_split, parent)
-        version = result["version"]
-        say(f"{version}: candidate registered (gguf {result['gguf_sha256'][:12]})")
-        step = "eval"
-        say(f"{version}: {steps.evaluate(version, result['gguf_sha256'], parent)}")
-    except Exception as error:
-        say(f"round failed at {step}: {error}")
-        if step == "eval":
-            say(f"{version} stays a candidate without scores; score it with `healing eval --model <its gguf>`")
-        return 1
-    finally:
-        shutil.rmtree(round_.work, ignore_errors=True)  # ~10 GB of scratch; `out/` and the registry stay
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(steps.lock(round_.folder))
+        except TrainError as error:  # a manual `healing train --local` holds it: its work/ is not ours
+            say(f"round failed at train: {error}")
+            return 1
+        try:
+            code = steps.train(round_)
+            if code != 0:
+                say(f"round failed at train (exit {code}); nothing registered, the next run tries again")
+                return code
+            step = "export"
+            result = steps.export(round_.out / DELTA, round_.out / EFFECTIVE, prepared.train_split, parent)
+            version = result["version"]
+            say(f"{version}: candidate registered (gguf {result['gguf_sha256'][:12]})")
+            step = "eval"
+            say(f"{version}: {steps.evaluate(version, result['gguf_sha256'], parent)}")
+        except Exception as error:
+            say(f"round failed at {step}: {error}")
+            if step == "eval":
+                say(f"{version} stays a candidate without scores; score it with `healing eval --model <its gguf>`")
+            return 1
+        finally:
+            shutil.rmtree(round_.work, ignore_errors=True)  # ~10 GB of scratch, under the lock; `out/` stays
     say(f"next (M7): healing gate {version}")
     return 0
 

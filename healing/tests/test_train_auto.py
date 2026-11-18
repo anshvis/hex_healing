@@ -7,6 +7,7 @@ audio's sample counts, which the fixture sets directly.
 
 from __future__ import annotations
 
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,8 @@ from healing.registry import snapshot as snapshots
 from healing.registry import store as registry
 from healing.store import Store, locked
 from healing.train import auto
+from healing.train import run as train_run
+from healing.train.manifest import TrainError
 
 NOW = BASE_MS + 60 * DAY  # every fixture clip is well outside the 14-day test window
 RATE = 16_000
@@ -68,11 +71,21 @@ def promote_with_snapshot(store) -> str:
     return name
 
 
+def locked_now(folder) -> bool:
+    """Whether someone holds `folder`'s round lock (taking it, and letting go at once, if not)."""
+    try:
+        with train_run.round_lock(folder):
+            return False
+    except TrainError:
+        return True
+
+
 class Fake:
     """The heavy steps. `prepare` writes a real train row, as `healing train prepare` does."""
 
-    def __init__(self, rounds, fail=None):
+    def __init__(self, rounds, fail=None, busy=False):
         self.rounds, self.fail, self.calls, self.parents = rounds, fail, [], {}
+        self.busy, self.held = busy, contextlib.ExitStack()  # busy: a manual `healing train --local` holds the round
 
     def prepare(self, parent):
         self.calls.append("prepare")
@@ -91,7 +104,11 @@ class Fake:
         (folder / "work" / "checkpoint.pt").write_bytes(b"x" * 1024)
         (folder / "out" / "run.json").write_text("{}")
         self.calls.append("open")
+        if self.busy:
+            self.held.enter_context(train_run.round_lock(folder))
         return SimpleNamespace(folder=folder, work=folder / "work", out=folder / "out")
+
+    lock = staticmethod(auto.Steps.lock)  # the real round lock: these tests are about it
 
     def train(self, round_):
         self.calls.append("train")
@@ -99,6 +116,7 @@ class Fake:
 
     def export(self, delta, config, snapshot, parent):
         self.calls.append("export")
+        self.export_locked = locked_now(delta.parent.parent)
         self.parents["export"] = parent
         if self.fail == "export":
             raise auto.ExportError("convert failed (exit 1): boom")
@@ -264,3 +282,22 @@ def test_round_passes_the_resolved_parent_not_the_alias(home, store):
     assert fake.parents == {"prepare": parent, "export": parent, "eval": parent}
     rows = store.db.execute("SELECT parent_version FROM splits WHERE kind = 'train' ORDER BY created_at_ms").fetchall()
     assert rows[-1][0] == parent
+
+
+def test_a_busy_round_keeps_its_scratch(home, store):
+    # a manual `healing train --local` holds this round: train auto refuses and deletes nothing of its
+    speech(store, 250, clips=5)
+    fake = Fake(home / "rounds", busy=True)
+    with fake.held:
+        code, out, fake = run(home, fake)
+        assert code == 1 and "already training" in out, out
+        assert fake.calls == ["prepare", "open"]
+        assert (home / "rounds" / "r1" / "work" / "checkpoint.pt").is_file()
+
+
+def test_round_lock_is_held_through_export_and_cleanup(home, store):
+    speech(store, 250, clips=5)
+    code, out, fake = run(home)
+    assert code == 0, out
+    assert fake.export_locked  # no other trainer can get in between training and the scratch's removal
+    assert not locked_now(home / "rounds" / "r1")  # and it is let go once the round ends

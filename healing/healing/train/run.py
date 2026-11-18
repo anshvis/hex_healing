@@ -266,8 +266,14 @@ def open_round(bundle: Path, config_path: Path | None = None, smoke: bool = Fals
 
 def train_round(r: Round, keep_awake: bool = True, say=print) -> int:
     with round_lock(r.folder):
-        return _train(r.folder, r.work, r.out, r.key, r.config, r.effective, r.config_path, r.smoke, r.paths,
-                      r.bundle, r.bundle_sha, r.base_sha, keep_awake, say)
+        return train_held(r, keep_awake, say)
+
+
+def train_held(r: Round, keep_awake: bool = True, say=print) -> int:
+    """`train_round` for a caller that already holds the round's lock (`healing train auto` keeps it
+    through export and the scratch's removal)."""
+    return _train(r.folder, r.work, r.out, r.key, r.config, r.effective, r.config_path, r.smoke, r.paths,
+                  r.bundle, r.bundle_sha, r.base_sha, keep_awake, say)
 
 
 def train_local(bundle: Path, config_path: Path | None = None, smoke: bool = False, python: Path | None = None,
