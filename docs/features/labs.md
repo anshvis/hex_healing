@@ -153,6 +153,12 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 │                                        // k_quant_tensors_are_measured_in_their_ggml_block_sizes (gguf_header);
 │                                        // a_k_quant_import_needs_the_lab_and_falls_back_without_it (custom_models);
 │                                        // smaller_model_files_is_its_own_switch_and_macos_only (labs.rs); not observed on Metal
+├── Stream imported models no labs.stream_imported_models (every OS) your own speech model made from a streaming catalog model
+│                                        (the same architecture and stt.variant) streams once its smoke stream passes on the GPU;
+│                                        off, imports transcribe whole clips (own-models.md › Stream imported models)
+│                                        // checks: streams_like_set_for_matching_variant, streams_false_with_lab_off,
+│                                        // smoke_failure_falls_back (custom_models);
+│                                        // stream_imported_models_off_by_default (labs.rs)
 ├── Downloaded models only no labs.picker_downloaded   the picker's All speech models view can show only downloaded models, with the space Hex's copies take (#1018)
 ├── Shell completions no  labs.shell_completions        (every OS) `hex completions <shell>` prints a bash, zsh, fish,
 │                                        elvish, or PowerShell completion script for `hex`, generated at runtime from the
@@ -2069,6 +2075,22 @@ sizes the header check uses come from ggml's block sizes (256 values in 144,
 `smaller_model_files_is_its_own_switch_and_macos_only` in
 [labs.rs](../../src/labs.rs). Not yet observed: a real K-quant file transcribed
 on Metal (macOS), or the row in a real window.
+
+Stream imported models (`stream-imported-models`, every OS, D-26): for a
+fine-tune of a streaming model, such as a promoted Parakeet Unified English.
+An import records `streams_like` when its header's architecture and
+`stt.variant` equal a streaming catalog model's. While on, such an import's
+stream probe runs when it loads, as its smoke stream; once it passes, its
+definition streams (dictation streams, Live text and `/dictations` partials
+show words, `hex model list --json` says `"streams": true`). A failed smoke
+stream, or a CPU device, logs and keeps whole clips. Off, an import never
+probes or streams, and one already streaming stops at the next capture. Turning
+it on applies the next time the model loads. Checks:
+`streams_like_set_for_matching_variant`, `streams_false_with_lab_off`, and
+`smoke_failure_falls_back` in
+[custom_models.rs](../../src/transcription/custom_models.rs), and
+`stream_imported_models_off_by_default` in [labs.rs](../../src/labs.rs). Not
+yet observed: the row in the Linux goldens.
 
 Downloaded models only (`picker-downloaded`, issue 1018, every OS): for
 seeing which speech models take disk space and deleting unused ones. While

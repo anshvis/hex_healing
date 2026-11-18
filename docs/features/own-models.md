@@ -141,6 +141,45 @@ know `custom-…` keeps its default for that field without rewriting
 models …`) run in the CLI process; a running Hex lists the change at once (the
 registry rereads `models/custom/` when its folder changes).
 
+## Stream Imported Models (Labs)
+
+```ts
+Labs › Stream imported models on (labs.stream_imported_models, off by default, every OS)  // labs.stream-imported-models
+├── Import -> the manifest records `streams_like`, the streaming catalog model
+│   whose architecture and `stt.variant` its header names (a fine-tune of
+│   Parakeet Unified English: `parakeet_unified_en`; Nemotron 3.5:
+│   `nemotron_3_5_asr`); a variant no streaming catalog model has records
+│   nothing. Manifests written before the field read it from their
+│   architecture and variant
+├── The model loads (selection, launch, a reload) -> its stream probe is its
+│   smoke stream: 8 s of silence through a live stream on the loaded device
+│   (`GgufSession::probe_stream`, the probe every catalog model gets), kept
+│   per import ID for the process (custom_models::smoke_stream)
+│   ├── Passed -> `ModelDefinition.streams` is true: dictation streams, Live
+│   │   text and `/dictations` partials show words, the picker counts no
+│   │   wait, and `hex model list --json` says `"streams": true`
+│   └── Failed (a GPU error), or a CPU device that never runs one -> logged,
+│       and the model transcribes whole clips; it is never broken mid-dictation
+├── Lab off -> the probe never runs for an import, `streams` is false, and a
+│   loaded import that streamed stops at the next capture (the engine's
+│   `streams()`); turning it on takes effect the next time the model loads
+└── An import made from no streaming model -> never probed, whole clips
+```
+
+`streams` = the lab on, `streams_like` set, and the smoke stream passed
+(`custom_models::streams_where`). Before this lab an import's probe ran like a
+catalog model's whatever its variant, while its definition always said
+`streams: false`; now the definition and the engine agree. The header carries
+everything this needs (architecture and variant); the tensor check at import
+already refuses a file whose tensors don't fit its variant. Checks:
+`streams_like_set_for_matching_variant`, `streams_false_with_lab_off`, and
+`smoke_failure_falls_back` in
+[transcription/custom_models.rs](../../src/transcription/custom_models.rs);
+`a_stream_refusal_names_the_model_or_the_device` in
+[transcription/engine.rs](../../src/transcription/engine.rs);
+`stream_imported_models_off_by_default` in [labs.rs](../../src/labs.rs). Not
+yet observed: the Labs page goldens with the new row (they render on Linux).
+
 ## Found On This Computer
 
 ```ts
