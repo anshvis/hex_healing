@@ -322,3 +322,115 @@ def test_cli_prepare(store, capsys):
     assert main(["train", "prepare", "--replay", "0"]) == 0  # no replay and no long clip: no base model needed
     out = capsys.readouterr().out
     assert "sha256 " in out and "1 clips as 1 entries" in out
+
+
+# --- review fixes (Codex, 8b0b200f) --------------------------------------------------------------
+
+# A stand-in for `hex benchmark-transcription` that enforces `src/transcription/benchmark.rs`'s argument
+# rules (`run`: at least one warmup and one run) and its catalog match (`Backend::transcribe_cpp`: the
+# model file's name and size), and logs what it was given.
+FAKE_BENCH = """#!{python}
+import json, os, sys
+args = sys.argv[1:]
+assert args[0] == "benchmark-transcription", args
+manifest = args[1]
+opts = dict(zip(args[2::2], args[3::2]))
+log = open(os.environ["FAKE_LOG"], "a")
+if int(opts["--warmups"]) == 0:
+    print("Error: benchmark requires at least one warmup run", file=sys.stderr); sys.exit(1)
+if int(opts["--runs"]) == 0:
+    print("Error: benchmark requires at least one measured run", file=sys.stderr); sys.exit(1)
+model = opts["--model"]
+catalog = os.path.basename(model) == os.environ["FAKE_CATALOG_NAME"] and os.path.getsize(model) == int(os.environ["FAKE_CATALOG_BYTES"])
+log.write(json.dumps({{"args": args, "catalog": catalog}}) + "\\n")
+clips = json.load(open(manifest))["clips"]
+print(json.dumps({{"type": "model", "path": model}}))
+for c in clips:
+    print(json.dumps({{"type": "clip", "id": c["id"], "transcript": "Heard, " + c["id"] + ".", "word_errors": 0, "reference_words": 1}}))
+print(json.dumps({{"type": "summary", "clips": len(clips), "wer": 0, "word_errors": 0, "reference_words": len(clips),
+                  "median_rtf": 0, "quality": {{}}, "groups": {{}}}}))
+"""
+
+
+@pytest.fixture
+def fake_hex(tmp_path, monkeypatch, base):
+    import sys
+
+    binary = tmp_path / "hex"
+    binary.write_text(FAKE_BENCH.format(python=sys.executable))
+    binary.chmod(0o755)
+    log = tmp_path / "bench.log"
+    monkeypatch.setenv("HEX_BIN", str(binary))
+    monkeypatch.setenv("FAKE_LOG", str(log))
+    monkeypatch.setenv("FAKE_CATALOG_NAME", "parakeet-unified-en-0.6b-Q8_0.gguf")
+    monkeypatch.setenv("FAKE_CATALOG_BYTES", str(base.gguf.stat().st_size))
+    return lambda: [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def test_fake_bench_mirrors_the_rust_argument_rules():
+    from healing.paths import repo_root
+
+    rust = (repo_root() / "src" / "transcription" / "benchmark.rs").read_text()
+    assert "if warmups == 0 {" in rust and 'bail!("benchmark requires at least one warmup run")' in rust
+    assert "if runs == 0 {" in rust and "catalog_match(None, None, name, meta.len())" in rust
+
+
+def test_real_transcriber_argv_is_accepted_by_the_benchmark(home, base, fake_hex):
+    transcribe = replay.benchmark_transcriber(base.gguf, "parakeet-unified-en-0.6b-Q8_0.gguf")
+    out = transcribe([replay.Audio("ls-1-2-0003", noise(2, 3))])
+    assert out == {"ls-1-2-0003": "Heard, ls-1-2-0003."}
+    (call,) = fake_hex()
+    opts = dict(zip(call["args"][2::2], call["args"][3::2]))
+    assert int(opts["--warmups"]) >= 1 and int(opts["--runs"]) >= 1
+
+
+def test_replay_labels_hear_the_catalog_tail(home, base, fake_hex):
+    """v0 is a hash-named registry object; the benchmark must still see it as the catalog Unified model,
+    or replay transcripts are made without the 400 ms the training audio gets."""
+    replay.benchmark_transcriber(base.gguf, "parakeet-unified-en-0.6b-Q8_0.gguf")([replay.Audio("a", noise(2, 1))])
+    (call,) = fake_hex()
+    assert call["catalog"] is True
+    assert tm.catalog_filename({"source_path": "/x/models/parakeet-unified-en-0.6b-Q8_0.gguf"}, UNIFIED) == "parakeet-unified-en-0.6b-Q8_0.gguf"
+    assert tm.catalog_filename({}, UNIFIED) == "parakeet-unified-en-0.6b-Q8_0.gguf"
+
+
+def test_a_piece_matching_a_test_reference_never_trains(store, base):
+    gold = verified(store, 950, text=" ".join(SEGMENTS[:2]))  # exactly piece 0's text
+    register_test_set(store, "golden-v1", "golden", [gold])
+    cid = long_clip(store)
+    keep = verified(store, 1)
+    result = prepare(store, base, fake=Base(pieces=heard), ratio=0.0)
+    ids = {r["id"] for r in tm.read_manifest(result.path)}
+    assert keep in ids and not any(i.startswith(cid) for i in ids)
+    assert result.skipped["over 30 s and a piece is near a test set"] == 1
+    entry = tm.Entry("x-p0", "user", " ".join(SEGMENTS[:2]), 1.0, noise(1, 1), "x", ["unrelated words entirely here now"])
+    with pytest.raises(tm.TestClusterLeak):
+        tm.assert_no_test_cluster(store.db, [entry])
+
+
+def test_repeated_words_make_the_boundary_ambiguous():
+    reference = "Alpha beta. Alpha beta. Alpha beta."
+    assert pauses.split_reference(reference, ["alpha beta", "alpha beta"]) is None
+    assert pauses.split_reference(reference, ["alpha beta alpha beta", "alpha beta"]) == ["Alpha beta. Alpha beta.", "Alpha beta."]
+
+
+def test_pinned_test_references_are_held_out(store, base):
+    from healing import manifest as set_manifest
+
+    edited = verified(store, 960, text="quiet morning notes about nothing in particular here")
+    review(store, edited, "fix", text="the pinned reference names kip at the harbour today", at=BASE_MS + 1)
+    folder = sets_dir() / "rolling-current-x"
+    digest, _ = set_manifest.write_set(folder, [{"id": edited, "expected": "the pinned reference names kip at the harbour today", "terms": []}],
+                                       lambda _: noise(1, 1))
+    store.db.execute("INSERT INTO splits (split_id, kind, parent_version, created_at_ms, manifest_path, manifest_sha256,"
+                     " sidecar_sha256) VALUES ('rolling-current-x', 'rolling', 'current', 1, ?, ?, ?)",
+                     (str(folder / "manifest.json"), digest, set_manifest.sidecar_digest(folder)))
+    store.db.execute("INSERT INTO split_members VALUES ('rolling-current-x', ?)", (edited,))
+    store.db.commit()
+    review(store, edited, "fix", text="a later correction says something else", at=BASE_MS + 5)  # live text moves on
+    verified(store, 961, text="the pinned reference names kip at the harbour today")  # what the set still scores
+    with pytest.raises(tm.TestClusterLeak):
+        prepare(store, base, ratio=0.0)
+    (folder / "manifest.json").write_text("{}")  # a changed pin is refused, not read
+    with pytest.raises(tm.TrainError, match="rolling-current-x"):
+        tm.held_out_texts(store.db)

@@ -172,9 +172,13 @@ def usable(text: str) -> bool:
     return bool(normalized_words(text))
 
 
-def benchmark_transcriber(gguf: Path) -> Transcriber:
+def benchmark_transcriber(gguf: Path, catalog_name: str | None = None) -> Transcriber:
     """Transcribe with `hex benchmark-transcription --model <gguf>` in an isolated Hex data folder.
 
+    The benchmark recognizes a catalog model by its file name and size (`Backend::transcribe_cpp`) and
+    only then appends the model's trailing silence (400 ms for Unified). v0 lives in the registry under
+    its hash, so with `catalog_name` it is offered through a symlink of that name, and replay labels are
+    made on the same padded audio training gets. `run` refuses zero warmups, so one is done.
     The benchmark needs a reference per clip; a placeholder stands in, and only each clip's
     `transcript` is read (the scores are meaningless here)."""
     from healing.eval import bench
@@ -185,12 +189,15 @@ def benchmark_transcriber(gguf: Path) -> Transcriber:
         work = healing_home() / "tmp"
         owner_dir(work)
         with tempfile.TemporaryDirectory(dir=work) as scratch:
+            model = gguf
+            if catalog_name:
+                model = Path(scratch) / catalog_name
+                model.symlink_to(gguf.resolve())
             folder = Path(scratch) / "set"
             samples = {c.id: c.samples for c in clips}
             entries = [{"id": c.id, "expected": "placeholder", "terms": []} for c in clips]
             bench_manifest.write_set(folder, entries, samples.__getitem__, Path(scratch))
-            run, _ = bench.run_benchmark(folder / "manifest.json", model=gguf, runs=1, warmups=0)
+            run, _ = bench.run_benchmark(folder / "manifest.json", model=model, runs=1, warmups=1)
         return {record["id"]: record["transcript"] for record in run.clips}
 
     return transcribe
-

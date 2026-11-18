@@ -35,7 +35,7 @@ from pathlib import Path
 import numpy as np
 import soundfile
 
-from healing import splits
+from healing import manifest as bench_manifest, splits
 from healing.paths import train_dir
 from healing.registry.objects import fsync_dir, owner_dir
 from healing.store import Store
@@ -70,6 +70,16 @@ class Base:
     sha256: str
     gguf: Path
     catalog_id: str | None
+    filename: str | None = None  # the catalog file name the benchmark recognizes it by
+
+
+def catalog_filename(record: dict, catalog_id: str | None) -> str | None:
+    """The name Hex keeps v0's file under (`register-base` recorded where it came from), else the
+    catalog's `<id>-Q8_0.gguf`."""
+    source = record.get("source_path")
+    if source:
+        return Path(source).name
+    return f"{catalog_id}-Q8_0.gguf" if catalog_id else None
 
 
 def resolve_base() -> Base:
@@ -82,7 +92,8 @@ def resolve_base() -> Base:
     sha = v0.artifact("gguf")
     if not objects.has(sha):
         raise TrainError(f"v0's GGUF {str(sha)[:12]} is not in the registry's objects")
-    return Base(sha, objects.path(sha), (v0.record.get("base") or {}).get("catalog_id"))
+    catalog_id = (v0.record.get("base") or {}).get("catalog_id")
+    return Base(sha, objects.path(sha), catalog_id, catalog_filename(v0.record, catalog_id))
 
 
 def tail(model_id: str | None) -> int:
@@ -109,7 +120,8 @@ class Entry:
     weight: float
     samples: np.ndarray  # padded int16
     cluster: str
-    texts: list[str]  # what it clusters by against the test sets
+    texts: list[str]  # the clip's texts; the leakage checks add the entry's own `text`
+    piece_of: str | None = None  # the clip a pause-cut piece came from
 
     @property
     def duration(self) -> float:
@@ -143,7 +155,8 @@ class Prepared:
 
 
 def held_out_texts(db) -> dict[str, list[str]]:
-    """`held:<split>:<clip>` and `general:<id>` -> texts, for every registered test set of every parent."""
+    """`held:<split>:<clip>` and `general:<id>` -> texts, for every registered test set of every parent:
+    each member's live texts and the reference its pinned manifest scores (checked against its pin)."""
     texts = {
         f"held:{r['split_id']}:{r['clip_id']}": splits._texts(r)
         for r in db.execute(
@@ -152,6 +165,13 @@ def held_out_texts(db) -> dict[str, list[str]]:
             " WHERE s.kind IN ('rolling', 'edited', 'golden')"
         )
     }
+    for row in db.execute("SELECT * FROM splits WHERE kind IN ('rolling', 'edited', 'golden') AND manifest_path IS NOT NULL"):
+        try:  # what the set scores: its pinned references, which a later correction does not change
+            folder, _ = splits.verified_set(row)
+        except bench_manifest.ManifestError as error:
+            raise TrainError(f"{row['split_id']}: its pinned manifest can't be read to hold it out: {error}") from error
+        for clip in json.loads((folder / "manifest.json").read_text())["clips"]:
+            texts.setdefault(f"held:{row['split_id']}:{clip['id']}", []).append(clip["expected"])
     texts.update({key: [text] for key, text in splits.general_references(db).items()})
     return texts
 
@@ -164,7 +184,7 @@ def _touching(held: dict[str, list[str]], candidates: dict[str, list[str]]) -> s
 
 
 def assert_no_test_cluster(db, entries: list[Entry]) -> None:
-    candidates = {f"{e.source}:{e.id}": e.texts for e in entries}
+    candidates = {f"{e.source}:{e.id}": [*e.texts, e.text] for e in entries}  # what it is labelled with, always
     leaks = sorted(_touching(held_out_texts(db), candidates))
     if leaks:
         raise TestClusterLeak(f"{len(leaks)} training entr{'y shares' if len(leaks) == 1 else 'ies share'} "
@@ -197,8 +217,8 @@ def _stable(text: str) -> int:
     return int.from_bytes(hashlib.sha256(text.encode()).digest()[:4], "big")
 
 
-def _user_entries(store: Store, split_id: str, transcriber, skipped: Counter) -> tuple[list[Entry], int]:
-    """The train row's clips as entries (pieces for long ones) and how many clips made it in.
+def _user_entries(store: Store, split_id: str, transcriber, skipped: Counter) -> list[Entry]:
+    """The train row's clips as entries (pieces for long ones).
     `transcriber()` gives the base model's transcriber, asked for only when a clip is over the cap."""
     detail = json.loads(store.db.execute("SELECT detail FROM splits WHERE split_id = ?", (split_id,)).fetchone()["detail"])
     members, weights = detail["members"], detail.get("weights") or {}
@@ -228,8 +248,22 @@ def _user_entries(store: Store, split_id: str, transcriber, skipped: Counter) ->
                 continue
             for k, ((a, b), text) in enumerate(zip(cuts, parts)):
                 entries.append(Entry(f"{clip_id}-p{k}", "user", text, meta["weight"], pad(samples[a:b], meta["model"]),
-                                     meta["cluster"], meta["texts"]))
-    return entries, len(members) - sum(skipped.values())
+                                     meta["cluster"], meta["texts"], clip_id))
+    return entries
+
+
+def _without_pieces_near_tests(db, user: list[Entry], skipped: Counter) -> list[Entry]:
+    """Drop every piece of a cut clip when one piece's own text shares a split-cluster with a test
+    reference (counted in `skipped`). The zones judged the clip by its whole text, which a short piece
+    can match a test reference without; a whole clip near a test set is still a leak the assert fails."""
+    pieces = {f"user:{e.id}": [*e.texts, e.text] for e in user if e.piece_of}
+    if not pieces:
+        return user
+    near = _touching(held_out_texts(db), pieces)
+    dropped = {e.piece_of for e in user if e.piece_of and f"user:{e.id}" in near}
+    if dropped:
+        skipped["over 30 s and a piece is near a test set"] += len(dropped)
+    return [e for e in user if e.piece_of is None or e.piece_of not in dropped]
 
 
 def _replay_entries(db, user: list[Entry], pool, heard: dict[str, str], ratio: float, base: Base,
@@ -268,7 +302,8 @@ class _Lazy:
 
     def transcriber(self) -> Transcriber:
         if self._transcriber is None:
-            self._transcriber = replay_module.benchmark_transcriber(self.base().gguf)
+            base = self.base()
+            self._transcriber = replay_module.benchmark_transcriber(base.gguf, base.filename)
         return self._transcriber
 
 
@@ -290,7 +325,10 @@ def prepare(
                                           note="healing train prepare", cutoff_ms=cutoff_ms, now=now)
     if not clips:
         raise TrainError("no clip may be trained on yet (strong or verified, outside the 14-day test window)")
-    user, kept = _user_entries(store, split_id, lazy.transcriber, skipped)
+    user = _user_entries(store, split_id, lazy.transcriber, skipped)
+    if not user:
+        raise TrainError(f"{split_id}: every clip was skipped ({dict(skipped)})")
+    user = _without_pieces_near_tests(store.db, user, skipped)
     if not user:
         raise TrainError(f"{split_id}: every clip was skipped ({dict(skipped)})")
     cap_clusters(user)
@@ -302,6 +340,7 @@ def prepare(
         "train_split": split_id, "parent": parent, "include_weak": include_weak, "replay_ratio": ratio,
         "base_sha256": lazy.known.sha256 if lazy.known else None, "seed": seed, "skipped": dict(skipped),
     })
+    kept = len({e.piece_of or e.id for e in user})
     return Prepared(path, sha, split_id, kept, len(user), len(replayed),
                     sum(e.weight for e in replayed) / total, sum(e.duration for e in user) / 60, skipped)
 

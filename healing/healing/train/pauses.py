@@ -9,9 +9,11 @@ that leave every piece under the cap (the latest candidate that fits, piece afte
 each cut is a boundary the text has to be split at. A clip with no candidate that fits is skipped.
 
 A piece's text is found by transcribing the pieces with the base model and aligning the
-transcripts to the reference: a boundary is accepted only where the last word heard before the
-cut and the first word heard after it both match adjacent reference words exactly. Anything less
-certain skips the clip rather than guess (a wrong split teaches the model words it never heard).
+transcripts to the reference: a boundary is accepted only where, in every minimum-edit alignment
+(not one traceback's tie-break), the last word heard before the cut and the first word heard after
+it match the same two adjacent reference words exactly. Repeated words ("alpha beta" three times)
+make that false. Anything less certain skips the clip rather than guess (a wrong split teaches the
+model words it never heard).
 """
 
 from __future__ import annotations
@@ -82,30 +84,59 @@ def pieces(samples: np.ndarray, limit: int) -> list[tuple[int, int]] | None:
     return result
 
 
-def _alignment(reference: list[str], hypothesis: list[str]) -> dict[int, int]:
-    """hypothesis index -> reference index, for the pairs one minimum-edit alignment matches exactly
-    (ties broken toward a match, then the earliest)."""
-    rows, cols = len(reference), len(hypothesis)
-    cost = np.zeros((rows + 1, cols + 1), dtype=np.int64)
-    cost[:, 0] = np.arange(rows + 1)
-    cost[0, :] = np.arange(cols + 1)
-    for i in range(1, rows + 1):
-        for j in range(1, cols + 1):
-            cost[i, j] = min(cost[i - 1, j - 1] + (reference[i - 1] != hypothesis[j - 1]),
-                             cost[i - 1, j] + 1, cost[i, j - 1] + 1)
-    pairs: dict[int, int] = {}
-    i, j = rows, cols
-    while i > 0 and j > 0:
-        same = reference[i - 1] == hypothesis[j - 1]
-        if cost[i, j] == cost[i - 1, j - 1] + (not same):
-            if same:
-                pairs[j - 1] = i - 1
-            i, j = i - 1, j - 1
-        elif cost[i, j] == cost[i - 1, j] + 1:
-            i -= 1
-        else:
-            j -= 1
-    return pairs
+class _Alignments:
+    """Every minimum-edit alignment of `hypothesis` to `reference` at once: the cheapest cost to and
+    from each cell, and how many cheapest paths reach and leave it (Python ints: no overflow)."""
+
+    def __init__(self, reference: list[str], hypothesis: list[str]):
+        self.ref, self.hyp = reference, hypothesis
+        rows, cols = len(reference), len(hypothesis)
+        inf = float("inf")
+        self.to = [[inf] * (cols + 1) for _ in range(rows + 1)]
+        self.ways_to = [[0] * (cols + 1) for _ in range(rows + 1)]
+        self.to[0][0], self.ways_to[0][0] = 0, 1
+        for i in range(rows + 1):
+            for j in range(cols + 1):
+                for pi, pj, step in self._moves(i, j, -1):
+                    self._relax(self.to, self.ways_to, i, j, self.to[pi][pj] + step, self.ways_to[pi][pj])
+        self.rest = [[inf] * (cols + 1) for _ in range(rows + 1)]
+        self.ways_rest = [[0] * (cols + 1) for _ in range(rows + 1)]
+        self.rest[rows][cols], self.ways_rest[rows][cols] = 0, 1
+        for i in range(rows, -1, -1):
+            for j in range(cols, -1, -1):
+                for ni, nj, step in self._moves(i, j, 1):
+                    self._relax(self.rest, self.ways_rest, i, j, self.rest[ni][nj] + step, self.ways_rest[ni][nj])
+        self.best, self.paths = self.to[rows][cols], self.ways_to[rows][cols]
+
+    def _moves(self, i: int, j: int, direction: int):
+        """Neighbouring cells one move away (back when `direction` is -1) and that move's cost."""
+        for di, dj in ((1, 1), (1, 0), (0, 1)):
+            ni, nj = i + direction * di, j + direction * dj
+            if 0 <= ni <= len(self.ref) and 0 <= nj <= len(self.hyp):
+                if di and dj:
+                    r, h = (ni, nj) if direction < 0 else (i, j)
+                    yield ni, nj, int(self.ref[r] != self.hyp[h])
+                else:
+                    yield ni, nj, 1
+
+    @staticmethod
+    def _relax(cost, ways, i, j, candidate, count) -> None:
+        if candidate < cost[i][j]:
+            cost[i][j], ways[i][j] = candidate, count
+        elif candidate == cost[i][j]:
+            ways[i][j] += count
+
+    def certain_pair(self, last: int) -> int | None:
+        """The reference index `i` that every cheapest alignment matches exactly to hypothesis word
+        `last`, with `i + 1` matched exactly to `last + 1`; None when any alignment differs."""
+        for i in range(len(self.ref) - 1):
+            if self.ref[i] != self.hyp[last] or self.ref[i + 1] != self.hyp[last + 1]:
+                continue
+            if self.to[i][last] + self.rest[i + 2][last + 2] != self.best:
+                continue
+            if self.ways_to[i][last] * self.ways_rest[i + 2][last + 2] == self.paths:
+                return i
+        return None
 
 
 def split_reference(reference: str, transcripts: list[str]) -> list[str] | None:
@@ -117,14 +148,14 @@ def split_reference(reference: str, transcripts: list[str]) -> list[str] | None:
     heard = [(piece, word) for piece, text in enumerate(transcripts) for word in normalized_words(text)]
     if any(not normalized_words(text) for text in transcripts):
         return None  # a piece with nothing heard has no boundary to place
-    pairs = _alignment([w for w, _, _ in spans], [w for _, w in heard])
+    alignments = _Alignments([w for w, _, _ in spans], [w for _, w in heard])
     cuts = [0]
     for piece in range(len(transcripts) - 1):
         last = max(j for j, (p, _) in enumerate(heard) if p == piece)
-        first = last + 1
-        if last not in pairs or first not in pairs or pairs[first] != pairs[last] + 1:
-            return None
-        cuts.append(spans[pairs[first]][1])
+        matched = alignments.certain_pair(last)
+        if matched is None:
+            return None  # no exact match across the cut, or the alignments disagree where it falls
+        cuts.append(spans[matched + 1][1])
     cuts.append(len(reference))
     texts = [reference[a:b].strip() for a, b in zip(cuts, cuts[1:])]
     return texts if all(normalized_words(t) for t in texts) else None
