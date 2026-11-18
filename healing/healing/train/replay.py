@@ -7,8 +7,9 @@ the base (v0) model, never the current one, so drift does not compound; they are
 (`$HEALING_HOME/train/replay/<sha>.jsonl`), so later rounds transcribe nothing.
 
 Offline (G-3): the source is a folder of LibriSpeech parquet shards already on disk (Hugging Face's
-`openslr/librispeech_asr` layout: `id`, `text`, `audio`). Nothing here downloads them; fetching
-belongs beside the general set in `healing/sets/`, where the network rule allows it.
+`openslr/librispeech_asr` layout: `id`, `text`, `audio`). Nothing here downloads them;
+`healing sets fetch-librispeech` (`healing/sets/librispeech.py`, where the network rule allows it)
+fetches them into `default_source()`.
 
 A pool that holds a clip of a test set is refused (`ReplayError`), and a pool clip whose transcript
 near-duplicates a test reference is never mixed in (`manifest.py` drops it, then asserts).
@@ -28,7 +29,7 @@ import numpy as np
 from healing import manifest as bench_manifest
 from healing.paths import healing_home, train_dir
 from healing.registry.objects import fsync_dir, owner_dir
-from healing.sets import general
+from healing.sets import general, librispeech
 from healing.wer import normalized_words
 
 POOL_SIZE = 2000
@@ -73,11 +74,13 @@ class LocalLibriSpeech:
     def utterances(self) -> Iterable[Utterance]:
         import pyarrow.parquet as parquet
 
-        shards = sorted(self.folder.glob("**/*.parquet")) if self.folder.is_dir() else []
+        # `._*` are the AppleDouble files macOS writes beside each file on exFAT (the external drive)
+        shards = sorted(p for p in self.folder.glob("**/*.parquet") if not p.name.startswith("._")) if self.folder.is_dir() else []
         if not shards:
             raise ReplayError(
                 f"no LibriSpeech train-clean-100 parquet shards in {self.folder} (Hugging Face's "
-                "openslr/librispeech_asr clean/train.100); put them there, pass --replay-source, or --replay 0"
+                "openslr/librispeech_asr clean/train.100); run `healing sets fetch-librispeech`, pass "
+                "--replay-source, or --replay 0"
             )
         for path in shards:
             for index, row in enumerate(parquet.read_table(path, columns=["id"]).to_pylist()):
@@ -95,7 +98,7 @@ def _load(path: Path, index: int) -> np.ndarray:
 
 
 def default_source() -> Path:
-    return healing_home() / "cache" / "librispeech-train-clean-100"
+    return librispeech.cache_folder()
 
 
 def general_ids() -> set[str]:

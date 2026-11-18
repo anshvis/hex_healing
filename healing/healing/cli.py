@@ -21,6 +21,9 @@ def main(argv: list[str] | None = None) -> int:
     general.add_argument("--ami", type=int, default=200)
     general.add_argument("--seed", type=int, default=13)
 
+    fetch = sets.add_parser("fetch-librispeech", help="download LibriSpeech train-clean-100 (replay source)")
+    fetch.add_argument("--dest", type=Path, help="write the shards here and symlink the cache path to it")
+
     sub = sets.add_parser("subset", help="write a sub-manifest of the general set by id prefix")
     sub.add_argument("--prefix", required=True)
     sub.add_argument("--name", required=True)
@@ -240,6 +243,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return main_collect(args.since, args.hex, floor)
     if args.group == "sets":
+        if args.command == "fetch-librispeech":
+            return _fetch_librispeech(args)
         return _subset(args) if args.command == "subset" else _build_general(args)
     if args.group == "eval":
         if args.command == "baseline":
@@ -521,6 +526,21 @@ def _build_general(args) -> int:
         return 1
     state = "unchanged" if result.unchanged else "written"
     print(f"{state}: {result.clips} clips, sha256 {result.sha256}\n{result.manifest}")
+    return 0
+
+
+def _fetch_librispeech(args) -> int:
+    from healing.sets import librispeech
+
+    try:
+        result = librispeech.fetch(args.dest, progress=librispeech.print_progress)
+    except librispeech.FetchError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    state = "unchanged" if result.unchanged else f"fetched {len(result.fetched)} shard(s)"
+    print(f"{state}: {len(librispeech.SHARDS)} shards, {result.total_bytes:,} bytes verified\n{result.folder}")
+    if result.linked:
+        print(f"linked {librispeech.cache_folder()} -> {result.folder}")
     return 0
 
 
