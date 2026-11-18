@@ -641,7 +641,7 @@ impl TranscriptionEngine {
 
     /// Opens a live stream when the loaded model can stream on this device.
     pub fn begin(&self) -> Option<LiveStream> {
-        if !self.streams.load(Ordering::Acquire) {
+        if !self.streams() {
             return None;
         }
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed) + 1;
@@ -668,7 +668,7 @@ impl TranscriptionEngine {
     /// Opens a stream that gives way to dictation, when the loaded model can
     /// stream on this device. See [`YieldingStream`].
     pub(crate) fn begin_yielding(&self) -> Option<YieldingStream> {
-        if !self.streams.load(Ordering::Acquire) {
+        if !self.streams() {
             return None;
         }
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed) + 1;
@@ -691,9 +691,18 @@ impl TranscriptionEngine {
         })
     }
 
-    /// Whether the loaded model can stream on its device.
+    /// Whether the loaded model can stream on its device. An import that
+    /// passed its smoke stream stops streaming at once when Labs › Stream
+    /// imported models goes off, without waiting for a reload.
     pub(crate) fn streams(&self) -> bool {
         self.streams.load(Ordering::Acquire)
+            && (crate::labs::stream_imported_models()
+                || !self.held_selection().is_some_and(|selection| {
+                    matches!(
+                        selection.model,
+                        crate::transcription::models::TranscriptionModelId::Custom(_)
+                    )
+                }))
     }
 
     /// Finishes a capture with its complete 16 kHz clip. Without a stream,
@@ -874,14 +883,26 @@ impl TranscriptionEngine {
     /// not on the device it loaded on (a CPU, or a GPU whose stream probe
     /// failed). `None` when a stream can open.
     pub(crate) fn stream_refusal(&self) -> Option<&'static str> {
-        if self.streams.load(Ordering::Acquire) {
+        if self.streams() {
             return None;
         }
         match self.held_selection() {
             Some(selection) => {
+                use crate::transcription::custom_models;
                 use crate::transcription::models::{TranscriptionModelId, definition};
-                // An imported model's catalog entry says it can't stream, but
-                // its GGUF is only checked when it loads; blame the device.
+                // An import streams only behind its lab, and only when made
+                // from a streaming catalog model; past both, its smoke
+                // stream failed on the device.
+                if let TranscriptionModelId::Custom(id) = selection.model {
+                    if !crate::labs::stream_imported_models() {
+                        return Some(
+                            "imported speech models stream only with Labs › Stream imported models on",
+                        );
+                    }
+                    if !custom_models::streams_like_a_catalog_model(id) {
+                        return Some("the imported speech model isn't made from a streaming model");
+                    }
+                }
                 if !matches!(selection.model, TranscriptionModelId::Custom(_))
                     && !definition(selection.model).streams
                 {
@@ -1266,8 +1287,8 @@ impl Worker {
                 .model
                 .as_ref()
                 .and_then(|model| model.gguf_selection())
-                // An imported model's catalog entry says it can't stream, but
-                // its GGUF is only checked when it loads.
+                // An import's definition streams only once its smoke stream
+                // passed, which is what this load decided.
                 .filter(|selection| {
                     !matches!(
                         selection.model,
@@ -2634,8 +2655,8 @@ mod tests {
             engine.stream_refusal(),
             Some("the selected speech model doesn't stream")
         );
-        // An imported model's catalog entry says it can't stream, but its
-        // GGUF is only checked when it loads: blame the device instead.
+        // An import streams only behind Labs › Stream imported models,
+        // which is off by default.
         *engine.held.lock().unwrap() = Some(crate::transcription::models::TranscriptionSelection {
             model: crate::transcription::models::TranscriptionModelId::Custom(
                 crate::transcription::models::CustomModelId::parse("custom-0123456789abcdef")
@@ -2645,9 +2666,12 @@ mod tests {
         });
         assert_eq!(
             engine.stream_refusal(),
-            Some(
-                "the speech model isn't streaming on this device (a CPU, or a GPU that could not start streaming)"
-            )
+            Some("imported speech models stream only with Labs › Stream imported models on")
         );
+        // A loaded import that passed its smoke stream stops streaming at
+        // once with the lab off.
+        engine.streams.store(true, Ordering::Release);
+        assert!(!engine.streams());
+        assert!(engine.begin().is_none());
     }
 }
