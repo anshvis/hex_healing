@@ -218,9 +218,10 @@ impl Entry {
     }
 }
 
-/// Each import's last smoke stream, by ID: whether a live stream ran on the
-/// device its model loaded on. Run when the model loads, so a process that
-/// never loaded an import has none.
+/// Whether each import's last load holds a stream, by ID: its smoke stream
+/// ran on the device the kept instance loaded on, or `false` for a load that
+/// ran none. Set when the model loads, so a process that never loaded an
+/// import has none.
 static STREAM_SMOKE: LazyLock<Mutex<HashMap<CustomModelId, bool>>> = LazyLock::new(Mutex::default);
 
 fn stream_smoke(id: CustomModelId) -> Option<bool> {
@@ -263,12 +264,32 @@ pub fn streams_like_a_catalog_model(id: CustomModelId) -> bool {
 /// `selection` is an import Labs › Stream imported models keeps offline:
 /// with the lab off, or for an import that streams like no catalog model,
 /// it never runs and the model transcribes whole clips. An import's result
-/// is kept for [`definition`]; a failed one falls back to whole clips.
+/// is kept for [`definition`], and a load that runs none keeps that it has
+/// no stream, so the lab turned back on never revives an older load's pass;
+/// a failed one falls back to whole clips.
 pub(crate) fn smoke_stream<T>(
     selection: &TranscriptionSelection,
     probe: impl FnOnce() -> Option<T>,
 ) -> Option<T> {
     smoke_stream_where(selection, crate::labs::stream_imported_models(), probe)
+}
+
+/// Records whether the loaded instance a load kept for `selection` streams,
+/// when a load smoke-tested more than one (a GPU and the CPU timed after it,
+/// #484): the last smoke stream run need not be the kept instance's. Only
+/// the Linux and Windows loader times both.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn kept_stream(selection: &TranscriptionSelection, streams: bool) {
+    if let TranscriptionModelId::Custom(id) = selection.model {
+        remember_stream(id, streams);
+    }
+}
+
+fn remember_stream(id: CustomModelId, streams: bool) {
+    STREAM_SMOKE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(id, streams);
 }
 
 /// [`smoke_stream`] against `lab` rather than this process's switch.
@@ -288,6 +309,7 @@ fn smoke_stream_where<T>(
             id = id.as_str(),
             "this imported model streams like no catalog model; transcribing whole clips"
         );
+        remember_stream(id, false);
         return None;
     };
     if !lab {
@@ -296,13 +318,11 @@ fn smoke_stream_where<T>(
             streams_like,
             "an imported streaming model transcribes whole clips while Labs › Stream imported models is off"
         );
+        remember_stream(id, false);
         return None;
     }
     let stream = probe();
-    STREAM_SMOKE
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(id, stream.is_some());
+    remember_stream(id, stream.is_some());
     match &stream {
         Some(_) => tracing::info!(
             id = id.as_str(),
@@ -1413,6 +1433,49 @@ mod tests {
             language: "en".into(),
         };
         assert_eq!(smoke_stream_where(&catalog, false, || Some(7)), Some(7));
+        super::super::models::set_test_models_dir(None);
+        fs::remove_dir_all(models).unwrap();
+    }
+
+    /// A load that runs no smoke stream (the lab off, say) holds no stream,
+    /// so the import doesn't stream once the lab is on again until a load
+    /// probes it.
+    #[test]
+    fn an_unprobed_reload_forgets_the_last_smoke_stream() {
+        let models = temporary_models_dir();
+        let source = models.join("unified-finetune-Q8_0.gguf");
+        fs::write(&source, unified("Unified fine-tune")).unwrap();
+        let id = import(&source, None, &AtomicBool::new(false)).unwrap();
+        assert_eq!(
+            smoke_stream_where(&selection(id), true, || Some(())),
+            Some(())
+        );
+        assert!(definition_where(id, true).streams);
+        // Reloaded with the lab off: no smoke stream, no stream.
+        assert_eq!(
+            smoke_stream_where(&selection(id), false, || -> Option<()> {
+                panic!("the lab is off, so nothing streams")
+            }),
+            None
+        );
+        assert!(
+            !definition_where(id, true).streams,
+            "the lab back on doesn't revive the old instance's smoke stream"
+        );
+        // The instance a load keeps decides (a GPU kept over a CPU timed
+        // after it, #484).
+        assert_eq!(
+            smoke_stream_where(&selection(id), true, || Some(())),
+            Some(())
+        );
+        assert_eq!(
+            smoke_stream_where(&selection(id), true, || None::<()>),
+            None
+        );
+        kept_stream(&selection(id), true);
+        assert!(definition_where(id, true).streams);
+        kept_stream(&selection(id), false);
+        assert!(!definition_where(id, true).streams);
         super::super::models::set_test_models_dir(None);
         fs::remove_dir_all(models).unwrap();
     }

@@ -600,6 +600,7 @@ impl LocalTranscriber {
                     error = format!("{error:#}"),
                     "could not time the model on the CPU; keeping the GPU"
                 );
+                super::custom_models::kept_stream(&self.selection, self.stream.is_some());
                 return self;
             }
         };
@@ -609,6 +610,8 @@ impl LocalTranscriber {
             "timed a warm 1.5 s run on the integrated GPU and the CPU"
         );
         if cpu.warm_ms >= self.warm_ms {
+            // The CPU's load smoke-tested last; the GPU's stream is the one kept.
+            super::custom_models::kept_stream(&self.selection, self.stream.is_some());
             return self;
         }
         if let Some(gpu) = &self.gpu {
