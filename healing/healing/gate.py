@@ -18,7 +18,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import os
 import sys
 import tempfile
 import tomllib
@@ -314,10 +313,6 @@ def table(verdict: Verdict) -> list[str]:
 
 # ---- the live path ---------------------------------------------------------------------------------
 
-def _in_tests() -> bool:
-    return "PYTEST_CURRENT_TEST" in os.environ
-
-
 @contextlib.contextmanager
 def _model_files(versions: list):
     """Each version's GGUF from the registry's objects (pinned by hash). v0 is offered under its catalog
@@ -421,8 +416,6 @@ def run(version: str, against: str = "current", *, eval_path: Path | None = None
     from healing.eval import run as eval_run
     from healing.registry import store as registry
 
-    if allow_thin and not _in_tests():
-        raise GateUsageError("--allow-thin-evidence is for test fixtures only; it is refused outside tests")
     margins = Margins.load()
     state = registry.load()
     candidate, target = state.get(version), state.get(against)
@@ -473,9 +466,12 @@ def main(args) -> int:
     from healing.registry.store import RegistryError
     from healing.store import StoreError
 
+    if args.allow_thin_evidence:  # the override is `run(allow_thin=True)`, which only test fixtures call
+        print("error: --allow-thin-evidence is for test fixtures only; the command line always refuses it",
+              file=sys.stderr)
+        return GateUsageError.code
     try:
-        return run(args.version, args.against, eval_path=args.eval, allow_thin=args.allow_thin_evidence,
-                   binary=args.hex)
+        return run(args.version, args.against, eval_path=args.eval, binary=args.hex)
     except GateError as error:
         print(f"error: {error}", file=sys.stderr)
         return error.code

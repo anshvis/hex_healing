@@ -317,8 +317,9 @@ def test_rejected_candidate_is_not_gated_again(home):
         gate.run("v1", evaluate=fake_evaluate(world(), []), support=STREAMS, say=lambda line: None)
 
 
-def test_allow_thin_evidence_refused_outside_tests(home, monkeypatch, capsys):
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+def test_allow_thin_evidence_refused_by_the_cli(home, capsys):
+    """The override is a library parameter the tests pass; the command line refuses it unconditionally,
+    whatever the environment says (PYTEST_CURRENT_TEST is set right now)."""
     before = registry.read_events()
     assert main(["gate", "v1", "--allow-thin-evidence"]) == 2
     assert "fixtures" in capsys.readouterr().err

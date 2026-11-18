@@ -165,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     gate.add_argument("--against", default="current", help="the version it would replace (default: current)")
     gate.add_argument("--eval", type=Path, default=None, help="judge a saved `healing eval` holding both models instead of scoring again")
     gate.add_argument("--hex", type=Path, default=None, help="the hex binary to ask whether the candidate streams")
-    gate.add_argument("--allow-thin-evidence", action="store_true", help=argparse.SUPPRESS)  # test fixtures only
+    gate.add_argument("--allow-thin-evidence", action="store_true", help=argparse.SUPPRESS)  # always refused: fixtures call run(allow_thin=True)
 
     train_group = commands.add_parser("train", help="Tier 2 training (M6): `prepare`, `auto`, or a round with --local")
     train_group.add_argument("--local", action="store_true", help="train a LoRA round on this Mac's CPU (T6.5)")
