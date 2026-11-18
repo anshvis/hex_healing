@@ -303,6 +303,15 @@ def test_bundle_hash_is_verified_and_recorded_in_the_registry(store, base, capsy
         verified(store, i)
     result = prepare(store, base, ratio=0.0)
     assert tm.verify_bundle(result.path) == result.sha256
+    # exFAT: macOS writes an AppleDouble `._<name>` beside each file; it is not bundle content
+    first = sorted((result.path / "audio").iterdir())[0]
+    (result.path / "audio" / f"._{first.name}").write_bytes(b"\x00\x05\x16\x07")
+    assert tm.verify_bundle(result.path) == result.sha256
+    (result.path / "audio" / f"._{first.name}").unlink()
+    (result.path / "audio" / "extra.wav").write_bytes(b"RIFF")
+    with pytest.raises(tm.TrainError, match="differ"):
+        tm.verify_bundle(result.path)
+    (result.path / "audio" / "extra.wav").unlink()
     assert (result.path / "bundle.sha256").read_bytes().count(b"\n") == 6  # manifest + 5 WAVs
     info = json.loads((result.path / "bundle.json").read_text())
     assert info["train_split"] == result.train_split and "text" not in json.dumps(info)
