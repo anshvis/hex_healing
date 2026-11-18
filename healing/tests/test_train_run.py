@@ -7,10 +7,15 @@ inputs `run.py` checks, the round folder, resume and the run record.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
+import signal
 import struct
+import subprocess
 import sys
+import time
 import textwrap
 from pathlib import Path
 
@@ -36,6 +41,17 @@ FAKE = textwrap.dedent('''
     (work / "targets.json").write_text(json.dumps({"groups": {"encoder_attention": targets[:1], "joint": targets[1:]},
                                                    "trainable_parameters": 64, "frozen_parameters": 1000}))
     resumed = (work / "checkpoint.pt").exists()
+    if mode == "slow":  # trains until signalled, then checkpoints and exits 130, as lora.py does
+        import signal, time
+        def stop(signum, frame):
+            (work / f"got-{signum}").write_text("")
+            (work / "checkpoint.pt").write_text("step 3")
+            sys.exit(130)
+        signal.signal(signal.SIGTERM, stop)
+        signal.signal(signal.SIGINT, stop)
+        (work / "trainer.pid").write_text(str(os.getpid()))
+        time.sleep(60)
+        sys.exit(1)
     if mode == "interrupt" and not resumed:
         (work / "checkpoint.pt").write_text("step 5")
         print("train: interrupted", flush=True)
@@ -154,8 +170,97 @@ def test_no_text_in_train_log(setup, monkeypatch):
     monkeypatch.setenv("FAKE_MODE", "leak")
     with pytest.raises(TrainError, match="numbers only"):
         train(setup)
-    assert run.log_strings({"stopped": "early_stopping", "entries": [{"step": 1, "val_wer": None}]}) == []
-    assert run.log_strings({"entries": [{"x": "phrase"}]}) == ["phrase"]
+    good = {"stopped": "early_stopping", "steps": 1, "entries": [{"step": 1, "val_wer": None, "train_loss": 0.5}],
+            "probe": {"clips": 2, "padded_seconds": 54.7, "peak_rss_bytes": 1}, "estimate_hours": [3, 4]}
+    assert run.log_problems(good) == []
+    assert run.log_problems({"entries": [{"x": "phrase"}]})  # an unknown key
+    assert run.log_problems({"entries": [{"step": "phrase"}]})  # a string where a number goes
+
+
+def test_log_keys_and_misplaced_stop_reasons_are_text_too():
+    """Keys are checked against the log's fixed schema, and a stop reason is allowed only as `stopped`."""
+    assert run.log_problems({"phrase number one": 1})
+    assert run.log_problems({"entries": [{"phrase number one": 0.5}]})
+    assert run.log_problems({"probe": {"phrase": 1}})
+    assert run.log_problems({"entries": [{"step": "max_steps"}]})
+    assert run.log_problems({"best_step": "epochs"})
+    assert run.log_problems({"stopped": "phrase number one"})
+    assert run.log_problems({"steps": True})  # a bool is not a count
+    assert run.log_problems([1]) and run.log_problems({"entries": {"step": 1}})
+
+
+def wrapper(setup, home) -> subprocess.Popen:
+    """`train_local` in its own process, as `healing train --local` runs, with the slow fake trainer."""
+    code = (f"import sys; from pathlib import Path; from healing.train import run; "
+            f"sys.exit(run.train_local(Path({str(setup['bundle'])!r}), config_path=Path({str(setup['config'])!r}), "
+            f"python=Path({str(setup['python'])!r}), base=Path({str(setup['base'])!r}), keep_awake=False))")
+    env = {**os.environ, "FAKE_MODE": "slow", "HEALING_HOME": str(home / "home")}
+    return subprocess.Popen([sys.executable, "-c", code], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+
+def wait_for(path_glob, home: Path, timeout: float = 30.0) -> Path:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = list((home / "home/rounds").glob(path_glob))
+        if found:
+            return found[0]
+        time.sleep(0.05)
+    raise AssertionError(f"no {path_glob} after {timeout}s")
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+def test_a_signal_to_the_wrapper_reaches_the_trainer_and_is_waited_for(setup, home, signum):
+    """SIGTERM (or SIGINT sent to the wrapper alone) is forwarded once; the wrapper waits for the
+    trainer's checkpointed exit, so no trainer outlives it."""
+    process = wrapper(setup, home)
+    wait_for("*/work/trainer.pid", home)
+    time.sleep(0.2)  # the fake has installed its handlers before writing its pid
+    pid = int(wait_for("*/work/trainer.pid", home).read_text())
+    process.send_signal(signum)
+    output, _ = process.communicate(timeout=30)
+    assert process.returncode == 130, output
+    assert "interrupted" in output
+    work = wait_for("*/work", home)
+    assert (work / f"got-{int(signum)}").exists() and (work / "checkpoint.pt").exists()
+    assert not alive(pid)
+
+
+def test_a_second_writer_on_the_same_round_is_refused(setup, home):
+    process = wrapper(setup, home)
+    try:
+        wait_for("*/work/trainer.pid", home)
+        with pytest.raises(TrainError, match="already training this round"):
+            train(setup)
+    finally:
+        process.send_signal(signal.SIGTERM)
+        process.communicate(timeout=30)
+    assert train(setup)[0] == 0  # the lock goes with its holder
+
+
+def test_the_round_lock_is_held_while_training(setup, home, monkeypatch):
+    seen = []
+
+    def held(*args, **kwargs):
+        lock = next((home / "home/rounds").glob("*/round.lock"))
+        with open(lock, "a") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                seen.append("free")
+            except BlockingIOError:
+                seen.append("held")
+        return real(*args, **kwargs)
+
+    real = run._finish
+    monkeypatch.setattr(run, "_finish", held)
+    assert train(setup)[0] == 0 and seen == ["held"]
 
 
 def test_inputs_are_checked_before_training(setup, home):
@@ -218,6 +323,17 @@ def test_default_config_is_the_spec():
     assert "smoke" not in config and config_module.parse(text) == config
     smoke, _ = config_module.load(config_module.DEFAULT, smoke=True)
     assert (smoke["max_steps"], smoke["max_clips"]) == (20, 50)
+
+
+def test_config_quoted_scalars_follow_yaml_or_are_refused():
+    assert config_module.parse("x: 'can''t'\n") == {"x": "can't"}
+    assert config_module.parse("x: 'a # b'\n") == {"x": "a # b"}
+    assert config_module.parse('x: "say \\"hi\\""\n') == {"x": 'say "hi"'}
+    for bad in ("x: 'a' 'b'\n", "x: 'a'b\n", 'x: "a" "b"\n', "x: 'open\n", "x: ['a, b']\n"):
+        with pytest.raises(config_module.ConfigError):
+            config_module.parse(bad)
+    value = {"x": "can't \"x\" # y"}
+    assert config_module.parse(config_module.dump(value)) == value
 
 
 def test_config_parser_round_trips_and_refuses_what_it_cannot_read():

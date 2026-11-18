@@ -14,7 +14,9 @@
 
 The round's key is the SHA-256 of the effective config, the bundle's sha and the base's sha, so the
 same command after a crash, sleep or Ctrl-C finds the same folder and resumes, and a changed input
-starts a new round. The trainer runs under `caffeinate -i -w <pid>`, so the Mac does not idle-sleep.
+starts a new round. The trainer runs under `caffeinate -i -w <pid>`, so the Mac does not idle-sleep,
+in its own session: SIGINT and SIGTERM reach it through this wrapper, which waits for its checkpointed
+exit. `<round>/round.lock` admits one writer per round.
 
 Paths, each recorded in the run: NeMo's Python is `--python`, else `$HEALING_NEMO_PYTHON`, else the
 M0 environment; transcribe.cpp (the offline patch Unified needs) is `$TRANSCRIBE_CPP`, else M0's
@@ -28,6 +30,8 @@ Registering a candidate is T6.3's: `healing export <out/lora_delta.safetensors> 
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -106,20 +110,74 @@ def _now() -> str:
 
 
 STOP_REASONS = {"max_steps", "epochs", "early_stopping"}
+NUMBER, COUNT, OPTIONAL_NUMBER = "number", "count", "number or null"
+ENTRY = {"step": COUNT, "epoch": COUNT, "train_loss": OPTIONAL_NUMBER, "val_loss": OPTIONAL_NUMBER,
+         "val_wer": OPTIONAL_NUMBER, "seconds": NUMBER}
+PROBE = {"clips": COUNT, "padded_seconds": NUMBER, "peak_rss_bytes": COUNT}
+LOG_FIELDS = {"steps": COUNT, "best_step": "count or null", "epochs_completed": COUNT, "resumes": COUNT,
+       "wall_seconds": NUMBER, "wall_hours": NUMBER, "load_seconds": OPTIONAL_NUMBER, "train_entries": COUNT,
+       "validation_entries": COUNT, "train_audio_seconds": NUMBER, "peak_rss_bytes": COUNT, "max_rss_bytes": COUNT}
 
 
-def log_strings(log) -> list[str]:
-    """Every string value in the train log that is not one of its fixed words. The log is numbers only,
-    so anything here (a transcript, a path) is a leak."""
-    if isinstance(log, dict):
-        return [s for value in log.values() for s in log_strings(value)]
-    if isinstance(log, list):
-        return [s for value in log for s in log_strings(value)]
-    return [log] if isinstance(log, str) and log not in STOP_REASONS else []
+def _type_ok(value, kind: str) -> bool:
+    if value is None:
+        return kind.endswith("or null")
+    if isinstance(value, bool):
+        return False
+    if kind.startswith("count"):
+        return isinstance(value, int) and value >= 0
+    return isinstance(value, (int, float))
+
+
+def _fields(where: str, value, schema: dict) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{where} is not a mapping"]
+    problems = [f"{where} has an unknown key ({len(key)} characters)" for key in value if key not in schema]
+    problems += [f"{where}.{key} is not a {schema[key]}" for key in value if key in schema and not _type_ok(value[key], schema[key])]
+    return problems
+
+
+def log_problems(log) -> list[str]:
+    """Why a train log is not the trainer's fixed schema of numbers. Every key must be one the trainer
+    writes and every value a number of the right kind, so neither a key nor a value can carry text; the
+    one string allowed is `stopped`, and only as a stop reason. (A key's text is never echoed.)"""
+    if not isinstance(log, dict):
+        return ["the log is not a mapping"]
+    problems = _fields("log", {k: v for k, v in log.items() if k not in ("entries", "probe", "stopped", "estimate_hours")}, LOG_FIELDS)
+    if "stopped" in log and log["stopped"] not in STOP_REASONS:
+        problems.append("log.stopped is not a stop reason")
+    hours = log.get("estimate_hours", [])
+    if not isinstance(hours, list) or not all(_type_ok(h, NUMBER) for h in hours):
+        problems.append("log.estimate_hours is not a list of numbers")
+    if "probe" in log and log["probe"] is not None:
+        problems += _fields("log.probe", log["probe"], PROBE)
+    entries = log.get("entries", [])
+    if not isinstance(entries, list):
+        return problems + ["log.entries is not a list"]
+    for index, entry in enumerate(entries):
+        problems += _fields(f"log.entries[{index}]", entry, ENTRY)
+    return problems
+
+
+@contextlib.contextmanager
+def round_lock(folder: Path):
+    """One writer per round: an exclusive lock on `<round>/round.lock`, held while the trainer runs and
+    released with its holder (the OS drops it when the process dies, so a crash leaves no stale lock)."""
+    handle = open(folder / "round.lock", "a")
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise TrainError(f"another `healing train` is already training this round ({folder}); "
+                             f"wait for it or stop it, then rerun") from None
+        yield
+    finally:
+        handle.close()
 
 
 def _start(command: list[str], keep_awake: bool) -> tuple[subprocess.Popen, subprocess.Popen | None]:
-    child = subprocess.Popen(command, env={**os.environ, "PYTHONUNBUFFERED": "1"})
+    # Its own session: a terminal Ctrl-C reaches only this wrapper, which forwards it once (`_wait`).
+    child = subprocess.Popen(command, env={**os.environ, "PYTHONUNBUFFERED": "1"}, start_new_session=True)
     awake = None
     caffeinate = shutil.which("caffeinate") if keep_awake else None
     if caffeinate:
@@ -127,13 +185,29 @@ def _start(command: list[str], keep_awake: bool) -> tuple[subprocess.Popen, subp
     return child, awake
 
 
-def _wait(child: subprocess.Popen) -> int:
-    """The trainer's exit code. Ctrl-C reaches it too (one process group): it checkpoints and exits."""
-    while True:
+def _wait(child: subprocess.Popen, awake: subprocess.Popen | None) -> int:
+    """The trainer's exit code. SIGINT and SIGTERM to this wrapper are forwarded to the trainer (each
+    one: a second Ctrl-C stops it at once, as `lora.py` says), and the wrapper keeps waiting for its
+    checkpointed exit, so no trainer outlives it. caffeinate is stopped and reaped either way."""
+    def forward(signum, _frame):
+        if child.poll() is None:
+            child.send_signal(signum)
+
+    previous = {s: signal.signal(s, forward) for s in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        return child.wait()
+    finally:
         try:
-            return child.wait()
-        except KeyboardInterrupt:
-            continue  # the trainer got the same SIGINT; wait for its checkpoint
+            if child.poll() is None:  # only if waiting itself failed: never leave the trainer behind
+                child.kill()
+                child.wait()
+        finally:
+            for s, handler in previous.items():
+                signal.signal(s, handler)
+            if awake is not None:
+                if awake.poll() is None:
+                    awake.terminate()
+                awake.wait()
 
 
 def train_local(bundle: Path, config_path: Path | None = None, smoke: bool = False, python: Path | None = None,
@@ -157,6 +231,13 @@ def train_local(bundle: Path, config_path: Path | None = None, smoke: bool = Fal
     work, out = folder / "work", folder / "out"
     for path in (folder, work, out):
         owner_dir(path)
+    with round_lock(folder):
+        return _train(folder, work, out, key, config, effective, config_path, smoke, paths, bundle, bundle_sha,
+                      base_sha, keep_awake, say)
+
+
+def _train(folder: Path, work: Path, out: Path, key: str, config: dict, effective: str, config_path: Path,
+           smoke: bool, paths: Paths, bundle: Path, bundle_sha: str, base_sha: str, keep_awake: bool, say) -> int:
     record_path = out / RECORD
     if record_path.exists() and json.loads(record_path.read_text()).get("status") == "complete":
         say(f"already trained: {out / DELTA}")
@@ -170,11 +251,7 @@ def train_local(bundle: Path, config_path: Path | None = None, smoke: bool = Fal
     say(f"round {folder.name}: {'resuming' if resuming else 'starting'} ({'smoke' if smoke else 'full'}) in {folder}")
     started, started_at = time.monotonic(), _now()
     child, awake = _start([str(paths.python), "-I", str(TRAINER), "--job", str(work / "trainer.json")], keep_awake)
-    try:
-        code = _wait(child)
-    finally:
-        if awake and awake.poll() is None:
-            awake.send_signal(signal.SIGTERM)
+    code = _wait(child, awake)
     if code != 0:
         why = {lora.INTERRUPTED: "interrupted; rerun the same command to resume from the last checkpoint",
                lora.MEMORY: "over the memory limit (see above)", lora.BAD_JOB: "the trainer refused the job (see above)"}
@@ -196,8 +273,9 @@ def _finish(folder: Path, job: dict, config_path: Path, effective: str, smoke: b
     if problems:
         raise TrainError(f"{delta}: " + "; ".join(problems[:5]))
     log = json.loads(log_path.read_text())
-    if log_strings(log):
-        raise TrainError(f"{log_path} holds text ({len(log_strings(log))} strings); it must hold numbers only")
+    problems = log_problems(log)
+    if problems:
+        raise TrainError(f"{log_path} is not the trainer's log of numbers only: " + "; ".join(problems[:5]))
     env = json.loads((work / "env.json").read_text())
     record = {
         "status": "complete", "round": folder.name, "key": job["key"], "smoke": smoke,
