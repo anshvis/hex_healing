@@ -123,6 +123,14 @@ def vocabulary_fingerprint(entries: list[dict], boost: str | None) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def model_identity(model: Path, runs: list[BenchRun]) -> dict:
+    """How the benchmark saw a model: the file name it was given (a catalog model is recognized by name and
+    size, and only then padded) and the trailing silence it appended, from its `model` record."""
+    padding = next((r.model["trailing_silence_samples"] for r in runs
+                    if r.model.get("trailing_silence_samples") is not None), None)
+    return {"file_name": model.name, "trailing_silence_samples": padding}
+
+
 def resolve_set(name: str, store: Store | None, parent: str = "current") -> SetRef | Unavailable:
     """The set's folder and pin, or why it isn't available. Rolling and edited sets are `parent`'s own:
     each model version has its holdout, and another parent's newer set is not a stand-in."""
@@ -294,11 +302,11 @@ def evaluate(
         "parent": parent,
         "vocabulary": {"mode": vocabulary, "terms": len(entries), "boost": boost if entries else None,
                        "sha256": vocabulary_fingerprint(entries, boost)},
-
         "scores": {str(m): {} for m in models},
         "per_clip": {str(m): {} for m in models},
         "started_at_ms": int(started * 1000),
     }
+    every_run: dict[str, list[BenchRun]] = {str(m): [] for m in models}
     with tempfile.TemporaryDirectory(prefix="healing-vocabulary-") as folder:
         vocabulary_file = None
         if entries:
@@ -318,9 +326,12 @@ def evaluate(
                         raise EvalError(f"{model} on {ref.name}: {error}") from error
                     results[str(model)].append(run)
             for model in models:
+                every_run[str(model)] += results[str(model)]
                 scores, per_clip = score_set(ref, results[str(model)])
                 document["scores"][str(model)][ref.name] = scores
                 document["per_clip"][str(model)][ref.name] = per_clip
+    for entry, model in zip(document["models"], models):
+        entry.update(model_identity(model, every_run[str(model)]))
     document["duration_ms"] = int((now() - started) * 1000)
     return document
 

@@ -313,13 +313,41 @@ def table(verdict: Verdict) -> list[str]:
 
 # ---- the live path ---------------------------------------------------------------------------------
 
+def _benchmark_identity(version) -> dict:
+    """How the fresh path offers `version` to the benchmark: v0 under its catalog file name (so it is
+    recognized and given its catalog padding, as Hex runs it), any other version as its registry object
+    (an import: no padding)."""
+    from healing.registry import objects
+    from healing.train.manifest import catalog_filename, tail
+
+    catalog_id = (version.record.get("base") or {}).get("catalog_id")
+    name = catalog_filename(version.record, catalog_id) if version.name == "v0" else None
+    if name:
+        return {"file_name": name, "trailing_silence_samples": tail(catalog_id)}
+    return {"file_name": objects.path(version.gguf).name, "trailing_silence_samples": 0}
+
+
+def _check_prepared(document: dict, versions: list) -> None:
+    """A saved eval prepared each model as the fresh path would (`_benchmark_identity`)."""
+    for version in versions:
+        entry = next((m for m in document["models"] if m["gguf_sha256"] == version.gguf), None)
+        if entry is None:
+            raise GateError(f"the saved eval did not score {version.name}'s GGUF {str(version.gguf)[:12]}")
+        expected = _benchmark_identity(version)
+        if entry.get("file_name") != expected["file_name"]:
+            raise GateError(f"the saved eval benchmarked {version.name} under the file name "
+                            f"{entry.get('file_name')!r}, not {expected['file_name']!r}; score again without --eval")
+        if entry.get("trailing_silence_samples") != expected["trailing_silence_samples"]:
+            raise GateError(f"the saved eval gave {version.name} {entry.get('trailing_silence_samples')} samples of "
+                            f"padding, not {expected['trailing_silence_samples']}; score again without --eval")
+
+
 @contextlib.contextmanager
 def _model_files(versions: list):
     """Each version's GGUF from the registry's objects (pinned by hash). v0 is offered under its catalog
     file name, as `train prepare` does, so the benchmark recognizes it and pads it as Hex does."""
     from healing.registry import objects
     from healing.registry.objects import owner_dir
-    from healing.train.manifest import catalog_filename
 
     work = healing_home() / "tmp"
     owner_dir(work)
@@ -330,9 +358,9 @@ def _model_files(versions: list):
                 raise GateError(f"{version.name}'s GGUF {str(version.gguf)[:12]} is not kept: "
                                 f"run `healing models restore {version.name}`")
             path = objects.path(version.gguf)
-            catalog_id = (version.record.get("base") or {}).get("catalog_id")
-            if version.name == "v0" and catalog_filename(version.record, catalog_id):
-                link = Path(scratch) / catalog_filename(version.record, catalog_id)
+            name = _benchmark_identity(version)["file_name"]
+            if name != path.name:
+                link = Path(scratch) / name
                 link.symlink_to(path)
                 path = link
             paths.append(path)
@@ -443,12 +471,13 @@ def run(version: str, against: str = "current", *, eval_path: Path | None = None
 
         support = stream_support(Path(binary or history_hex()), candidate, target)
     parent = candidate.record.get("parent") or "current"
+    versions = [target, candidate] + ([v0] if v0.name not in (target.name, candidate.name) else [])
     if eval_path is not None:
         document = json.loads(Path(eval_path).read_text())
         source = str(eval_path)
         _check_saved(document)
+        _check_prepared(document, versions)
     else:
-        versions = [target, candidate] + ([v0] if v0.name not in (target.name, candidate.name) else [])
         with _model_files(versions) as paths:
             document = (evaluate or _evaluate)(paths, GATE_SETS, parent)
         source = str(eval_run.write(document)) if document.get("sets") else None

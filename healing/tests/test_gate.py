@@ -469,7 +469,6 @@ def test_gate_refuses_an_eval_it_cannot_judge(home, tmp_path):
 
 # ---- review findings ------------------------------------------------------------------------------
 
-
 def test_pinned_golden_missing_from_the_eval_refuses():
     """Once golden is pinned, an eval without it (made before the freeze, or with fewer sets) is refused."""
     with pytest.raises(gate.GateRefused, match="pinned"):
@@ -484,6 +483,50 @@ def test_no_long_clips_fails_streaming():
     verdict = judge(sets)
     assert verdict.failing == ["streaming"]
     assert "unmeasured" in check(verdict, "streaming")["note"]
+
+
+def test_saved_eval_scored_with_another_vocabulary_refuses(home, tmp_path):
+    settings = Path(tmp_path / "hex-support")
+    settings.mkdir(exist_ok=True)
+    (settings / "settings.json").write_text(json.dumps({"vocabulary": [{"term": "Qorvyx"}], "labs": {"vocabulary_biasing": True}}))
+    with pytest.raises(gate.GateError, match="vocabulary"):
+        gate.run("v1", eval_path=_saved(home, tmp_path), support=STREAMS, say=lambda line: None)
+    assert not registry.load().versions["v1"].gates
+
+
+def test_saved_eval_without_a_vocabulary_fingerprint_refuses(home, tmp_path):
+    saved = _saved(home, tmp_path, lambda doc: doc["vocabulary"].pop("sha256"))
+    with pytest.raises(gate.GateError, match="vocabulary"):
+        gate.run("v1", eval_path=saved, support=STREAMS, say=lambda line: None)
+
+
+def test_vocabulary_fingerprint_is_the_effective_vocabulary():
+    terms = [{"term": "Qorvyx", "sounds_like": []}]
+    prints = {eval_run.vocabulary_fingerprint([], None), eval_run.vocabulary_fingerprint(terms, None),
+              eval_run.vocabulary_fingerprint(terms, "strong")}
+    assert len(prints) == 3
+    assert eval_run.vocabulary_fingerprint(terms, None) == eval_run.vocabulary_fingerprint(list(terms), None)
+
+
+@pytest.mark.parametrize("change,message", [
+    (lambda doc: doc["models"][0].update(file_name="v0.gguf"), "file name"),
+    (lambda doc: [m.update(trailing_silence_samples=0) for m in doc["models"]], "padding"),
+    (lambda doc: [m.pop("file_name") for m in doc["models"]], "file name"),
+])
+def test_saved_eval_prepared_differently_refuses(home, tmp_path, change, message):
+    def spoil(doc):
+        doc["models"].sort(key=lambda m: m["file_name"] != "parakeet-unified-en-0.6b-Q8_0.gguf")  # v0 first
+        change(doc)
+    with pytest.raises(gate.GateError, match=message):
+        gate.run("v1", eval_path=_saved(home, tmp_path, spoil), support=STREAMS, say=lambda line: None)
+
+
+def test_model_identity_records_name_and_padding(tmp_path):
+    from healing.eval.bench import BenchRun
+
+    run_ = BenchRun({"trailing_silence_samples": 6_400}, [], {})
+    identity = eval_run.model_identity(tmp_path / "parakeet-unified-en-0.6b-Q8_0.gguf", [run_])
+    assert identity == {"file_name": "parakeet-unified-en-0.6b-Q8_0.gguf", "trailing_silence_samples": 6_400}
 
 
 def test_gate_records_the_models_it_judged(home):
@@ -508,26 +551,3 @@ def test_restore_between_eval_and_record_refuses(home):
     with pytest.raises(registry.RegistryError, match="v1"):
         gate.run("v1", evaluate=evaluate, support=STREAMS, say=lambda line: None)
     assert not registry.load().versions["v1"].gates
-
-
-def test_saved_eval_scored_with_another_vocabulary_refuses(home, tmp_path):
-    settings = Path(tmp_path / "hex-support")
-    settings.mkdir(exist_ok=True)
-    (settings / "settings.json").write_text(json.dumps({"vocabulary": [{"term": "Qorvyx"}], "labs": {"vocabulary_biasing": True}}))
-    with pytest.raises(gate.GateError, match="vocabulary"):
-        gate.run("v1", eval_path=_saved(home, tmp_path), support=STREAMS, say=lambda line: None)
-    assert not registry.load().versions["v1"].gates
-
-
-def test_saved_eval_without_a_vocabulary_fingerprint_refuses(home, tmp_path):
-    saved = _saved(home, tmp_path, lambda doc: doc["vocabulary"].pop("sha256"))
-    with pytest.raises(gate.GateError, match="vocabulary"):
-        gate.run("v1", eval_path=saved, support=STREAMS, say=lambda line: None)
-
-
-def test_vocabulary_fingerprint_is_the_effective_vocabulary():
-    terms = [{"term": "Qorvyx", "sounds_like": []}]
-    prints = {eval_run.vocabulary_fingerprint([], None), eval_run.vocabulary_fingerprint(terms, None),
-              eval_run.vocabulary_fingerprint(terms, "strong")}
-    assert len(prints) == 3
-    assert eval_run.vocabulary_fingerprint(terms, None) == eval_run.vocabulary_fingerprint(list(terms), None)
