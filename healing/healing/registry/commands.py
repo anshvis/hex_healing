@@ -24,6 +24,7 @@ from healing.registry.store import RegistryError
 ARCH_BY_CATALOG_ID = {"parakeet-unified-en-0.6b": "parakeet-unified", "parakeet-tdt-0.6b-v2": "tdt-v2"}
 ARCHES = ("parakeet-unified", "tdt-v2")
 SCORE_SETS = ("rolling", "golden", "general", "edited")
+SCORE_METRICS = ("word_errors", "ref_words", "reference_words", "format_error_rate", "term_error_rate", "edited_span")
 EXIT_UNVERIFIABLE = 4  # `current`: Hex's file could not be checked (1 is a mismatch, 3 Hex not running)
 
 
@@ -72,9 +73,11 @@ def catalog_file(model_id: str) -> Path:
 
 def _set_score(scores: dict, set_sha: str | None, source: str, vocabulary_terms: int | None) -> dict:
     """One set's score with what identifies it: the set's manifest hash and how many vocabulary terms the
-    model was biased with (0 is none; None is unknown). Only vocabulary-free scores count for parity."""
+    model was biased with (0 is none; None is unknown). Only vocabulary-free scores count for parity.
+    The metrics are `healing eval`'s own names (`eval/run.py`'s `score_set`); `wer` is None on the
+    edited set, which is scored at its edited span instead."""
     out = {"wer": scores.get("wer"), "source": source, "vocabulary_terms": vocabulary_terms}
-    for key in ("ref_words", "reference_words", "formatting_error", "term_error", "edited_span_error"):
+    for key in SCORE_METRICS:
         if scores.get(key) is not None:
             out[key] = scores[key]
     if set_sha:
@@ -98,7 +101,8 @@ def scores_from(document: dict, gguf_sha: str, source: str) -> dict:
         found = document["scores"].get(paths[0], {})
         vocabulary = document.get("vocabulary")
         terms = vocabulary.get("terms") if isinstance(vocabulary, dict) else None
-        return {name: _set_score(s, manifests.get(name), source, terms) for name, s in found.items() if s.get("wer") is not None}
+        return {name: _set_score(s, manifests.get(name), source, terms) for name, s in found.items()
+                if any(s.get(key) is not None for key in ("wer", *SCORE_METRICS))}
     return {name: _set_score(s, s.get("set_sha256"), source, s.get("vocabulary_terms")) for name, s in document.items()
             if name in SCORE_SETS and isinstance(s, dict)}
 

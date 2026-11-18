@@ -224,3 +224,27 @@ def test_cli_dry_run(home, store, capsys):
     speech(store, 120, clips=4)
     assert main(["train", "auto", "--dry-run"]) == 0
     assert "waiting: strong speech 120/200 min (4 new clips since v0's snapshot)" in capsys.readouterr().out
+
+
+def test_eval_records_every_metric_the_eval_produces(home, store, monkeypatch):
+    from healing.eval import run as eval_run
+
+    name = registry.register({"parent": "v0"})
+    gguf_sha = "cd" * 32
+    path = f"/objects/{gguf_sha}"
+    scored = {"wer": 0.1, "word_errors": 3, "ref_words": 30, "format_error_rate": 0.2, "term_error_rate": 0.25}
+    edited = {"wer": None, "word_errors": None, "ref_words": None, "format_error_rate": 0.3, "term_error_rate": 0.5,
+              "edited_span": {"errors": 1, "positions": 4}}
+    document = {"eval_id": "eval-x", "models": [{"gguf_path": path, "gguf_sha256": gguf_sha}],
+                "sets": [{"set": "rolling", "manifest_sha256": "1" * 64}, {"set": "edited", "manifest_sha256": "2" * 64}],
+                "vocabulary": {"mode": "current", "terms": 0, "boost": None},
+                "scores": {path: {"rolling": scored, "edited": edited}}}
+    monkeypatch.setattr(eval_run, "evaluate", lambda *a, **kw: document)
+    monkeypatch.setattr(eval_run, "write", lambda doc: home / "evals" / "eval-x.json")
+    auto._evaluate(name, gguf_sha, "v0")
+    scores = registry.load().get(name).scores
+    assert set(scores) == {"rolling", "edited"}
+    assert scores["rolling"]["wer"] == 0.1 and scores["rolling"]["ref_words"] == 30
+    assert scores["rolling"]["format_error_rate"] == 0.2 and scores["rolling"]["term_error_rate"] == 0.25
+    assert scores["edited"]["wer"] is None and scores["edited"]["edited_span"] == {"errors": 1, "positions": 4}
+    assert scores["edited"]["format_error_rate"] == 0.3 and scores["edited"]["term_error_rate"] == 0.5
