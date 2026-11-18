@@ -1,6 +1,7 @@
 import hashlib
 import io
 import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -232,3 +233,85 @@ def test_cli_fetch_prints_the_folder(hub, monkeypatch, capsys):
     assert "fetched 2 shard(s)" in out and str(librispeech.cache_folder()) in out
     assert cli.main(["sets", "fetch-librispeech"]) == 0
     assert capsys.readouterr().out.startswith("unchanged")
+
+
+def test_a_symlinked_partial_is_refused_and_its_referent_untouched(hub, tmp_path):
+    folder = librispeech.cache_folder()
+    folder.mkdir(parents=True)
+    victim = tmp_path / "victim.bin"
+    victim.write_bytes(b"precious" * 10)
+    (folder / "0000.parquet.partial").symlink_to(victim)
+    with pytest.raises(FetchError, match="symlink"):
+        fetch(opener=hub)
+    assert victim.read_bytes() == b"precious" * 10
+    assert not (folder / "0000.parquet").exists()
+    assert hub.requests == []
+
+
+def test_a_partial_swapped_for_a_symlink_mid_run_is_not_followed(hub, tmp_path, monkeypatch):
+    victim = tmp_path / "victim.bin"
+    victim.write_bytes(b"precious")
+    real = librispeech._partial_size
+
+    def swap(target, size):
+        have = real(target, size)
+        partial = librispeech._partial(target)
+        partial.unlink(missing_ok=True)
+        partial.symlink_to(victim)
+        return have
+
+    monkeypatch.setattr(librispeech, "_partial_size", swap)
+    with pytest.raises(FetchError):
+        fetch(opener=hub)
+    assert victim.read_bytes() == b"precious"
+    assert not (librispeech.cache_folder() / "0000.parquet").exists()
+
+
+def test_a_dest_that_resolves_through_the_cache_link_makes_no_cycle(hub, tmp_path):
+    real = tmp_path / "real"
+    fetch(real, opener=hub)
+    cache = librispeech.cache_folder()
+    alias = tmp_path / "alias"
+    alias.symlink_to(cache)  # alias -> cache -> real
+    result = fetch(alias, opener=hub)
+    assert not result.linked
+    assert cache.resolve(strict=True) == real.resolve()
+    assert len(list((cache).glob("*.parquet"))) == 2
+
+
+def test_a_dest_inside_the_cache_path_is_refused(hub):
+    cache = librispeech.cache_folder()
+    with pytest.raises(FetchError, match="inside"):
+        fetch(cache / "sub", opener=hub)
+    assert hub.requests == []
+    assert not cache.exists()
+
+
+def test_unpinned_parquet_files_are_refused_before_publishing(hub, tmp_path):
+    dest = tmp_path / "dest"
+    (dest / "extra").mkdir(parents=True)
+    (dest / "extra" / "9999.parquet").write_bytes(shard(["1-1-1"]))
+    (dest / "._0000.parquet").write_bytes(b"\x00\x05\x16\x07")  # exFAT AppleDouble: ignored
+    with pytest.raises(FetchError, match="9999.parquet"):
+        fetch(dest, opener=hub)
+    assert not librispeech.cache_folder().exists()
+    assert hub.requests == []
+
+
+def test_appledouble_files_do_not_block_a_fetch(hub, tmp_path):
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "._0000.parquet").write_bytes(b"\x00\x05\x16\x07")
+    assert fetch(dest, opener=hub).linked
+
+
+def test_a_tilde_dest_is_expanded_once_for_writing_and_linking(hub, tmp_path, monkeypatch):
+    home = tmp_path / "user"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    result = fetch(Path("~/libri"), opener=hub)
+    assert result.folder == (home / "libri").resolve()
+    assert (home / "libri" / "0000.parquet").is_file()
+    assert not (tmp_path / "~").exists()
+    assert librispeech.cache_folder().resolve() == (home / "libri").resolve()

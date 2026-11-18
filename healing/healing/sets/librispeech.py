@@ -87,13 +87,11 @@ def fetch(dest: Path | None = None, *, opener: Opener | None = None,
     """Downloads every pinned shard not already verified in the folder, then links the cache path."""
     opener = opener or _urlopen
     cache = cache_folder()
-    link = dest is not None and _absolute(dest) != _absolute(cache)
-    if link:
-        _check_link_target(cache)
-    folder = dest if link else cache
-    if folder.is_symlink() and not folder.exists():
-        raise FetchError(f"{folder} is a symlink to {os.readlink(folder)}, which does not exist")
+    folder, link = _plan(cache, dest)
     folder.mkdir(parents=True, exist_ok=True)
+    _refuse_strays(folder)
+    for path in SHARDS:
+        _refuse_symlink(_partial(folder / _name(path)))
 
     pending = [path for path in sorted(SHARDS) if not _verified(folder / _name(path), *SHARDS[path])]
     needed = sum(SHARDS[path][0] - _partial_size(folder / _name(path), SHARDS[path][0]) for path in pending)
@@ -105,7 +103,7 @@ def fetch(dest: Path | None = None, *, opener: Opener | None = None,
         _download(HF_URL.format(repo=LIBRISPEECH_REPO, revision=LIBRISPEECH_REVISION, path=path),
                   folder / _name(path), size, sha256, opener, progress)
 
-    linked = _link(cache, dest) if link else False
+    linked = _link(cache, folder) if link else False
     return FetchResult(folder, [_name(path) for path in pending], total_bytes(), linked)
 
 
@@ -117,26 +115,59 @@ def _name(path: str) -> str:
     return path.removeprefix(PREFIX)
 
 
-def _absolute(path: Path) -> Path:
-    return Path(os.path.abspath(path.expanduser()))
+def _plan(cache: Path, dest: Path | None) -> tuple[Path, bool]:
+    """The folder to write and whether the cache path must link to it. `dest` is normalized once
+    (`~` expanded, every symlink resolved), so a dest that reaches the cache through a link is the
+    cache's own target, never a new link that would make a cycle."""
+    if dest is None:
+        if cache.is_symlink() and not cache.exists():
+            raise FetchError(f"{cache} is a symlink to {os.readlink(cache)}, which does not exist")
+        return cache, False
+    folder = dest.expanduser().resolve()
+    if (cache.exists() or not cache.is_symlink()) and folder == cache.resolve():
+        return folder, False  # the cache folder itself, or the folder its link already reaches
+    if cache.exists() and not cache.is_symlink():  # a dangling link is re-pointed
+        raise FetchError(f"{cache} already exists and is not a symlink; move it away (or fetch without --dest)")
+    cache_path = cache.parent.resolve() / cache.name
+    if folder == cache_path or cache_path in folder.parents:
+        raise FetchError(f"--dest {folder} is inside the cache path {cache_path}, which becomes a link to it")
+    return folder, True
 
 
-def _check_link_target(cache: Path) -> None:
+def _refuse_strays(folder: Path) -> None:
+    """Replay reads every `*.parquet` under the folder, so it may hold only the pinned shards (and the
+    `._*` AppleDouble files macOS writes on exFAT, which replay skips)."""
+    pinned = {_name(path) for path in SHARDS}
+    strays = sorted(str(p.relative_to(folder)) for p in folder.glob("**/*.parquet")
+                    if not p.name.startswith("._") and str(p.relative_to(folder)) not in pinned)
+    if strays:
+        raise FetchError(f"{folder} holds parquet files that are not pinned shards ({', '.join(strays[:3])}); "
+                         "replay would read them unverified, so move them away")
+
+
+def _refuse_symlink(path: Path) -> None:
+    if path.is_symlink():
+        raise FetchError(f"{path} is a symlink; remove it (downloads never follow links)")
+
+
+def _link(cache: Path, folder: Path) -> bool:
+    """Points `cache` at `folder` (already resolved); False when it already did."""
+    if cache.is_symlink() and cache.exists() and cache.resolve() == folder:
+        return False
     if cache.exists() and not cache.is_symlink():
         raise FetchError(f"{cache} already exists and is not a symlink; move it away (or fetch without --dest)")
-
-
-def _link(cache: Path, dest: Path) -> bool:
-    """Points `cache` at `dest`; False when it already did."""
-    target = _absolute(dest)
-    if cache.is_symlink() and _absolute(cache.parent / os.readlink(cache)) == target:
-        return False
-    _check_link_target(cache)
     cache.parent.mkdir(parents=True, exist_ok=True)
     scratch = cache.with_name(cache.name + ".link")
     scratch.unlink(missing_ok=True)
-    scratch.symlink_to(target, target_is_directory=True)
+    scratch.symlink_to(folder, target_is_directory=True)
+    try:
+        if scratch.resolve(strict=True) != folder:
+            raise FetchError(f"{cache} would not resolve to {folder}; refusing to link")
+    except (OSError, RuntimeError) as error:
+        scratch.unlink(missing_ok=True)
+        raise FetchError(f"{cache} -> {folder} does not resolve: {error}") from error
     os.replace(scratch, cache)
+    fsync_dir(cache.parent)
     return True
 
 
@@ -154,7 +185,8 @@ def _verified(target: Path, size: int, sha256: str) -> bool:
 
 def _partial_size(target: Path, size: int) -> int:
     partial = _partial(target)
-    have = partial.stat().st_size if partial.exists() else 0
+    _refuse_symlink(partial)
+    have = partial.lstat().st_size if partial.exists() else 0
     return have if have <= size else 0
 
 
@@ -179,7 +211,8 @@ def _download(url: str, target: Path, size: int, sha256: str, opener: Opener,
                     have = 0  # the server ignored the range: start over
                 else:
                     raise FetchError(f"{url}: HTTP {status}")
-                with open(partial, "r+b" if have else "wb") as file:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (0 if have else os.O_TRUNC)
+                with os.fdopen(os.open(partial, flags, 0o600), "wb") as file:
                     file.seek(have)
                     file.truncate()
                     while chunk := response.read(CHUNK):
@@ -194,7 +227,8 @@ def _download(url: str, target: Path, size: int, sha256: str, opener: Opener,
         except (OSError, http.client.HTTPException) as error:
             raise FetchError(f"could not download {url}: {error!r} ({_kept(partial):,} of {size:,} bytes "
                              "kept; run again to resume)") from error
-    actual_size = partial.stat().st_size
+    _refuse_symlink(partial)
+    actual_size = partial.lstat().st_size
     if actual_size < size:
         raise FetchError(f"{url}: the connection ended after {actual_size:,} of {size:,} bytes "
                          "(kept; run again to resume)")
