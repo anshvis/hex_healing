@@ -1405,7 +1405,7 @@ mod tests {
     fn streams_false_with_lab_off() {
         let models = temporary_models_dir();
         let source = models.join("unified-finetune-Q8_0.gguf");
-        fs::write(&source, unified("Unified fine-tune")).unwrap();
+        fs::write(&source, unified("Unified fine-tune, lab off")).unwrap();
         let id = import(&source, None, &AtomicBool::new(false)).unwrap();
         // Off, the smoke stream never runs, so the model never streams.
         assert_eq!(
@@ -1444,7 +1444,7 @@ mod tests {
     fn an_unprobed_reload_forgets_the_last_smoke_stream() {
         let models = temporary_models_dir();
         let source = models.join("unified-finetune-Q8_0.gguf");
-        fs::write(&source, unified("Unified fine-tune")).unwrap();
+        fs::write(&source, unified("Unified fine-tune, reloaded")).unwrap();
         let id = import(&source, None, &AtomicBool::new(false)).unwrap();
         assert_eq!(
             smoke_stream_where(&selection(id), true, || Some(())),
@@ -1484,7 +1484,7 @@ mod tests {
     fn smoke_failure_falls_back() {
         let models = temporary_models_dir();
         let source = models.join("unified-finetune-Q8_0.gguf");
-        fs::write(&source, unified("Unified fine-tune")).unwrap();
+        fs::write(&source, unified("Unified fine-tune, failed smoke")).unwrap();
         let id = import(&source, None, &AtomicBool::new(false)).unwrap();
         // A GPU that can't stream it (or a CPU): whole clips, never broken.
         assert_eq!(
