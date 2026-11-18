@@ -445,3 +445,12 @@ def test_gate_refuses_an_eval_it_cannot_judge(home, tmp_path):
         with pytest.raises(gate.GateError, match=message):
             gate.run("v1", eval_path=saved, support=STREAMS, say=lambda line: None)
     assert not registry.load().versions["v1"].gates
+
+
+# ---- review findings ------------------------------------------------------------------------------
+
+
+def test_pinned_golden_missing_from_the_eval_refuses():
+    """Once golden is pinned, an eval without it (made before the freeze, or with fewer sets) is refused."""
+    with pytest.raises(gate.GateRefused, match="pinned"):
+        judge(world(), golden_pin={"sha256": GOLDEN_PIN, "n": 200})

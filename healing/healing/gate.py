@@ -245,6 +245,9 @@ def _streaming(document: dict, candidate: str, against: str, support: StreamSupp
 def _golden(document: dict, candidate: str, against: str, margins: Margins, golden_pin: dict | None) -> Check:
     scored = next((s for s in document["sets"] if s["set"] == "golden"), None)
     if scored is None:
+        if golden_pin is not None:
+            raise GateRefused(f"golden is frozen and pinned at {golden_pin['sha256'][:12]}, but the eval did not score "
+                              "it; score it again with golden (G-10)")
         return Check("golden_wer", "skipped", threshold=margins.golden_wer_ci_high,
                      note=document.get("unavailable_sets", {}).get("golden", "golden is not frozen yet"))
     if golden_pin is None:
