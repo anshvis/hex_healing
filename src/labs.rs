@@ -139,6 +139,7 @@ impl Feature {
             | Self::PickerActiveFirst
             | Self::ModelInPlace
             | Self::KQuantModels
+            | Self::StreamImportedModels
             | Self::PickerDownloaded
             | Self::SectionKeyAlone
             | Self::KeepRecordings
@@ -264,6 +265,7 @@ impl Feature {
             | Self::CursorContext
             | Self::CleanUpWithAppleIntelligence => 20261113,
             Self::LearnFromCorrections => 20261114,
+            Self::StreamImportedModels => 20261118,
         }
     }
 
@@ -404,96 +406,8 @@ impl Feature {
             | Self::CopyCaptureZip
             | Self::SpeakersOnly
             | Self::ShellCompletions
+            | Self::StreamImportedModels
             | Self::YoloMode => true,
-        }
-    }
-
-    /// The name `hex labs on|off` takes.
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Meetings => "meetings",
-            Self::VoiceFilter => "voice-filter",
-            Self::Playground => "playground",
-            Self::LiveText => "live-text",
-            Self::FailureNotices => "failure-notices",
-            Self::LiveTyping => "live-typing",
-            Self::LiveChapters => "live-chapters",
-            Self::VocabularyBiasing => "vocabulary-biasing",
-            Self::ScreenVocabulary => "screen-vocabulary",
-            Self::TerminalPaste => "terminal-paste",
-            Self::KeyboardModelSwitching => "keyboard-model-switching",
-            Self::AppModelSwitching => "app-model-switching",
-            Self::MouseShortcuts => "mouse-shortcuts",
-            Self::PauseBrowser => "pause-browser",
-            Self::ShareShortcut => "share-shortcut",
-            Self::UnloadIdle => "unload-idle",
-            Self::KeepMicrophoneOpen => "keep-microphone-open",
-            Self::KeepOnClipboard => "keep-on-clipboard",
-            Self::CopyOnly => "copy-only",
-            Self::ReturnToApp => "return-to-app",
-            Self::SpokenFormatting => "spoken-formatting",
-            Self::FillerWords => "filler-words",
-            Self::CleanUpWithAppleIntelligence => "clean-up-apple-intelligence",
-            Self::SubtitleExport => "subtitle-export",
-            Self::SecondDictationShortcut => "second-dictation-shortcut",
-            Self::TerminalPasteShortcut => "terminal-paste-shortcut",
-            Self::SmartSpacing => "smart-spacing",
-            Self::SpokenSymbols => "spoken-symbols",
-            Self::PickerSortFilter => "picker-sort-filter",
-            Self::SidedChords => "sided-modifier-chords",
-            Self::TapOrHold => "tap-or-hold",
-            Self::DoubleTapModifiers => "double-tap-modifiers",
-            Self::BenchmarkDetails => "benchmark-details",
-            Self::ParakeetUltra => "parakeet-ultra",
-            Self::StandaloneSpecialKeys => "special-keys",
-            Self::HistoryStats => "history-stats",
-            Self::HistoryMultiSelect => "history-multi-select",
-            Self::RecentDictations => "recent-dictations",
-            Self::SkipPauses => "skip-pauses",
-            Self::StopWhenCallEnds => "stop-when-call-ends",
-            Self::OutputFixes => "output-fixes",
-            Self::PickerActiveFirst => "picker-active-first",
-            Self::ModelInPlace => "model-in-place",
-            Self::KQuantModels => "k-quant-models",
-            Self::PickerDownloaded => "picker-downloaded",
-            Self::SectionKeyAlone => "section-key",
-            Self::KeepRecordings => "keep-recordings",
-            Self::SettingsSearch => "settings-search",
-            Self::Appearance => "appearance",
-            Self::ReleaseNotesLink => "release-notes-link",
-            Self::HideMenuBarIcon => "hide-menu-bar-icon",
-            Self::MovableMeetingCapsules => "movable-meeting-capsules",
-            Self::GnomeClipboardRestore => "gnome-clipboard-restore",
-            Self::TypedText => "typed-text",
-            Self::MeetingNotesVocabulary => "meeting-notes-vocabulary",
-            Self::NotchIndicator => "notch-indicator",
-            Self::MeetingFinishedEvent => "meeting-finished-event",
-            Self::GnomeMeetingCapsules => "gnome-meeting-capsules",
-            Self::GnomeAnnotate => "gnome-annotate",
-            Self::Screenshots => "screenshots",
-            Self::FollowLiveTranscript => "follow-live-transcript",
-            Self::MoreCallApps => "more-call-apps",
-            Self::AnnotateReplay => "annotate-replay",
-            Self::MeetingImport => "meeting-import",
-            Self::MeetingDescriptiveFilenames => "meeting-descriptive-filenames",
-            Self::MeetingNotesFile => "meeting-notes-file",
-            Self::QuitClosesWindow => "quit-closes-window",
-            Self::ExpireMeetingAudio => "expire-meeting-audio",
-            Self::CapsLockDictation => "caps-lock-dictation",
-            Self::OpenCodeInWsl => "opencode-in-wsl",
-            Self::ApiProcessing => "api-processing",
-            Self::ApiTimestamps => "api-timestamps",
-            Self::ApiBrowserAccess => "api-browser-access",
-            Self::SpeakersOnly => "speakers-only",
-            Self::PauseMenu => "pause-menu",
-            Self::PrintStart => "print-start",
-            Self::VoicePrompt => "voice-prompt",
-            Self::CopyCaptureZip => "copy-capture-zip",
-            Self::ShellCompletions => "shell-completions",
-            Self::YoloMode => "yolo-mode",
-            Self::CursorContext => "cursor-context",
-            Self::LearnFromCorrections => "learn-from-corrections",
-            Self::MoreDictationShortcuts => "more-dictation-shortcuts",
         }
     }
 
@@ -544,6 +458,7 @@ impl Feature {
             Self::PickerActiveFirst => "labs.picker_active_first",
             Self::ModelInPlace => "labs.model_in_place",
             Self::KQuantModels => "labs.k_quant_models",
+            Self::StreamImportedModels => "labs.stream_imported_models",
             Self::PickerDownloaded => "labs.picker_downloaded",
             Self::SectionKeyAlone => "labs.section_key_alone",
             Self::KeepRecordings => "labs.keep_recordings",
@@ -637,6 +552,7 @@ impl Feature {
             Self::PickerActiveFirst => settings.labs.picker_active_first,
             Self::ModelInPlace => settings.labs.model_in_place,
             Self::KQuantModels => settings.labs.k_quant_models,
+            Self::StreamImportedModels => settings.labs.stream_imported_models,
             Self::PickerDownloaded => settings.labs.picker_downloaded,
             Self::SectionKeyAlone => settings.labs.section_key_alone,
             Self::KeepRecordings => settings.labs.keep_recordings,
@@ -727,6 +643,7 @@ impl Feature {
             &mut labs.picker_active_first,
             &mut labs.model_in_place,
             &mut labs.k_quant_models,
+            &mut labs.stream_imported_models,
             &mut labs.picker_downloaded,
             &mut labs.section_key_alone,
             &mut labs.keep_recordings,
@@ -827,6 +744,7 @@ impl Feature {
             Self::PickerActiveFirst => settings.labs.picker_active_first = on,
             Self::ModelInPlace => settings.labs.model_in_place = on,
             Self::KQuantModels => settings.labs.k_quant_models = on,
+            Self::StreamImportedModels => settings.labs.stream_imported_models = on,
             Self::PickerDownloaded => settings.labs.picker_downloaded = on,
             Self::KeepRecordings => settings.labs.keep_recordings = on,
             Self::SettingsSearch => settings.labs.settings_search = on,
@@ -1021,6 +939,11 @@ static API_BROWSER_ACCESS: AtomicBool = AtomicBool::new(false);
 /// written by [`state`] and [`apply`].
 static K_QUANT_MODELS: AtomicBool = AtomicBool::new(false);
 
+/// Labs › Stream imported models' switch, set beside [`STATE`] like
+/// [`K_QUANT_MODELS`]: the state word is full, so this lab has its own
+/// atomic, written by [`state`] and [`apply`].
+static STREAM_IMPORTED_MODELS: AtomicBool = AtomicBool::new(false);
+
 /// Labs › YOLO mode's minimum hold in seconds, 0 while the lab is
 /// off, set beside [`STATE`] like [`PRINT_START`]: the state word is full, so
 /// this lab has its own atomic, written by [`state`] and [`apply`].
@@ -1070,6 +993,8 @@ fn state() -> u64 {
                 VOICE_PROMPT.store(voice_prompt_enabled(&saved), Ordering::Release);
                 COPY_CAPTURE_ZIP.store(copy_capture_zip_enabled(&saved), Ordering::Release);
                 K_QUANT_MODELS.store(k_quant_models_enabled(&saved), Ordering::Release);
+                STREAM_IMPORTED_MODELS
+                    .store(stream_imported_models_enabled(&saved), Ordering::Release);
                 store_yolo_mode(&saved);
                 CLEAN_UP.store(clean_up_enabled(&saved), Ordering::Release);
                 store_api_browser_access(&saved);
@@ -1142,6 +1067,14 @@ fn k_quant_models_enabled(settings: &LabsSettings) -> bool {
     settings.k_quant_models
         && Feature::KQuantModels.shipped()
         && Feature::KQuantModels.managed().is_none()
+}
+
+/// Whether `settings` turn on Labs › Stream imported models in this build,
+/// before its managed lock; the state word has no bit for it.
+fn stream_imported_models_enabled(settings: &LabsSettings) -> bool {
+    settings.stream_imported_models
+        && Feature::StreamImportedModels.shipped()
+        && Feature::StreamImportedModels.managed().is_none()
 }
 
 /// Whether `settings` turn on Labs › YOLO mode in this build,
@@ -1241,6 +1174,7 @@ pub(crate) fn apply(settings: &LabsSettings) {
     VOICE_PROMPT.store(voice_prompt_enabled(settings), Ordering::Release);
     COPY_CAPTURE_ZIP.store(copy_capture_zip_enabled(settings), Ordering::Release);
     K_QUANT_MODELS.store(k_quant_models_enabled(settings), Ordering::Release);
+    STREAM_IMPORTED_MODELS.store(stream_imported_models_enabled(settings), Ordering::Release);
     store_yolo_mode(settings);
     CLEAN_UP.store(clean_up_enabled(settings), Ordering::Release);
     store_api_browser_access(settings);
@@ -2439,6 +2373,38 @@ mod tests {
         assert_eq!(Feature::KQuantModels.group(), Group::Models);
         assert_eq!(Feature::KQuantModels.settings_key(), "labs.k_quant_models");
         assert_eq!(Feature::KQuantModels.name(), "k-quant-models");
+    }
+
+    #[test]
+    fn stream_imported_models_off_by_default() {
+        let mut labs = LabsSettings::default();
+        assert!(!labs.stream_imported_models);
+        assert!(!stream_imported_models_enabled(&labs));
+        assert!(!Feature::StreamImportedModels.on(&AppSettings::default()));
+        labs.stream_imported_models = true;
+        labs.unload_idle_minutes = 24 * 60;
+        assert!(stream_imported_models_enabled(&labs));
+        // The state word has no bit for it: the other switches keep theirs.
+        let state = encode_where(&labs, |_| true);
+        assert_eq!(state & PARAKEET_ULTRA, 0);
+        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
+        // Streams run on Metal and Vulkan, so every OS has it.
+        assert!(Feature::StreamImportedModels.on_this_os());
+        assert_eq!(Feature::StreamImportedModels.added(), 20261118);
+        assert_eq!(Feature::StreamImportedModels.audience(), Audience::Everyone);
+        assert_eq!(Feature::StreamImportedModels.group(), Group::Models);
+        assert_eq!(
+            Feature::StreamImportedModels.settings_key(),
+            "labs.stream_imported_models"
+        );
+        assert_eq!(
+            Feature::StreamImportedModels.name(),
+            "stream-imported-models"
+        );
+        assert_eq!(
+            Feature::for_settings_key("labs.stream_imported_models"),
+            Some(Feature::StreamImportedModels)
+        );
     }
 
     #[test]

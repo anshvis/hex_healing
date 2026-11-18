@@ -980,6 +980,12 @@ fn rows(ui: &Ui) -> Vec<Row> {
         ));
     }
     rows.push(row(
+        Feature::StreamImportedModels,
+        None,
+        tr("Stream imported models"),
+        tr("Your own speech models made from a streaming model write while you talk, once a test stream passes on the GPU"),
+    ));
+    rows.push(row(
         Feature::PickerDownloaded,
         None,
         tr("Downloaded models only"),
@@ -1214,6 +1220,7 @@ fn row_key(lab: Lab) -> &'static str {
         Feature::PickerActiveFirst => "lab-picker-active-first",
         Feature::ModelInPlace => "lab-model-in-place",
         Feature::KQuantModels => "lab-k-quant-models",
+        Feature::StreamImportedModels => "lab-stream-imported-models",
         Feature::PickerDownloaded => "lab-picker-downloaded",
         Feature::SectionKeyAlone => "lab-section-key",
         Feature::KeepRecordings => "lab-keep-recordings",

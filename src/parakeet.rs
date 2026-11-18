@@ -1002,7 +1002,11 @@ impl Parakeet {
             crate::transcription::models::ModelRuntime::Gguf(artifact) => artifact.architecture,
             crate::transcription::models::ModelRuntime::AppleSpeech => "",
         };
-        parakeet.stream = parakeet.session.probe_stream(&stream_run, architecture);
+        // An import's probe is its smoke stream, run only while Labs ›
+        // Stream imported models lets it stream.
+        parakeet.stream = crate::transcription::custom_models::smoke_stream(selection, || {
+            parakeet.session.probe_stream(&stream_run, architecture)
+        });
         Ok(parakeet)
     }
 

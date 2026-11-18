@@ -456,6 +456,16 @@ pub fn k_quant_models() -> bool {
     K_QUANT_MODELS.load(Ordering::Acquire) && Feature::KQuantModels.on_this_os()
 }
 
+/// Labs › Stream imported models: an import whose header names a streaming
+/// catalog model's architecture and variant may stream once its smoke stream
+/// passes (read where a model loads and where a live stream opens).
+pub fn stream_imported_models() -> bool {
+    // The state word is full, so the switch has its own atomic, loaded here
+    // first in a process that never applied its settings.
+    let _ = state();
+    STREAM_IMPORTED_MODELS.load(Ordering::Acquire) && Feature::StreamImportedModels.on_this_os()
+}
+
 /// Labs › YOLO mode: how long a shortcut dictation must be held
 /// for Return to follow its paste, or `None` while the lab is off (read as
 /// each dictation's output is committed).

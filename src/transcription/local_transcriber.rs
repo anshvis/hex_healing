@@ -409,9 +409,13 @@ impl LocalTranscriber {
             prewarm_ms = started.elapsed().as_millis(),
             "prewarmed local transcription model"
         );
-        transcriber.stream = transcriber
-            .session
-            .probe_stream(&transcriber.options, &architecture);
+        // An import's probe is its smoke stream, run only while Labs ›
+        // Stream imported models lets it stream.
+        transcriber.stream = super::custom_models::smoke_stream(selection, || {
+            transcriber
+                .session
+                .probe_stream(&transcriber.options, &architecture)
+        });
         // Warm now, so this times the device rather than its first run's
         // shader compiles.
         let started = Instant::now();
@@ -596,6 +600,7 @@ impl LocalTranscriber {
                     error = format!("{error:#}"),
                     "could not time the model on the CPU; keeping the GPU"
                 );
+                super::custom_models::kept_stream(&self.selection, self.stream.is_some());
                 return self;
             }
         };
@@ -605,6 +610,8 @@ impl LocalTranscriber {
             "timed a warm 1.5 s run on the integrated GPU and the CPU"
         );
         if cpu.warm_ms >= self.warm_ms {
+            // The CPU's load smoke-tested last; the GPU's stream is the one kept.
+            super::custom_models::kept_stream(&self.selection, self.stream.is_some());
             return self;
         }
         if let Some(gpu) = &self.gpu {

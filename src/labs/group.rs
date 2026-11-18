@@ -132,6 +132,7 @@ impl Feature {
             | Self::PickerActiveFirst
             | Self::ModelInPlace
             | Self::KQuantModels
+            | Self::StreamImportedModels
             | Self::PickerDownloaded
             | Self::ParakeetUltra => Group::Models,
         }

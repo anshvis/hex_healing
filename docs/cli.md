@@ -230,7 +230,10 @@ comes from (`download`, `hex`, `imported`, or `found: owner/name@abcdef1`); a
 compatible file there that isn't a catalog model is listed as `custom-<first 16
 hex of its blob>` `(not tested by Hex)`, and `model use` with that id checks it
 in full and uses it where it is. `remove` on a found file only forgets it
-([own models](features/own-models.md)).
+([own models](features/own-models.md)). `streams` says whether the model
+streams now: an import does only with Labs › Stream imported models on, made
+from a streaming catalog model, and once its smoke stream passed when it
+loaded, so ask the running Hex after `model use`.
 
 `model use` switches only to a downloaded model and checks it on disk; it never
 downloads or repairs one (`model install` does). It keeps that model's own

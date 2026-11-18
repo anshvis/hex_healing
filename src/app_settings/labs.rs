@@ -153,6 +153,9 @@ pub struct LabsSettings {
     /// An import may use Q6_K, Q5_K, or Q4_K weights, which Metal runs and
     /// Hex hasn't verified (macOS).
     pub k_quant_models: bool,
+    /// An import made from a streaming catalog model (the same architecture
+    /// and variant) streams once its smoke stream passes (T7.4).
+    pub stream_imported_models: bool,
     /// The picker's All speech models view offers "Only downloaded models" (issue 1018).
     pub picker_downloaded: bool,
     /// The ISO section key, left of 1, may be a shortcut on its own (Linux
@@ -399,6 +402,7 @@ impl Default for LabsSettings {
             picker_active_first: false,
             model_in_place: false,
             k_quant_models: false,
+            stream_imported_models: false,
             picker_downloaded: false,
             section_key_alone: false,
             keep_recordings: false,
