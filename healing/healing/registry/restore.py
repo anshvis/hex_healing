@@ -2,7 +2,7 @@
 
 The version records its converter as `{repo, rev, command}`: `command` is the export invocation (the
 T6.3 export), an argv whose `{base}`, `{delta}`, `{config}`, `{output}` and `{checkout}` are filled in
-here. It runs in a local checkout of `repo` (`--converter-dir`, `$HEALING_CONVERTER_DIR`, or the
+here, and `{python}` with this healing's own interpreter (the export runs `healing export-gguf`). It runs in a local checkout of `repo` (`--converter-dir`, `$HEALING_CONVERTER_DIR`, or the
 checkout recorded at `register`) that must be at exactly `rev` with no local changes, so the rebuild uses
 the recorded converter and not whatever is checked out today.
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -75,6 +76,7 @@ def run_recorded(converter: dict, inputs: Inputs) -> None:
         raise RestoreError("the version records no export command")
     check_checkout(converter, inputs.checkout)
     values = {name: str(getattr(inputs, name)) for name in PLACEHOLDERS}
+    values["python"] = sys.executable
     argv = []
     for part in command:
         for name, value in values.items():
