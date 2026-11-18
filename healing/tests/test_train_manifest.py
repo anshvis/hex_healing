@@ -392,6 +392,9 @@ def test_replay_labels_hear_the_catalog_tail(home, base, fake_hex):
     assert call["catalog"] is True
     assert tm.catalog_filename({"source_path": "/x/models/parakeet-unified-en-0.6b-Q8_0.gguf"}, UNIFIED) == "parakeet-unified-en-0.6b-Q8_0.gguf"
     assert tm.catalog_filename({}, UNIFIED) == "parakeet-unified-en-0.6b-Q8_0.gguf"
+    # register-base --gguf /models/base.gguf --model-id <unified>: the catalog name, not base.gguf
+    assert tm.catalog_filename({"source_path": "/models/base.gguf"}, UNIFIED) == "parakeet-unified-en-0.6b-Q8_0.gguf"
+    assert tm.catalog_filename({"source_path": "/models/base.gguf"}, None) == "base.gguf"
 
 
 def test_a_piece_matching_a_test_reference_never_trains(store, base):

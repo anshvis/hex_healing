@@ -74,12 +74,13 @@ class Base:
 
 
 def catalog_filename(record: dict, catalog_id: str | None) -> str | None:
-    """The name Hex keeps v0's file under (`register-base` recorded where it came from), else the
-    catalog's `<id>-Q8_0.gguf`."""
+    """The catalog file name the benchmark recognizes v0 by (it matches catalog artifacts by name and
+    size): `<id>-Q8_0.gguf` from the catalog id, never the basename of a file passed to `register-base
+    --gguf`, which can be anything. Only with no catalog id is the recorded source name used."""
+    if catalog_id:
+        return f"{catalog_id}-Q8_0.gguf"
     source = record.get("source_path")
-    if source:
-        return Path(source).name
-    return f"{catalog_id}-Q8_0.gguf" if catalog_id else None
+    return Path(source).name if source else None
 
 
 def resolve_base() -> Base:
