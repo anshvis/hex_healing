@@ -3,7 +3,8 @@
 Each model runs through `hex benchmark-transcription` on the same machine in the same invocation,
 interleaved per set (A, B, A, B) so thermal drift is shared. Scores are never compared with a
 stored number. The eval JSON keeps per-clip records for the paired bootstrap and McNemar tests
-(T0.1's `healing stats`, M7's gate).
+(T0.1's `healing stats`, M7's gate), each with its first run's
+whole-clip `inference_ms` and `audio_ms`.
 
 Scores per set:
 - `wer`: the benchmark's own (case and punctuation stripped); n/a on the edited set, whose references
@@ -189,6 +190,8 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict]]:
             "word_errors": record["word_errors"] if policy.whole_reference else None,
             "reference_words": record["reference_words"] if policy.whole_reference else None,
             "format_errors": errors, "format_words": words,
+            # the first run's whole-clip inference time and the clip's length (the gate's latency check)
+            "inference_ms": record.get("inference_ms"), "audio_ms": record.get("audio_ms"),
         }
         positions = sidecar.get(record["id"], {}).get("edited_positions")
         if policy.edited_words and positions:
