@@ -241,11 +241,13 @@ def _remote(settings: Settings, prepared, say) -> int:
     return 0
 
 
-def _round(steps: Steps, settings: Settings, say) -> int:
+def _round(steps: Steps, settings: Settings, parent: str, say) -> int:
+    """One round from `parent`, the current version's name resolved once at the start: the sets eval
+    reads are found by their stored parent (`--parent v0`), which never says `current`."""
     from healing.train.run import DELTA, EFFECTIVE
 
     step = "prepare"
-    prepared = steps.prepare("current")
+    prepared = steps.prepare(parent)
     say(f"prepared {prepared.train_split}: {prepared.path}")
     if settings.runner != "local":
         return _remote(settings, prepared, say)
@@ -257,11 +259,11 @@ def _round(steps: Steps, settings: Settings, say) -> int:
             say(f"round failed at train (exit {code}); nothing registered, the next run tries again")
             return code
         step = "export"
-        result = steps.export(round_.out / DELTA, round_.out / EFFECTIVE, prepared.train_split, "current")
+        result = steps.export(round_.out / DELTA, round_.out / EFFECTIVE, prepared.train_split, parent)
         version = result["version"]
         say(f"{version}: candidate registered (gguf {result['gguf_sha256'][:12]})")
         step = "eval"
-        say(f"{version}: {steps.evaluate(version, result['gguf_sha256'], 'current')}")
+        say(f"{version}: {steps.evaluate(version, result['gguf_sha256'], parent)}")
     except Exception as error:
         say(f"round failed at {step}: {error}")
         if step == "eval":
@@ -299,7 +301,7 @@ def run(steps: Steps | None = None, *, dry_run: bool = False, now: int | None = 
             return 0
         say(f"starting round {found.next_version}: {found.amount()}")
         try:
-            return _round(steps, settings, say)
+            return _round(steps, settings, found.parent, say)
         except Exception as error:  # prepare, or a round folder that could not be opened
             say(f"round failed before training: {error}")
             return 1

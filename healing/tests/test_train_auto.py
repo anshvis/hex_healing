@@ -72,10 +72,11 @@ class Fake:
     """The heavy steps. `prepare` writes a real train row, as `healing train prepare` does."""
 
     def __init__(self, rounds, fail=None):
-        self.rounds, self.fail, self.calls = rounds, fail, []
+        self.rounds, self.fail, self.calls, self.parents = rounds, fail, [], {}
 
     def prepare(self, parent):
         self.calls.append("prepare")
+        self.parents["prepare"] = parent
         s = Store()
         try:
             split_id, _ = splits.record_train(s, parent=parent, now=NOW)
@@ -98,12 +99,14 @@ class Fake:
 
     def export(self, delta, config, snapshot, parent):
         self.calls.append("export")
+        self.parents["export"] = parent
         if self.fail == "export":
             raise auto.ExportError("convert failed (exit 1): boom")
         return {"version": "v9", "gguf_sha256": "ab" * 32}
 
     def evaluate(self, version, gguf_sha, parent):
         self.calls.append("eval")
+        self.parents["eval"] = parent
         return "scored rolling, general"
 
 
@@ -248,3 +251,16 @@ def test_eval_records_every_metric_the_eval_produces(home, store, monkeypatch):
     assert scores["rolling"]["format_error_rate"] == 0.2 and scores["rolling"]["term_error_rate"] == 0.25
     assert scores["edited"]["wer"] is None and scores["edited"]["edited_span"] == {"errors": 1, "positions": 4}
     assert scores["edited"]["format_error_rate"] == 0.3 and scores["edited"]["term_error_rate"] == 0.5
+
+
+def test_round_passes_the_resolved_parent_not_the_alias(home, store):
+    # eval's rolling and edited holdouts are looked up by their stored parent_version (`--parent v1`),
+    # which never reads "current"
+    speech(store, 20, clips=4)
+    parent = promote_with_snapshot(store)
+    speech(store, 250, clips=5)
+    code, out, fake = run(home)
+    assert code == 0, out
+    assert fake.parents == {"prepare": parent, "export": parent, "eval": parent}
+    rows = store.db.execute("SELECT parent_version FROM splits WHERE kind = 'train' ORDER BY created_at_ms").fetchall()
+    assert rows[-1][0] == parent
