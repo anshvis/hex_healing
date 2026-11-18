@@ -217,9 +217,33 @@ def _run(command: list[str], keep_awake: bool) -> int:
                 awake.wait()
 
 
-def train_local(bundle: Path, config_path: Path | None = None, smoke: bool = False, python: Path | None = None,
-                base: Path | None = None, rounds: Path | None = None, keep_awake: bool = True,
-                say=print) -> int:
+@dataclass
+class Round:
+    """One round's folder and the checked inputs it trains on (`open_round`)."""
+
+    folder: Path
+    key: str
+    config: dict
+    effective: str
+    config_path: Path
+    smoke: bool
+    paths: Paths
+    bundle: Path
+    bundle_sha: str
+    base_sha: str
+
+    @property
+    def work(self) -> Path:
+        return self.folder / "work"
+
+    @property
+    def out(self) -> Path:
+        return self.folder / "out"
+
+
+def open_round(bundle: Path, config_path: Path | None = None, smoke: bool = False, python: Path | None = None,
+               base: Path | None = None, rounds: Path | None = None) -> Round:
+    """Check the inputs and make the round's folder (the same one for the same inputs)."""
     config_path = Path(config_path or config_module.DEFAULT)
     config, effective = config_module.load(config_path, smoke=smoke)
     paths = default_paths(config, python, base, rounds)
@@ -235,12 +259,21 @@ def train_local(bundle: Path, config_path: Path | None = None, smoke: bool = Fal
         raise TrainError(f"{paths.base} is {base_sha[:12]}, the config pins {config['base']['sha256'][:12]}")
     key = hashlib.sha256(f"{config_module.text_sha256(effective)}\n{bundle_sha}\n{base_sha}\n".encode()).hexdigest()
     folder = paths.rounds / f"{bundle.name}-{key[:12]}"
-    work, out = folder / "work", folder / "out"
-    for path in (folder, work, out):
+    for path in (folder, folder / "work", folder / "out"):
         owner_dir(path)
-    with round_lock(folder):
-        return _train(folder, work, out, key, config, effective, config_path, smoke, paths, bundle, bundle_sha,
-                      base_sha, keep_awake, say)
+    return Round(folder, key, config, effective, config_path, smoke, paths, bundle, bundle_sha, base_sha)
+
+
+def train_round(r: Round, keep_awake: bool = True, say=print) -> int:
+    with round_lock(r.folder):
+        return _train(r.folder, r.work, r.out, r.key, r.config, r.effective, r.config_path, r.smoke, r.paths,
+                      r.bundle, r.bundle_sha, r.base_sha, keep_awake, say)
+
+
+def train_local(bundle: Path, config_path: Path | None = None, smoke: bool = False, python: Path | None = None,
+                base: Path | None = None, rounds: Path | None = None, keep_awake: bool = True,
+                say=print) -> int:
+    return train_round(open_round(bundle, config_path, smoke, python, base, rounds), keep_awake, say)
 
 
 def _train(folder: Path, work: Path, out: Path, key: str, config: dict, effective: str, config_path: Path,
