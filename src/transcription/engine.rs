@@ -692,17 +692,16 @@ impl TranscriptionEngine {
     }
 
     /// Whether the loaded model can stream on its device. An import that
-    /// passed its smoke stream stops streaming at once when Labs › Stream
-    /// imported models goes off, without waiting for a reload.
+    /// passed its smoke stream opens no new stream once Labs › Stream
+    /// imported models goes off, without waiting for a reload; the worker
+    /// asks again as it starts each one, and a stream already running
+    /// finishes as usual.
     pub(crate) fn streams(&self) -> bool {
         self.streams.load(Ordering::Acquire)
-            && (crate::labs::stream_imported_models()
-                || !self.held_selection().is_some_and(|selection| {
-                    matches!(
-                        selection.model,
-                        crate::transcription::models::TranscriptionModelId::Custom(_)
-                    )
-                }))
+            && lab_lets_stream(
+                self.held_selection().as_ref(),
+                crate::labs::stream_imported_models(),
+            )
     }
 
     /// Finishes a capture with its complete 16 kHz clip. Without a stream,
@@ -1054,6 +1053,20 @@ struct Worker {
     dictating: Arc<AtomicBool>,
 }
 
+/// Whether a model holding `selection` may start a live stream now: an
+/// import streams only while Labs › Stream imported models (`lab`) is on.
+fn lab_lets_stream(
+    selection: Option<&crate::transcription::models::TranscriptionSelection>,
+    lab: bool,
+) -> bool {
+    lab || !selection.is_some_and(|selection| {
+        matches!(
+            selection.model,
+            crate::transcription::models::TranscriptionModelId::Custom(_)
+        )
+    })
+}
+
 /// How a live stream ended inside the worker.
 enum StreamEnd {
     /// A finish for this stream: the final text, or why the stream is unusable.
@@ -1227,6 +1240,27 @@ impl Worker {
         self.model.as_mut()
     }
 
+    /// How a stream starting now runs on the model, reloading an unloaded
+    /// one first, or `None` when it can't stream. An import's lab is asked
+    /// here, as the stream starts rather than when its begin was queued, so
+    /// a begin sent before Labs › Stream imported models went off starts
+    /// nothing; its finish takes the whole clip. A stream already running
+    /// isn't stopped: it finishes as usual.
+    fn stream_options(&mut self) -> Option<transcribe_cpp::StreamOptions> {
+        let model = self.model()?;
+        let options = model.stream_options().cloned()?;
+        if !lab_lets_stream(
+            model.gguf_selection(),
+            crate::labs::stream_imported_models(),
+        ) {
+            tracing::info!(
+                "an imported model's live stream wasn't started: Labs › Stream imported models is off; transcribing the whole clip"
+            );
+            return None;
+        }
+        Some(options)
+    }
+
     /// Whether the model can stream, kept as it was while it is unloaded so
     /// the next capture still opens a stream (which reloads it).
     fn publish_streams(&self) {
@@ -1278,9 +1312,7 @@ impl Worker {
         commands: &Receiver<Command>,
         next: &mut VecDeque<Command>,
     ) {
-        let options = self
-            .model()
-            .and_then(|model| model.stream_options().cloned());
+        let options = self.stream_options();
         let Some(options) = options else {
             let loaded = self.model.is_some();
             let model_streams = self
@@ -1396,10 +1428,7 @@ impl Worker {
         commands: &Receiver<Command>,
         next: &mut VecDeque<Command>,
     ) {
-        let Some(options) = self
-            .model()
-            .and_then(|model| model.stream_options().cloned())
-        else {
+        let Some(options) = self.stream_options() else {
             return;
         };
         if cancel.is_cancelled() {
@@ -2668,10 +2697,35 @@ mod tests {
             engine.stream_refusal(),
             Some("imported speech models stream only with Labs › Stream imported models on")
         );
-        // A loaded import that passed its smoke stream stops streaming at
-        // once with the lab off.
+        // A loaded import that passed its smoke stream opens no new stream
+        // with the lab off.
         engine.streams.store(true, Ordering::Release);
         assert!(!engine.streams());
         assert!(engine.begin().is_none());
+    }
+
+    /// The worker asks the lab as it starts each stream, not when the
+    /// begin was queued: a begin sent before the lab went off starts no
+    /// import stream (its finish takes the whole clip), and a catalog
+    /// model streams lab or not.
+    #[test]
+    fn a_stream_start_after_its_lab_goes_off_starts_no_import_stream() {
+        use crate::transcription::models::{
+            CustomModelId, TranscriptionModelId, TranscriptionSelection,
+        };
+        let import = TranscriptionSelection {
+            model: TranscriptionModelId::Custom(
+                CustomModelId::parse("custom-0123456789abcdef").unwrap(),
+            ),
+            language: "en".into(),
+        };
+        assert!(lab_lets_stream(Some(&import), true));
+        assert!(!lab_lets_stream(Some(&import), false));
+        let catalog = TranscriptionSelection {
+            model: TranscriptionModelId::ParakeetUnifiedEnglish,
+            language: "en".into(),
+        };
+        assert!(lab_lets_stream(Some(&catalog), false));
+        assert!(lab_lets_stream(None, false));
     }
 }
