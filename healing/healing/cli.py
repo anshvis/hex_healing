@@ -69,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     schedule = commands.add_parser("schedule", help="the launchd job that collects every 6 hours")
     schedule.add_argument("command", choices=["install", "remove", "show", "run"])
     schedule.add_argument("--hex", type=Path, default=None, help="path to the hex binary (install)")
+    schedule.add_argument("--job", choices=["collect", "train-auto"], default="collect",
+                          help="train-auto: `healing train auto` daily at 03:00 (T6.4; not installed by default)")
 
     status = commands.add_parser("status", help="what the dataset holds and what is at risk")
     status.add_argument("--json", action="store_true")
@@ -447,16 +449,20 @@ def _protocol(args) -> int:
 def _schedule(args) -> int:
     from healing import schedule
 
+    job = schedule.JOBS[args.job]
     if args.command == "run":
+        if job is not schedule.COLLECT:
+            print("error: `run` is the collect job's; run `healing train auto` directly", file=sys.stderr)
+            return 2
         return schedule.run_once()
     try:
         if args.command == "install":
-            print(f"installed {schedule.install(args.hex)}")
+            print(f"installed {schedule.install(args.hex, job=job)}")
         elif args.command == "remove":
-            schedule.remove()
+            schedule.remove(job=job)
             print("removed")
         else:
-            print(schedule.show())
+            print(schedule.show(job=job))
     except schedule.ScheduleError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

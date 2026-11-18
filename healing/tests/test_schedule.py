@@ -87,3 +87,17 @@ def test_run_once_survives_unexpected_collect_error(monkeypatch, capsys):
     assert schedule.run_once() == 1
     seen = capsys.readouterr()
     assert pruned and "SECRET" not in seen.out + seen.err and "ValueError" in seen.err
+
+
+def test_train_auto_job_runs_daily_and_not_at_load(world):
+    target = schedule.install(world.hex, world.agents, job=schedule.TRAIN_AUTO)
+    document = plistlib.loads(target.read_bytes())
+    assert target.name == "com.hex-healing.train-auto.plist"
+    assert document["Label"] == "com.hex-healing.train-auto"
+    assert document["ProgramArguments"][-2:] == ["train", "auto"]
+    assert [d["Hour"] for d in document["StartCalendarInterval"]] == [3]
+    assert document["RunAtLoad"] is False  # a login never starts hours of training
+    assert document["StandardOutPath"].endswith("train-auto.log")
+    assert not schedule.plist_path(world.agents).exists()  # the collect job is untouched
+    schedule.remove(world.agents, job=schedule.TRAIN_AUTO)
+    assert not target.exists()
