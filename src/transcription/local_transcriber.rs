@@ -409,9 +409,13 @@ impl LocalTranscriber {
             prewarm_ms = started.elapsed().as_millis(),
             "prewarmed local transcription model"
         );
-        transcriber.stream = transcriber
-            .session
-            .probe_stream(&transcriber.options, &architecture);
+        // An import's probe is its smoke stream, run only while Labs ›
+        // Stream imported models lets it stream.
+        transcriber.stream = super::custom_models::smoke_stream(selection, || {
+            transcriber
+                .session
+                .probe_stream(&transcriber.options, &architecture)
+        });
         // Warm now, so this times the device rather than its first run's
         // shader compiles.
         let started = Instant::now();
