@@ -154,15 +154,21 @@ Labs › Stream imported models on (labs.stream_imported_models, off by default,
 ├── The model loads (selection, launch, a reload) -> its stream probe is its
 │   smoke stream: 8 s of silence through a live stream on the loaded device
 │   (`GgufSession::probe_stream`, the probe every catalog model gets), kept
-│   per import ID for the process (custom_models::smoke_stream)
+│   per import ID for the process as the last load's result: a load that
+│   runs none (the lab off) records no stream, and when a load times a GPU
+│   and the CPU the instance it keeps decides (custom_models::smoke_stream,
+│   `kept_stream`)
 │   ├── Passed -> `ModelDefinition.streams` is true: dictation streams, Live
 │   │   text and `/dictations` partials show words, the picker counts no
 │   │   wait, and `hex model list --json` says `"streams": true`
 │   └── Failed (a GPU error), or a CPU device that never runs one -> logged,
 │       and the model transcribes whole clips; it is never broken mid-dictation
 ├── Lab off -> the probe never runs for an import, `streams` is false, and a
-│   loaded import that streamed stops at the next capture (the engine's
-│   `streams()`); turning it on takes effect the next time the model loads
+│   loaded import that streamed starts no new stream: the engine's worker
+│   asks the lab as each stream starts (not when its begin was queued), so
+│   such a capture takes its whole clip, and a stream already running
+│   finishes as usual; turning it on takes effect the next time the model
+│   loads
 └── An import made from no streaming model -> never probed, whole clips
 ```
 
@@ -172,10 +178,12 @@ catalog model's whatever its variant, while its definition always said
 `streams: false`; now the definition and the engine agree. The header carries
 everything this needs (architecture and variant); the tensor check at import
 already refuses a file whose tensors don't fit its variant. Checks:
-`streams_like_set_for_matching_variant`, `streams_false_with_lab_off`, and
-`smoke_failure_falls_back` in
+`streams_like_set_for_matching_variant`, `streams_false_with_lab_off`,
+`smoke_failure_falls_back`, and
+`an_unprobed_reload_forgets_the_last_smoke_stream` in
 [transcription/custom_models.rs](../../src/transcription/custom_models.rs);
-`a_stream_refusal_names_the_model_or_the_device` in
+`a_stream_refusal_names_the_model_or_the_device` and
+`a_stream_start_after_its_lab_goes_off_starts_no_import_stream` in
 [transcription/engine.rs](../../src/transcription/engine.rs);
 `stream_imported_models_off_by_default` in [labs.rs](../../src/labs.rs).
 Observed once on an Apple M4 (debug build, isolated data folder, an audio

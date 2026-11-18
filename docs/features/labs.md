@@ -157,7 +157,9 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 │                                        (the same architecture and stt.variant) streams once its smoke stream passes on the GPU;
 │                                        off, imports transcribe whole clips (own-models.md › Stream imported models)
 │                                        // checks: streams_like_set_for_matching_variant, streams_false_with_lab_off,
-│                                        // smoke_failure_falls_back (custom_models);
+│                                        // smoke_failure_falls_back, an_unprobed_reload_forgets_the_last_smoke_stream
+│                                        // (custom_models); a_stream_start_after_its_lab_goes_off_starts_no_import_stream
+│                                        // (engine);
 │                                        // stream_imported_models_off_by_default (labs.rs)
 ├── Downloaded models only no labs.picker_downloaded   the picker's All speech models view can show only downloaded models, with the space Hex's copies take (#1018)
 ├── Shell completions no  labs.shell_completions        (every OS) `hex completions <shell>` prints a bash, zsh, fish,
@@ -2084,11 +2086,17 @@ stream probe runs when it loads, as its smoke stream; once it passes, its
 definition streams (dictation streams, Live text and `/dictations` partials
 show words, `hex model list --json` says `"streams": true`). A failed smoke
 stream, or a CPU device, logs and keeps whole clips. Off, an import never
-probes or streams, and one already streaming stops at the next capture. Turning
-it on applies the next time the model loads. Checks:
-`streams_like_set_for_matching_variant`, `streams_false_with_lab_off`, and
-`smoke_failure_falls_back` in
-[custom_models.rs](../../src/transcription/custom_models.rs), and
+probes, and a loaded one that streamed starts no new stream: the engine's
+worker asks the lab as each stream starts, so a capture begun before the lab
+went off still takes its whole clip, while a stream already running finishes
+as usual. Turning it on applies the next time the model loads: a load that ran
+no smoke stream holds none, so an older load's pass never counts again.
+Checks: `streams_like_set_for_matching_variant`, `streams_false_with_lab_off`,
+`smoke_failure_falls_back`, and
+`an_unprobed_reload_forgets_the_last_smoke_stream` in
+[custom_models.rs](../../src/transcription/custom_models.rs),
+`a_stream_start_after_its_lab_goes_off_starts_no_import_stream` in
+[engine.rs](../../src/transcription/engine.rs), and
 `stream_imported_models_off_by_default` in [labs.rs](../../src/labs.rs).
 Observed on macOS with an isolated Hex: off and on, `hex model list --json`
 and `/streams` partials follow the lab (own-models.md › Stream imported
