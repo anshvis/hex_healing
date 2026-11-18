@@ -122,6 +122,9 @@ impl Feature {
             Self::KQuantModels => {
                 "Add your own speech model files that use Q6_K, Q5_K, or Q4_K weights. They are smaller than Q8_0 but Hex hasn't verified them, so accuracy may vary."
             }
+            Self::StreamImportedModels => {
+                "Your own speech models made from a streaming model write while you talk, once a test stream passes on the GPU"
+            }
             Self::PickerDownloaded => {
                 "Show only downloaded speech models in the picker, with the space they take"
             }

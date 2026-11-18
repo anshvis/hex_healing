@@ -633,6 +633,11 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: add your own speech model files that use Q6_K, Q5_K, or Q4_K weights (macOS); they are smaller than Q8_0 but Hex hasn't verified them",
     ),
     key(
+        "labs.stream_imported_models",
+        Kind::Bool,
+        "Labs: your own speech models made from a streaming model (the same architecture and variant) stream once a test stream passes on the GPU",
+    ),
+    key(
         "labs.picker_downloaded",
         Kind::Bool,
         "Labs: the speech model picker's All speech models view offers Only downloaded models, with the space they take",

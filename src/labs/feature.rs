@@ -88,10 +88,11 @@ pub enum Feature {
     YoloMode,
     CursorContext,
     LearnFromCorrections,
+    StreamImportedModels,
 }
 
 impl Feature {
-    pub const ALL: [Self; 83] = [
+    pub const ALL: [Self; 84] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -175,6 +176,7 @@ impl Feature {
         Self::YoloMode,
         Self::CursorContext,
         Self::LearnFromCorrections,
+        Self::StreamImportedModels,
     ];
 }
 
@@ -226,6 +228,7 @@ impl Feature {
             Self::PickerActiveFirst => "picker-active-first",
             Self::ModelInPlace => "model-in-place",
             Self::KQuantModels => "k-quant-models",
+            Self::StreamImportedModels => "stream-imported-models",
             Self::PickerDownloaded => "picker-downloaded",
             Self::SectionKeyAlone => "section-key",
             Self::KeepRecordings => "keep-recordings",

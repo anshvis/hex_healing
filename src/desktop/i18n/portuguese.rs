@@ -118,6 +118,8 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Use model file where it is…", "Usar arquivo de modelo onde está…"),
     ("Used where it is", "Usado onde está"),
     ("Use model files where they are", "Usar arquivos de modelo onde estão"),
+    ("Stream imported models", "Transmitir modelos importados"),
+    ("Your own speech models made from a streaming model write while you talk, once a test stream passes on the GPU", "Seus próprios modelos de voz feitos a partir de um modelo de streaming escrevem enquanto você fala, assim que um fluxo de teste funciona na GPU"),
     ("Smaller model files", "Arquivos de modelo menores"),
     ("Turn on Labs › Smaller model files to use it.", "Ative Labs › Arquivos de modelo menores para usá-lo."),
     ("{model} needs Labs › Smaller model files, so Hex uses {fallback} until you turn it on or choose another model", "{model} precisa de Labs › Arquivos de modelo menores, então o Hex usa {fallback} até você ativá-lo ou escolher outro modelo."),
