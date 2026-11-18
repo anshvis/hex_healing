@@ -414,7 +414,8 @@ def verify_bundle(path: Path) -> str:
         raise TrainError(f"{path} is not a training bundle (no {LISTING})")
     listing = listing_path.read_bytes()
     names = [line.split("  ", 1)[1] for line in listing.decode().splitlines()]
-    present = {MANIFEST} | {f"audio/{p.name}" for p in (path / "audio").glob("*")}
+    # `._*` are the AppleDouble files macOS writes beside each file on exFAT (the external drive)
+    present = {MANIFEST} | {f"audio/{p.name}" for p in (path / "audio").glob("*") if not p.name.startswith("._")}
     if set(names) != present:
         raise TrainError(f"{path}: its files differ from {LISTING}")
     try:

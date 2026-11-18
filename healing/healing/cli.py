@@ -158,7 +158,15 @@ def main(argv: list[str] | None = None) -> int:
     model_current.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
     models.add_parser("pin-golden", help="pin the frozen golden set's hash in the registry (G-10)")
 
-    train = commands.add_parser("train", help="Tier 2 training (M6)").add_subparsers(dest="command", required=True)
+    train_group = commands.add_parser("train", help="Tier 2 training (M6): `prepare`, or a round with --local")
+    train_group.add_argument("--local", action="store_true", help="train a LoRA round on this Mac's CPU (T6.5)")
+    train_group.add_argument("--smoke", action="store_true", help="with --local: 20 steps over 50 clips")
+    train_group.add_argument("--bundle", type=Path, default=None, help="with --local: the bundle `train prepare` wrote")
+    train_group.add_argument("--config", type=Path, default=None, help="with --local: the training config (default: healing/train/configs/lora.yaml)")
+    train_group.add_argument("--base", type=Path, default=None, help="with --local: the base .nemo (default: $HEALING_BASE_NEMO, else M0's model cache)")
+    train_group.add_argument("--python", type=Path, default=None, help="with --local: NeMo's Python (default: $HEALING_NEMO_PYTHON, else M0's env)")
+    train_group.add_argument("--rounds-dir", type=Path, default=None, help="with --local: where rounds work (default: $HEALING_ROUNDS_DIR, else $HEALING_HOME/rounds)")
+    train = train_group.add_subparsers(dest="command")
     prepare = train.add_parser("prepare", help="snapshot the train clips and write the weighted training bundle")
     prepare.add_argument("--include-weak", action="store_true", help="also train on weak clips (weight 0.2)")
     prepare.add_argument("--replay", type=float, default=0.2, help="share of the sampler's weight given to replay")
@@ -205,7 +213,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.group == "report":
         return _report(args)
     if args.group == "train":
-        return _train_prepare(args)
+        if args.command == "prepare":
+            return _train_prepare(args)
+        if not args.local:
+            train_group.error("give a subcommand (prepare) or --local")
+        if args.bundle is None:
+            train_group.error("--local needs --bundle")
+        from healing.train import run as train_run
+
+        return train_run.main(args)
     if args.group == "protocol":
         return _protocol(args)
     if args.group == "schedule":

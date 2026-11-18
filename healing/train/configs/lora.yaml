@@ -1,0 +1,37 @@
+# The LoRA round's training config (T6.5). The whole effective file is hashed into the registry.
+# `healing train --local --smoke` applies the `smoke` section on top.
+
+arch: parakeet-unified
+base:  # the M0-chosen architecture's NeMo checkpoint (D-13), pinned by SHA-256
+  repo: nvidia/parakeet-unified-en-0.6b
+  revision: fe53cd885760c96b6a5f51a0bfd362cb4584a98b
+  file: parakeet-unified-en-0.6b.nemo
+  sha256: ec23ed9150c8fde49072c3e2d61678ab903dbcef389d658db833420cbc1da35b
+
+# D-31, D-47: encoder attention q/k/v/out, encoder feed-forward and the joint's linears.
+# The predictor is an LSTM and stays frozen.
+targets: [encoder_attention, encoder_feed_forward, joint]
+rank: 16
+alpha: 32
+dropout: 0.05
+
+lr: 1e-4
+epochs: 3
+max_steps: 0  # 0: the epochs decide
+batch_seconds: 60  # a batch holds at most this much audio (CPU, 16 GB)
+batch_max_clips: 16
+validation_share: 0.05  # of the train bundle, whole clusters; never a test set
+validate_every: 200
+early_stopping_patience: 3  # validations without a better loss
+checkpoint_every: 200
+seed: 13
+threads: 8
+device: cpu  # NeMo's RNN-T loss is unreliable on MPS (D-34)
+max_rss_gb: 12
+
+smoke:  # exactly 20 steps on CPU over 50 clips (the steps decide, not the epochs)
+  max_steps: 20
+  epochs: 100
+  max_clips: 50
+  checkpoint_every: 5
+  validate_every: 10
