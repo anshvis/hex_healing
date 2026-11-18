@@ -29,13 +29,49 @@ class ConfigError(Exception):
 
 
 def _strip_comment(line: str) -> str:
-    quote = None
+    quote, escaped = None, False
     for i, ch in enumerate(line):
-        if ch in "\"'" and quote in (None, ch):
-            quote = None if quote else ch
+        if escaped:
+            escaped = False
+        elif ch == "\\" and quote == '"':
+            escaped = True
+        elif ch in "\"'" and quote in (None, ch):
+            quote = None if quote else ch  # YAML's '' inside single quotes toggles twice: still inside
         elif ch == "#" and quote is None and (i == 0 or line[i - 1].isspace()):
             return line[:i].rstrip()
     return line.rstrip()
+
+
+def _quoted(text: str, where: str) -> str:
+    """One whole quoted scalar, as YAML reads it: '…' with '' for a quote, or "…" with JSON's escapes.
+    Anything after the closing quote (`'a' 'b'`, `'a'b`) is an error, never part of the value."""
+    quote, i, out = text[0], 1, []
+    while i < len(text):
+        ch = text[i]
+        if quote == "'" and ch == "'":
+            if text[i + 1:i + 2] == "'":
+                out.append("'")
+                i += 2
+                continue
+            break
+        if quote == '"' and ch == "\\":
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if quote == '"' and ch == '"':
+            break
+        out.append(ch)
+        i += 1
+    else:
+        raise ConfigError(f"{where}: unterminated string {text!r}")
+    if i != len(text) - 1:
+        raise ConfigError(f"{where}: text after the closing quote in {text!r}")
+    if quote == "'":
+        return "".join(out)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ConfigError(f"{where}: cannot read {text!r}: {error.msg}") from None
 
 
 def _scalar(text: str, where: str):
@@ -45,9 +81,7 @@ def _scalar(text: str, where: str):
     if text in ("true", "false"):
         return text == "true"
     if text[0] in "\"'":
-        if len(text) < 2 or text[-1] != text[0]:
-            raise ConfigError(f"{where}: unterminated string {text!r}")
-        return json.loads(text) if text[0] == '"' else text[1:-1]
+        return _quoted(text, where)
     if re.fullmatch(r"[-+]?\d+", text):
         return int(text)
     if _NUMBER.match(text):
@@ -62,6 +96,8 @@ def _value(text: str, where: str):
         if not text.endswith("]"):
             raise ConfigError(f"{where}: a list must close on its line")
         inner = text[1:-1].strip()
+        if any(ch in inner for ch in "\"'"):
+            raise ConfigError(f"{where}: quoted items in a flow list are not supported")
         return [_scalar(part, where) for part in inner.split(",")] if inner else []
     return _scalar(text, where)
 
