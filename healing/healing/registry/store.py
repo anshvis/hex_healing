@@ -284,11 +284,19 @@ def reject(name: str, reason: str) -> None:
 
 def record_gate(name: str, decision: dict, reject_reason: str | None) -> None:
     """Append a `gate` decision for a candidate and, when it rejects, the `rejected` event after it,
-    under one hold of the lock so no other decision lands between them."""
+    under one hold of the lock so no other decision lands between them. The decision's `models`
+    (`{role: {version, gguf_sha256}}`) are the GGUFs the eval scored; each must still be its version's
+    GGUF now, so a restore that swapped one during the eval can't carry a decision about other bytes."""
     with lock():
-        version = load().get(name)
+        state = load()
+        version = state.get(name)
         if version.state != "candidate":
             raise RegistryError(f"{version.name} is {version.state}; only a candidate is gated")
+        for role, model in (decision.get("models") or {}).items():
+            now = state.get(model["version"]).gguf
+            if now != model["gguf_sha256"]:
+                raise RegistryError(f"{model['version']} ({role}) is GGUF {str(now)[:12]} now, not the "
+                                    f"{model['gguf_sha256'][:12]} the eval scored (restored meanwhile?); gate it again")
         events = [{"event": "gate", "version": version.name, **decision}]
         if reject_reason is not None:
             events.append({"event": "rejected", "version": version.name, "reason": reject_reason})

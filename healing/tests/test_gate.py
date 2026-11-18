@@ -465,3 +465,27 @@ def test_no_long_clips_fails_streaming():
     verdict = judge(sets)
     assert verdict.failing == ["streaming"]
     assert "unmeasured" in check(verdict, "streaming")["note"]
+
+
+def test_gate_records_the_models_it_judged(home):
+    gate.run("v1", evaluate=fake_evaluate(world(), []), support=STREAMS, say=lambda line: None)
+    models = registry.load().versions["v1"].last_gate["models"]
+    assert models == {"candidate": {"version": "v1", "gguf_sha256": home["v1"]},
+                      "against": {"version": "v0", "gguf_sha256": home["v0"]},
+                      "v0": {"version": "v0", "gguf_sha256": home["v0"]}}
+
+
+def test_restore_between_eval_and_record_refuses(home):
+    """A restore that swaps a judged model's GGUF while the eval runs leaves the decision about other
+    bytes: the record is refused under the registry lock."""
+    inner = fake_evaluate(world(), [])
+
+    def evaluate(models, set_names, parent):
+        doc = inner(models, set_names, parent)
+        with registry.lock():
+            registry.append({"event": "restored", "version": "v1", "method": "wer_parity", "rebuilt_sha256": "d" * 64})
+        return doc
+
+    with pytest.raises(registry.RegistryError, match="v1"):
+        gate.run("v1", evaluate=evaluate, support=STREAMS, say=lambda line: None)
+    assert not registry.load().versions["v1"].gates

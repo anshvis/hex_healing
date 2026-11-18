@@ -440,7 +440,9 @@ def run(version: str, against: str = "current", *, eval_path: Path | None = None
     _check_eval(document, parent)
     verdict = judge(document, candidate=candidate.gguf, against=target.gguf, v0=v0.gguf, support=support,
                     margins=margins, golden_pin=state.golden, allow_thin=allow_thin)
-    decision = {"against": target.name, "eval_id": document.get("eval_id"), "eval_path": source,
+    models = {role: {"version": v.name, "gguf_sha256": v.gguf}
+              for role, v in (("candidate", candidate), ("against", target), ("v0", v0))}
+    decision = {"against": target.name, "models": models, "eval_id": document.get("eval_id"), "eval_path": source,
                 "checks": verdict.as_records(), "pass": verdict.passed, "failing": verdict.failing,
                 "refused": verdict.refused, "margins_sha": margins.sha256, "thin_evidence_allowed": allow_thin,
                 "diagnostics": verdict.diagnostics}
