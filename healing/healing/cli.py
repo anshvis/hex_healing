@@ -155,6 +155,15 @@ def main(argv: list[str] | None = None) -> int:
     model_current.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
     models.add_parser("pin-golden", help="pin the frozen golden set's hash in the registry (G-10)")
 
+    train = commands.add_parser("train", help="Tier 2 training (M6)").add_subparsers(dest="command", required=True)
+    prepare = train.add_parser("prepare", help="snapshot the train clips and write the weighted training bundle")
+    prepare.add_argument("--include-weak", action="store_true", help="also train on weak clips (weight 0.2)")
+    prepare.add_argument("--replay", type=float, default=0.2, help="share of the sampler's weight given to replay")
+    prepare.add_argument("--parent", default="current", help="the version this round trains from")
+    prepare.add_argument("--seed", type=int, default=13)
+    prepare.add_argument("--replay-source", type=Path, default=None,
+                         help="LibriSpeech train-clean-100 parquet shards (default: $HEALING_HOME/cache/librispeech-train-clean-100)")
+
     protocol = commands.add_parser("protocol").add_subparsers(dest="command", required=True)
     seeded = protocol.add_parser("corrections", help="the seeded edit-recall protocol (X-3)")
     seeded.add_argument("step", choices=["plan", "run", "score"])
@@ -192,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
         return registry_commands.main(args)
     if args.group == "report":
         return _report(args)
+    if args.group == "train":
+        return _train_prepare(args)
     if args.group == "protocol":
         return _protocol(args)
     if args.group == "schedule":
@@ -311,6 +322,34 @@ def _split(args) -> int:
             finally:
                 store.close()
     except (StoreError, splits.SplitError, manifest.ManifestError, RegistryError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    print(result.text())
+    return 0
+
+
+def _train_prepare(args) -> int:
+    from healing import splits
+    from healing.eval.bench import BenchError
+    from healing.registry.store import RegistryError
+    from healing.store import Store, StoreError, process_lock
+    from healing.train import manifest as train_manifest
+    from healing.train.replay import LocalLibriSpeech, ReplayError
+
+    try:
+        with process_lock():
+            store = Store()
+            try:
+                result = train_manifest.prepare(
+                    store, include_weak=args.include_weak, ratio=args.replay, parent=args.parent, seed=args.seed,
+                    source=LocalLibriSpeech(args.replay_source) if args.replay_source else None,
+                )
+            finally:
+                store.close()
+    except train_manifest.TestClusterLeak as error:
+        print(f"error: test split-cluster in the training data: {error}", file=sys.stderr)
+        return 1
+    except (StoreError, splits.SplitError, RegistryError, BenchError, ReplayError, train_manifest.TrainError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     print(result.text())

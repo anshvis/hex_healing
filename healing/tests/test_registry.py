@@ -240,7 +240,8 @@ def test_snapshot_from_a_train_row_and_reproducibility(env):
         candidate(env, 1, "--train", "train-v0-x")
         dataset = registry.load().get("v1").record["dataset"]
         assert dataset == {"snapshot_sha256": snap.sha256, "snapshot_path": f"snapshots/{snap.sha256}.jsonl.gz",
-                           "train_split": "train-v0-x", "train_n": 2, "strong_n": 1, "weak_n": 1, "weights_frozen": False}
+                           "train_split": "train-v0-x", "train_n": 2, "strong_n": 1, "weak_n": 1, "weights_frozen": False,
+                           "bundle_sha256": None}
         assert snapshots.snapshot_path(snap.sha256).is_file()
         assert show(registry.load(), "v1")["reproducible"] == "partial"  # the weak clip's audio is gone
         candidate(env, 2, "--snapshot", snap.sha256)  # a stored snapshot, by hash

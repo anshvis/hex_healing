@@ -366,11 +366,17 @@ def preview_train(
     return [r["clip_id"] for r in _trainable(store, zones, model, include_weak)]
 
 
-def snapshot_train(
+def snapshot_train(store: Store, **options) -> list[str]:
+    """The one way training gets clips (D-41): `record_train`'s clip ids (it takes the same options)."""
+    return record_train(store, **options)[1]
+
+
+def record_train(
     store: Store, *, parent: str = "current", include_weak: bool = False, model: str | None = None,
     note: str | None = None, cutoff_ms: int | None = None, now: int | None = None,
-) -> list[str]:
-    """The one way training gets clips (D-41): returns the ids and records them.
+) -> tuple[str | None, list[str]]:
+    """`snapshot_train`, also naming the train row it wrote: (split_id or None when nothing was
+    handed out, clip ids). `healing train prepare` names its bundle after that row.
 
     Labels are refreshed first, then the clips are `labels.trainable` outside the test zone
     (`Zones.may_train`), read from live data inside one write transaction, so it is right after a
@@ -388,7 +394,7 @@ def snapshot_train(
         zones = Zones.load(db, cutoff_ms, now, parent=parent)
         rows = _trainable(store, zones, model, include_weak)
         if not rows:
-            return []
+            return None, []
         stamp = datetime.fromtimestamp(when / 1000, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         split_id = _free_id(db, f"train-{parent}-{stamp}")
         detail = {
@@ -404,7 +410,7 @@ def snapshot_train(
         )
         db.executemany("INSERT INTO split_members (split_id, clip_id) VALUES (?, ?)", [(split_id, r["clip_id"]) for r in rows])
         db.execute("UPDATE splits SET frozen = 1 WHERE split_id = ?", (split_id,))  # members first: a frozen row takes none
-    return [r["clip_id"] for r in rows]
+    return split_id, [r["clip_id"] for r in rows]
 
 
 def _texts(row) -> list[str]:
