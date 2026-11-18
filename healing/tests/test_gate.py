@@ -16,6 +16,7 @@ import pytest
 
 from healing import gate
 from healing.cli import main
+from healing.eval import run as eval_run
 from healing.registry import objects
 from healing.registry import store as registry
 
@@ -265,8 +266,31 @@ def fake_evaluate(sets_for, calls):
         shas = [objects.sha256_file(m) for m in models]
         doc = document({name: {shas[0]: by[CUR], shas[1]: by[CAND]} for name, by in sets_for.items()})
         doc["eval_id"] = "eval-test"
+        # as `healing eval` records them: the file name each model was benchmarked under and its padding
+        for model, sha in zip(models, shas):
+            entry = next(m for m in doc["models"] if m["gguf_sha256"] == sha)
+            entry.update(gguf_path=str(model), file_name=model.name,
+                         trailing_silence_samples=6_400 if model.name.startswith("parakeet-unified") else 0)
+        doc["per_clip"] = {str(m): doc["per_clip"][f"/models/{sha[:4]}.gguf"] for m, sha in zip(models, shas)}
+        doc["scores"] = {str(m): {} for m in models}
+        doc["parent"] = parent
+        doc["vocabulary"] = {"mode": "current", "terms": 0, "boost": None,
+                             "sha256": eval_run.vocabulary_fingerprint([], None)}
         return doc
     return evaluate
+
+
+def _saved(home, tmp_path, change=None):
+    """A saved eval as `healing eval` would write it for the fresh path's model files."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    models = [Path(tmp_path / "parakeet-unified-en-0.6b-Q8_0.gguf"), objects.path(home["v1"])]
+    models[0].symlink_to(objects.path(home["v0"]))
+    doc = fake_evaluate(world(), [])(models, [], "v0")
+    if change:
+        change(doc)
+    saved = tmp_path / "eval.json"
+    saved.write_text(json.dumps(doc))
+    return saved
 
 
 def test_margins_sha_recorded(home):
@@ -327,11 +351,7 @@ def test_allow_thin_evidence_refused_by_the_cli(home, capsys):
 
 
 def test_gate_rejudges_a_saved_eval(home, tmp_path):
-    sets = world()
-    doc = fake_evaluate(sets, [])([objects.path(home["v0"]), objects.path(home["v1"])], [], "v0")
-    saved = tmp_path / "eval.json"
-    saved.write_text(json.dumps(doc))
-    code = gate.run("v1", eval_path=saved, support=STREAMS, say=lambda line: None)
+    code = gate.run("v1", eval_path=_saved(home, tmp_path), support=STREAMS, say=lambda line: None)
     assert code == 0
     assert registry.load().versions["v1"].last_gate["eval_id"] == "eval-test"
 
@@ -438,11 +458,10 @@ def test_eval_keeps_per_clip_latency(tmp_path):
 
 
 def test_gate_refuses_an_eval_it_cannot_judge(home, tmp_path):
-    doc = fake_evaluate(world(), [])([objects.path(home["v0"]), objects.path(home["v1"])], [], "v0")
-    for change, message in (({"vocabulary": {"mode": "none"}}, "vocabulary"), ({"parent": "v3"}, "holdouts"),
-                            ({"sets": []}, "none of the sets")):
-        saved = tmp_path / "eval.json"
-        saved.write_text(json.dumps({**doc, **change}))
+    for n, (change, message) in enumerate(((lambda d: d["vocabulary"].update(mode="none"), "vocabulary"),
+                                            (lambda d: d.update(parent="v3"), "holdouts"),
+                                            (lambda d: d.update(sets=[]), "none of the sets"))):
+        saved = _saved(home, tmp_path / str(n), change)
         with pytest.raises(gate.GateError, match=message):
             gate.run("v1", eval_path=saved, support=STREAMS, say=lambda line: None)
     assert not registry.load().versions["v1"].gates
@@ -489,3 +508,26 @@ def test_restore_between_eval_and_record_refuses(home):
     with pytest.raises(registry.RegistryError, match="v1"):
         gate.run("v1", evaluate=evaluate, support=STREAMS, say=lambda line: None)
     assert not registry.load().versions["v1"].gates
+
+
+def test_saved_eval_scored_with_another_vocabulary_refuses(home, tmp_path):
+    settings = Path(tmp_path / "hex-support")
+    settings.mkdir(exist_ok=True)
+    (settings / "settings.json").write_text(json.dumps({"vocabulary": [{"term": "Qorvyx"}], "labs": {"vocabulary_biasing": True}}))
+    with pytest.raises(gate.GateError, match="vocabulary"):
+        gate.run("v1", eval_path=_saved(home, tmp_path), support=STREAMS, say=lambda line: None)
+    assert not registry.load().versions["v1"].gates
+
+
+def test_saved_eval_without_a_vocabulary_fingerprint_refuses(home, tmp_path):
+    saved = _saved(home, tmp_path, lambda doc: doc["vocabulary"].pop("sha256"))
+    with pytest.raises(gate.GateError, match="vocabulary"):
+        gate.run("v1", eval_path=saved, support=STREAMS, say=lambda line: None)
+
+
+def test_vocabulary_fingerprint_is_the_effective_vocabulary():
+    terms = [{"term": "Qorvyx", "sounds_like": []}]
+    prints = {eval_run.vocabulary_fingerprint([], None), eval_run.vocabulary_fingerprint(terms, None),
+              eval_run.vocabulary_fingerprint(terms, "strong")}
+    assert len(prints) == 3
+    assert eval_run.vocabulary_fingerprint(terms, None) == eval_run.vocabulary_fingerprint(list(terms), None)

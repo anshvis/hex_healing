@@ -19,6 +19,7 @@ Scores per set:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import statistics
@@ -113,6 +114,13 @@ def current_vocabulary(settings_path: Path | None = None) -> tuple[list[dict], s
     if entries and boost == "off":
         return [], None, "the vocabulary boost is Off, so dictation leaves transcripts as heard"
     return entries, boost, None if entries else "your vocabulary is empty"
+
+
+def vocabulary_fingerprint(entries: list[dict], boost: str | None) -> str:
+    """The SHA-256 of the vocabulary dictation runs with: whether it biases at all, the terms in order and
+    the boost, so a saved eval can be matched against the vocabulary Hex runs now."""
+    payload = {"biasing": bool(entries), "terms": entries, "boost": boost if entries else None}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def resolve_set(name: str, store: Store | None, parent: str = "current") -> SetRef | Unavailable:
@@ -284,7 +292,9 @@ def evaluate(
         "sets": [{"set": r.name, "split_id": r.split_id, "manifest_sha256": r.manifest_sha256, "n": r.n} for r in refs],
         "unavailable_sets": missing,
         "parent": parent,
-        "vocabulary": {"mode": vocabulary, "terms": len(entries), "boost": boost if entries else None},
+        "vocabulary": {"mode": vocabulary, "terms": len(entries), "boost": boost if entries else None,
+                       "sha256": vocabulary_fingerprint(entries, boost)},
+
         "scores": {str(m): {} for m in models},
         "per_clip": {str(m): {} for m in models},
         "started_at_ms": int(started * 1000),

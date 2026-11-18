@@ -267,7 +267,8 @@ def test_current_vocabulary_is_passed_as_a_file(world):
     call = world.calls()[0]
     assert call["vocabulary"] == [{"term": "Qorvyx", "sounds_like": []}, {"term": "Kit", "sounds_like": ["kip", "kid"]}]
     assert call["args"][call["args"].index("--boost") + 1] == "strong"
-    assert document["vocabulary"] == {"mode": "current", "terms": 2, "boost": "strong"}
+    assert document["vocabulary"] == {"mode": "current", "terms": 2, "boost": "strong",
+                                      "sha256": eval_run.vocabulary_fingerprint(call["vocabulary"], "strong")}
     assert (world.tmp / "hex-support" / "settings.json").read_text() == saved  # read-only
     assert not Path(call["args"][call["args"].index("--vocabulary") + 1]).exists()  # a temp file
 

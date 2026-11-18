@@ -399,6 +399,20 @@ def stream_support(binary: Path, candidate, against) -> StreamSupport:
                          "its smoke stream runs when promote loads it")
 
 
+def _check_saved(document: dict) -> None:
+    """A saved eval (`--eval`) was scored with the vocabulary Hex runs now: its terms, boost and biasing."""
+    from healing.eval import run as eval_run
+
+    entries, boost, _ = eval_run.current_vocabulary()
+    recorded = (document.get("vocabulary") or {}).get("sha256")
+    if recorded is None:
+        raise GateError("the saved eval records no vocabulary fingerprint, so it can't be matched to the "
+                        "vocabulary Hex runs; score again without --eval")
+    if recorded != eval_run.vocabulary_fingerprint(entries, boost):
+        raise GateError("the saved eval was scored with another vocabulary than the one Hex runs now "
+                        f"({len(entries)} terms, boost {boost or 'default'}); score again without --eval")
+
+
 def _check_eval(document: dict, parent: str) -> None:
     """An eval the gate may judge: something scored, the candidate's parent's holdouts, your vocabulary."""
     if not document.get("sets"):
@@ -432,6 +446,7 @@ def run(version: str, against: str = "current", *, eval_path: Path | None = None
     if eval_path is not None:
         document = json.loads(Path(eval_path).read_text())
         source = str(eval_path)
+        _check_saved(document)
     else:
         versions = [target, candidate] + ([v0] if v0.name not in (target.name, candidate.name) else [])
         with _model_files(versions) as paths:
