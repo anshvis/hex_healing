@@ -346,3 +346,35 @@ def test_config_parser_round_trips_and_refuses_what_it_cannot_read():
             config_module.parse(bad)
     with pytest.raises(config_module.ConfigError, match="lacks"):
         config_module.check({"rank": 16})
+
+
+def test_a_ctrl_c_while_the_trainer_starts_still_reaches_it_and_is_waited_for(tmp_path, monkeypatch):
+    """A Ctrl-C between spawning the trainer (its own session) and waiting on it, here while caffeinate
+    starts, is forwarded once the trainer exists; the wrapper never returns with the trainer alive."""
+    script = tmp_path / "trainer.py"
+    script.write_text(textwrap.dedent(f'''
+        import signal, sys, time
+        from pathlib import Path
+        def stop(signum, frame):
+            Path({str(tmp_path / "got")!r}).write_text(str(signum))
+            sys.exit(130)
+        signal.signal(signal.SIGINT, stop)
+        Path({str(tmp_path / "ready")!r}).write_text("")
+        time.sleep(60)
+        sys.exit(1)
+    '''))
+    real = subprocess.Popen
+
+    def popen(command, *args, **kwargs):
+        if command[0] == "/fake/caffeinate":
+            deadline = time.monotonic() + 30
+            while not (tmp_path / "ready").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            os.kill(os.getpid(), signal.SIGINT)  # Ctrl-C lands mid-startup
+            return real(["sleep", "60"], stdin=subprocess.DEVNULL)
+        return real(command, *args, **kwargs)
+
+    monkeypatch.setattr(run.shutil, "which", lambda name: "/fake/caffeinate")
+    monkeypatch.setattr(run.subprocess, "Popen", popen)
+    assert run._run([sys.executable, str(script)], keep_awake=True) == 130
+    assert (tmp_path / "got").read_text() == str(int(signal.SIGINT))

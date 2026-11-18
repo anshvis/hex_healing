@@ -175,30 +175,37 @@ def round_lock(folder: Path):
         handle.close()
 
 
-def _start(command: list[str], keep_awake: bool) -> tuple[subprocess.Popen, subprocess.Popen | None]:
-    # Its own session: a terminal Ctrl-C reaches only this wrapper, which forwards it once (`_wait`).
-    child = subprocess.Popen(command, env={**os.environ, "PYTHONUNBUFFERED": "1"}, start_new_session=True)
-    awake = None
-    caffeinate = shutil.which("caffeinate") if keep_awake else None
-    if caffeinate:
-        awake = subprocess.Popen([caffeinate, "-i", "-w", str(child.pid)], stdin=subprocess.DEVNULL)
-    return child, awake
+def _run(command: list[str], keep_awake: bool) -> int:
+    """Start the trainer and return its exit code. SIGINT and SIGTERM to this wrapper are forwarded to
+    the trainer (each one: a second Ctrl-C stops it at once, as `lora.py` says), and the wrapper keeps
+    waiting for its checkpointed exit, so no trainer outlives it. The handlers go in before the trainer
+    is spawned: it runs in its own session, so a terminal Ctrl-C reaches only this wrapper, and one that
+    lands while it starts is held and forwarded once the trainer exists. caffeinate is stopped and
+    reaped either way."""
+    state: dict = {"child": None, "pending": []}
 
-
-def _wait(child: subprocess.Popen, awake: subprocess.Popen | None) -> int:
-    """The trainer's exit code. SIGINT and SIGTERM to this wrapper are forwarded to the trainer (each
-    one: a second Ctrl-C stops it at once, as `lora.py` says), and the wrapper keeps waiting for its
-    checkpointed exit, so no trainer outlives it. caffeinate is stopped and reaped either way."""
     def forward(signum, _frame):
-        if child.poll() is None:
+        child = state["child"]
+        if child is None:
+            state["pending"].append(signum)
+        elif child.poll() is None:
             child.send_signal(signum)
 
     previous = {s: signal.signal(s, forward) for s in (signal.SIGINT, signal.SIGTERM)}
+    awake = None
     try:
+        child = subprocess.Popen(command, env={**os.environ, "PYTHONUNBUFFERED": "1"}, start_new_session=True)
+        state["child"] = child
+        for signum in state["pending"]:
+            child.send_signal(signum)
+        caffeinate = shutil.which("caffeinate") if keep_awake else None
+        if caffeinate:
+            awake = subprocess.Popen([caffeinate, "-i", "-w", str(child.pid)], stdin=subprocess.DEVNULL)
         return child.wait()
     finally:
         try:
-            if child.poll() is None:  # only if waiting itself failed: never leave the trainer behind
+            child = state["child"]
+            if child is not None and child.poll() is None:  # only if starting or waiting failed
                 child.kill()
                 child.wait()
         finally:
@@ -250,8 +257,7 @@ def _train(folder: Path, work: Path, out: Path, key: str, config: dict, effectiv
     resuming = (work / "checkpoint.pt").exists()
     say(f"round {folder.name}: {'resuming' if resuming else 'starting'} ({'smoke' if smoke else 'full'}) in {folder}")
     started, started_at = time.monotonic(), _now()
-    child, awake = _start([str(paths.python), "-I", str(TRAINER), "--job", str(work / "trainer.json")], keep_awake)
-    code = _wait(child, awake)
+    code = _run([str(paths.python), "-I", str(TRAINER), "--job", str(work / "trainer.json")], keep_awake)
     if code != 0:
         why = {lora.INTERRUPTED: "interrupted; rerun the same command to resume from the last checkpoint",
                lora.MEMORY: "over the memory limit (see above)", lora.BAD_JOB: "the trainer refused the job (see above)"}
