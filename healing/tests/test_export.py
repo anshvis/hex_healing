@@ -27,7 +27,7 @@ BASE_KV = {"general.architecture": "parakeet", "general.name": "Parakeet Unified
            "general.languages": ["en"], "stt.variant": "unified-en-0.6b"}
 
 # NeMo's interpreter, faked: `-I merge.py …` writes the merged checkpoint, `-I convert-parakeet.py
-# <nemo> <f32>` writes a GGUF. FAKE_FAIL=<step> fails that step with a traceback on stderr;
+# <nemo> <f32>` writes a GGUF (into a folder named after the variant, as the real one requires). FAKE_FAIL=<step> fails that step with a traceback on stderr;
 # FAKE_DROP=<key> leaves a header key out; FAKE_EXTRA=1 adds a tensor the base lacks.
 NEMO = """import json, os, sys
 from pathlib import Path
@@ -48,6 +48,9 @@ if step == "merge":
     Path(flags["--out"]).write_bytes(data)
 else:
     merged, f32 = rest
+    if Path(f32).parent.name != "parakeet-unified-en-0.6b":  # convert-parakeet.py's variant slug
+        print(f"ValueError: unknown parakeet variant slug: {{Path(f32).parent.name!r}}", file=sys.stderr)
+        sys.exit(1)
     kv = {kv!r}
     kv.pop(os.environ.get("FAKE_DROP", ""), None)
     names = {tensors!r} + (["extra.w"] if os.environ.get("FAKE_EXTRA") else [])

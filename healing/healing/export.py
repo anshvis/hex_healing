@@ -7,7 +7,8 @@ The build is the converter record restore replays (D-43). `export` writes the re
 
 1. `merge`: `train/merge.py` in NeMo's interpreter. It applies W ← W + (α/r)·B·A, as the trainer
    does, to the base `.nemo` the config pins.
-2. `convert`: transcribe.cpp's `scripts/convert-parakeet.py`, from the pinned checkout, to F32.
+2. `convert`: transcribe.cpp's `scripts/convert-parakeet.py`, from the pinned checkout, to F32. It
+   takes the variant from the output folder's name, so the F32 goes in `<work>/<base repo name>/`.
 3. `quantize`: that checkout's `transcribe-quantize --quant Q8_0`.
 4. `general.name` is set to `hex-healing <version>`, so Hex's model list says which version it is.
 5. The tensor names must equal the base GGUF's, in order (T0.4).
@@ -221,7 +222,11 @@ def build(delta: Path, config_path: Path, output: Path, checkout: Path, base_ggu
         raise ExportError(f"{paths.base} is not the base the config pins ({config['base']['sha256'][:12]})")
     work = Path(tempfile.mkdtemp(prefix=".export-", dir=output.parent))
     try:
-        merged, f32, q8, named = (work / n for n in ("merged.nemo", "model-F32.gguf", "model-Q8_0.gguf", "named.gguf"))
+        # convert-parakeet.py reads the variant from its output's folder name (as roundtrip.sh lays it out)
+        slug = config["base"]["repo"].split("/")[-1]
+        (work / slug).mkdir()
+        merged, q8, named = (work / n for n in ("merged.nemo", "model-Q8_0.gguf", "named.gguf"))
+        f32 = work / slug / f"{slug}-F32.gguf"
         step("merge", [paths.python, "-I", MERGER, "--base", paths.base, "--delta", delta, "--rank", config["rank"],
                        "--alpha", config["alpha"], "--transcribe-cpp", checkout, "--out", merged])
         say(f"merged {delta.name} into {paths.base.name}")
