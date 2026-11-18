@@ -454,3 +454,13 @@ def test_pinned_golden_missing_from_the_eval_refuses():
     """Once golden is pinned, an eval without it (made before the freeze, or with fewer sets) is refused."""
     with pytest.raises(gate.GateRefused, match="pinned"):
         judge(world(), golden_pin={"sha256": GOLDEN_PIN, "n": 200})
+
+
+def test_no_long_clips_fails_streaming():
+    sets = world()
+    for by in sets.values():
+        for name in by:
+            by[name] = [{**r, "audio_ms": 5_000.0} for r in by[name]]
+    verdict = judge(sets)
+    assert verdict.failing == ["streaming"]
+    assert "unmeasured" in check(verdict, "streaming")["note"]

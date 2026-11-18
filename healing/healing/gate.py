@@ -217,26 +217,28 @@ def _drift(document: dict, candidate: str, v0: str, margins: Margins) -> Check:
                  threshold=margins.drift_guard, note=f"general WER {_wer(b):.4f} against v0's {_wer(base):.4f}")
 
 
-def _p95_long(document: dict, sha: str, margins: Margins) -> tuple[float | None, int, bool]:
-    """p95 of the benchmark's per-clip `inference_ms` over long clips of every scored set (all clips when
-    none is long): (p95, clips, whether they were long)."""
+def _p95_long(document: dict, sha: str, margins: Margins) -> tuple[float | None, int, str | None]:
+    """p95 of the benchmark's per-clip `inference_ms` over the long clips of every scored set: (p95, long
+    clips, None), or (None, 0, why) when the latency or the long clips are missing (unmeasured, never a
+    pass; short clips never stand in for long ones)."""
     rows = [r for s in document["sets"] for r in (_rows(document, sha, s["set"]) or [])]
     if not rows or any(r.get("inference_ms") is None or r.get("audio_ms") is None for r in rows):
-        return None, 0, False
-    long = [r for r in rows if r["audio_ms"] >= margins.long_clip_ms]
-    chosen = long or rows
-    return float(np.percentile([r["inference_ms"] for r in chosen], 95)), len(chosen), bool(long)
+        return None, 0, "the eval holds no per-clip latency"
+    long = [r["inference_ms"] for r in rows if r["audio_ms"] >= margins.long_clip_ms]
+    if not long:
+        return None, 0, f"no clip of at least {margins.long_clip_ms / 1000:g} s was scored"
+    return float(np.percentile(long, 95)), len(long), None
 
 
 def _streaming(document: dict, candidate: str, against: str, support: StreamSupport, margins: Margins) -> Check:
-    p95_b, n, long = _p95_long(document, candidate, margins)
-    p95_a, _, _ = _p95_long(document, against, margins)
+    p95_b, n, why_b = _p95_long(document, candidate, margins)
+    p95_a, _, why_a = _p95_long(document, against, margins)
     notes = [] if support.note is None else [support.note]
     if p95_a is None or p95_b is None:
         return Check("streaming", "fail", threshold=margins.streaming_p95_ms, unit="ms",
-                     note="; ".join(notes + ["the eval holds no per-clip latency, so time to text is unmeasured"]))
+                     note="; ".join(notes + [f"{why_b or why_a}, so time to text on long clips is unmeasured"]))
     estimate = p95_b - p95_a
-    notes.append(f"p95 {p95_b:.0f} ms against {p95_a:.0f} ms over {n} {'long' if long else 'clips (none long)'} clips")
+    notes.append(f"p95 {p95_b:.0f} ms against {p95_a:.0f} ms over {n} long clips")
     ok = support.streams and estimate <= margins.streaming_p95_ms
     return Check("streaming", "pass" if ok else "fail", estimate, threshold=margins.streaming_p95_ms, unit="ms",
                  note="; ".join(notes))
