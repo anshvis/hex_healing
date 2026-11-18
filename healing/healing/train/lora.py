@@ -159,6 +159,24 @@ def delta_problems(names, targets: list[str]) -> list[str]:
     return problems
 
 
+def metadata_problems(metadata: dict, rank: int, alpha: float, base_sha256: str | None = None) -> list[str]:
+    """Why a delta's `__metadata__` (`save_delta`) does not match the config it is merged with."""
+    problems = []
+    if metadata.get("format") != DELTA_FORMAT:
+        problems.append(f"the delta's format is {metadata.get('format')!r}, not {DELTA_FORMAT}")
+    try:
+        trained = (int(metadata.get("rank")), float(metadata.get("alpha")), float(metadata.get("scale")))
+    except (TypeError, ValueError):
+        return problems + ["the delta's metadata has no rank, alpha and scale"]
+    if trained[:2] != (rank, float(alpha)):
+        problems.append(f"the delta was trained at rank {trained[0]}, alpha {trained[1]:g}; the config says {rank}, {alpha:g}")
+    if abs(trained[2] - alpha / rank) > 1e-9:
+        problems.append(f"the delta's scale {trained[2]:g} is not alpha/rank")
+    if base_sha256 is not None and metadata.get("base_sha256") != base_sha256:
+        problems.append(f"the delta was trained on base {str(metadata.get('base_sha256'))[:12]}, the config pins {base_sha256[:12]}")
+    return problems
+
+
 def safetensors_header(path: Path) -> dict:
     """A safetensors file's header (tensor names, dtypes, shapes and `__metadata__`), read without torch."""
     with open(path, "rb") as handle:

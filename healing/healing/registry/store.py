@@ -227,13 +227,17 @@ def load() -> State:
 
 # ---- writes -------------------------------------------------------------------------------------
 
-def register(record: dict, publish: list[tuple[Path, str]] = (), scores: dict | None = None) -> str:
+def register(record: dict, publish: list[tuple[Path, str]] = (), scores: dict | None = None,
+             expect: str | None = None) -> str:
     """Store `publish` (each `(file, sha256)`) as objects and append the `registered` event (and `scored`,
     when given) for the next version number, all under one hold of the lock, so retention can never
-    delete an object between its store and the event that names it. Returns the name."""
+    delete an object between its store and the event that names it. Returns the name. With `expect`,
+    the next number must be that name (an export writes it into the GGUF before registering)."""
     with lock():
         state = load()
         name = state.next_name()
+        if expect is not None and name != expect:
+            raise RegistryError(f"another version took {expect} while this one was built; the next is {name}, so export again")
         if record.get("parent") and record["parent"] not in state.versions:
             raise RegistryError(f"parent {record['parent']} is not registered")
         for source, sha in publish:

@@ -175,6 +175,19 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--replay-source", type=Path, default=None,
                          help="LibriSpeech train-clean-100 parquet shards (default: $HEALING_HOME/cache/librispeech-train-clean-100)")
 
+    export = commands.add_parser("export", help="merge a LoRA delta, convert to Q8_0 GGUF and register a candidate (T6.3)")
+    export.add_argument("delta", type=Path, help="the round's out/lora_delta.safetensors")
+    export.add_argument("--config", type=Path, required=True, help="the round's out/lora.yaml")
+    export.add_argument("--snapshot", required=True, help="the registry snapshot's sha256, or the frozen train split it trained on")
+    export.add_argument("--parent", default="current", help="the version it was trained from")
+    export.add_argument("--converter-dir", type=Path, default=None,
+                        help="a transcribe.cpp checkout at the pinned rev (default: $HEALING_CONVERTER_DIR, else $HEALING_HOME/tools)")
+    export.add_argument("--hex", type=Path, default=None, help="the hex binary for the isolated import check")
+    export.add_argument("--tmp-dir", type=Path, default=None, help="where the ~3 GB of temp files go (default: $HEALING_HOME/registry/tmp)")
+    gguf_build = commands.add_parser("export-gguf", help="the recorded build command export and restore run (merge, convert, Q8_0, name)")
+    for flag in ("--delta", "--config", "--output", "--checkout", "--base-gguf"):
+        gguf_build.add_argument(flag, type=Path, required=True)
+    gguf_build.add_argument("--name", required=True, help="the GGUF's general.name")
     protocol = commands.add_parser("protocol").add_subparsers(dest="command", required=True)
     seeded = protocol.add_parser("corrections", help="the seeded edit-recall protocol (X-3)")
     seeded.add_argument("step", choices=["plan", "run", "score"])
@@ -222,6 +235,10 @@ def main(argv: list[str] | None = None) -> int:
         from healing.train import run as train_run
 
         return train_run.main(args)
+    if args.group in ("export", "export-gguf"):
+        from healing import export as export_module
+
+        return export_module.main(args)
     if args.group == "protocol":
         return _protocol(args)
     if args.group == "schedule":
