@@ -27,7 +27,6 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from math import comb
 from pathlib import Path
 
 from healing import manifest as manifest_module
@@ -49,13 +48,7 @@ class AbError(RuntimeError):
     pass
 
 
-def mcnemar_exact(wins: int, losses: int) -> float:
-    """Two-sided exact McNemar p-value: the discordant pairs split evenly under the null."""
-    n = wins + losses
-    if n == 0:
-        return 1.0
-    tail = sum(comb(n, k) for k in range(min(wins, losses) + 1))
-    return min(1.0, 2 * tail / 2 ** n)
+mcnemar_exact = stats.mcnemar_exact  # the one McNemar test lives in `healing.stats`
 
 
 @dataclass(frozen=True)
@@ -80,19 +73,15 @@ def term_result(without: list[dict], with_: list[dict]) -> TermResult:
     one clip that gets ten terms cannot stand for ten independent pieces of evidence. The term error rates
     stay per term, as description."""
     by_id = {row["id"]: row for row in with_}
-    clips = terms = misses_a = misses_b = wins = losses = 0
+    right_a, right_b = stats.clips_right(without), stats.clips_right(with_)
+    clips, terms, misses_a, misses_b = len(right_a), 0, 0, 0
     for row in without:
         expected = row["terms_expected"]
-        if not expected:
-            continue
-        other = by_id[row["id"]]
-        clips += 1
-        hits_a = [term in row["terms_hit"] for term in expected]
-        hits_b = [term in other["terms_hit"] for term in expected]
         terms += len(expected)
-        misses_a, misses_b = misses_a + hits_a.count(False), misses_b + hits_b.count(False)
-        right_a, right_b = all(hits_a), all(hits_b)
-        wins, losses = wins + (right_b and not right_a), losses + (right_a and not right_b)
+        misses_a += sum(term not in row["terms_hit"] for term in expected)
+        misses_b += sum(term not in by_id[row["id"]]["terms_hit"] for term in expected)
+    wins = sum(right_b[c] and not right_a[c] for c in right_a)
+    losses = sum(right_a[c] and not right_b[c] for c in right_a)
     if clips < MIN_TERM_CLIPS:
         return TermResult(clips, terms, None, None, wins, losses, None, False,
                           f"n/a: {clips} clip(s) hold a term, at least {MIN_TERM_CLIPS} are needed")

@@ -1,4 +1,4 @@
-"""Paired bootstrap over clips: the one bootstrap every gate uses.
+"""Paired statistics over clips: the one bootstrap and the one McNemar test every gate uses.
 
 Both sides are scored on the same clips. Each resample draws clips with
 replacement and recomputes each side's WER as total errors over total
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
+from math import comb
 from pathlib import Path
 
 import numpy as np
@@ -115,3 +116,19 @@ def _paired_arrays(
     errors_a = np.array([a[c].word_errors for c in ids], dtype=np.int64)
     errors_b = np.array([b[c].word_errors for c in ids], dtype=np.int64)
     return errors_a, errors_b, words
+
+
+def mcnemar_exact(wins: int, losses: int) -> float:
+    """Two-sided exact McNemar p-value: the discordant pairs split evenly under the null."""
+    n = wins + losses
+    if n == 0:
+        return 1.0
+    tail = sum(comb(n, k) for k in range(min(wins, losses) + 1))
+    return min(1.0, 2 * tail / 2 ** n)
+
+
+def clips_right(rows: list[dict]) -> dict[str, bool]:
+    """Per eval clip that expects a term: whether every term it expects was heard. McNemar counts
+    clips, not terms, so one clip that gets ten terms is not ten independent pieces of evidence."""
+    return {row["id"]: all(term in row["terms_hit"] for term in row["terms_expected"])
+            for row in rows if row["terms_expected"]}
