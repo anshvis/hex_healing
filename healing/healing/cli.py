@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     model_current.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
     models.add_parser("pin-golden", help="pin the frozen golden set's hash in the registry (G-10)")
 
-    train_group = commands.add_parser("train", help="Tier 2 training (M6): `prepare`, or a round with --local")
+    train_group = commands.add_parser("train", help="Tier 2 training (M6): `prepare`, `auto`, or a round with --local")
     train_group.add_argument("--local", action="store_true", help="train a LoRA round on this Mac's CPU (T6.5)")
     train_group.add_argument("--smoke", action="store_true", help="with --local: 20 steps over 50 clips")
     train_group.add_argument("--bundle", type=Path, default=None, help="with --local: the bundle `train prepare` wrote")
@@ -174,6 +174,9 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--seed", type=int, default=13)
     prepare.add_argument("--replay-source", type=Path, default=None,
                          help="LibriSpeech train-clean-100 parquet shards (default: $HEALING_HOME/cache/librispeech-train-clean-100)")
+
+    auto = train.add_parser("auto", help="start a round once 200 minutes of new strong speech are in (T6.4)")
+    auto.add_argument("--dry-run", action="store_true", help="print what it would do; read-only")
 
     export = commands.add_parser("export", help="merge a LoRA delta, convert to Q8_0 GGUF and register a candidate (T6.3)")
     export.add_argument("delta", type=Path, help="the round's out/lora_delta.safetensors")
@@ -228,8 +231,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.group == "train":
         if args.command == "prepare":
             return _train_prepare(args)
+        if args.command == "auto":
+            from healing.train import auto as train_auto
+
+            return train_auto.main(args)
         if not args.local:
-            train_group.error("give a subcommand (prepare) or --local")
+            train_group.error("give a subcommand (prepare, auto) or --local")
         if args.bundle is None:
             train_group.error("--local needs --bundle")
         from healing.train import run as train_run
