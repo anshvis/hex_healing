@@ -95,6 +95,9 @@ def test_fetch_writes_the_folder_replay_reads(hub):
     assert [u.id for u in utterances] == ["ls-19-198-0000", "ls-19-198-0001", "ls-26-495-0000"]
     samples = utterances[0].load()
     assert samples.dtype == np.int16 and len(samples) == 1600
+    # exFAT: macOS writes an AppleDouble `._<name>` beside each shard; replay must not read it as one
+    (result.folder / "._0000.parquet").write_bytes(b"\x00\x05\x16\x07")
+    assert len(list(replay.LocalLibriSpeech(replay.default_source()).utterances())) == 3
 
 
 def test_a_complete_verified_folder_is_a_no_op(hub):

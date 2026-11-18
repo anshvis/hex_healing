@@ -74,7 +74,8 @@ class LocalLibriSpeech:
     def utterances(self) -> Iterable[Utterance]:
         import pyarrow.parquet as parquet
 
-        shards = sorted(self.folder.glob("**/*.parquet")) if self.folder.is_dir() else []
+        # `._*` are the AppleDouble files macOS writes beside each file on exFAT (the external drive)
+        shards = sorted(p for p in self.folder.glob("**/*.parquet") if not p.name.startswith("._")) if self.folder.is_dir() else []
         if not shards:
             raise ReplayError(
                 f"no LibriSpeech train-clean-100 parquet shards in {self.folder} (Hugging Face's "
