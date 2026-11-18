@@ -177,8 +177,18 @@ already refuses a file whose tensors don't fit its variant. Checks:
 [transcription/custom_models.rs](../../src/transcription/custom_models.rs);
 `a_stream_refusal_names_the_model_or_the_device` in
 [transcription/engine.rs](../../src/transcription/engine.rs);
-`stream_imported_models_off_by_default` in [labs.rs](../../src/labs.rs). Not
-yet observed: the Labs page goldens with the new row (they render on Linux).
+`stream_imported_models_off_by_default` in [labs.rs](../../src/labs.rs).
+Observed once on an Apple M4 (debug build, isolated data folder, an audio
+fixture for the microphone, 2026-11-18): a merged Unified Q8_0 fine-tune
+imported with `streams_like: "parakeet_unified_en"`; lab off, `hex model list
+--json` said `"streams": false` and `/streams` sent no partials; lab on, its
+smoke stream passed on Metal, `"streams": true`, `/streams` sent partials
+while the audio played, and `hex dictation start`/`stop --print` finished
+through a live stream; `hex labs off` then read `"streams": false` again
+without a reload. macOS `/dictations` has no partials (the recognition loop
+doesn't stream a client's recording), so `/streams` stood in. Not yet
+observed: Live text under the HUD with an import, and the Labs page goldens
+with the new row (they render on Linux).
 
 ## Found On This Computer
 

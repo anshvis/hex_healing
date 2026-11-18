@@ -2089,8 +2089,10 @@ it on applies the next time the model loads. Checks:
 `streams_like_set_for_matching_variant`, `streams_false_with_lab_off`, and
 `smoke_failure_falls_back` in
 [custom_models.rs](../../src/transcription/custom_models.rs), and
-`stream_imported_models_off_by_default` in [labs.rs](../../src/labs.rs). Not
-yet observed: the row in the Linux goldens.
+`stream_imported_models_off_by_default` in [labs.rs](../../src/labs.rs).
+Observed on macOS with an isolated Hex: off and on, `hex model list --json`
+and `/streams` partials follow the lab (own-models.md › Stream imported
+models). Not yet observed: the row in the Linux goldens.
 
 Downloaded models only (`picker-downloaded`, issue 1018, every OS): for
 seeing which speech models take disk space and deleting unused ones. While
