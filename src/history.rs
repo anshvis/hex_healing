@@ -856,6 +856,16 @@ impl History {
             .collect()
     }
 
+    /// The newest entry within retention, printed ones included: what
+    /// Labs › Tidy after paste reviews.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn newest(&self) -> Option<HistoryEntry> {
+        self.synced()
+            .search("", now_ms())
+            .first()
+            .map(|&entry| entry.clone())
+    }
+
     /// The text entry `id` inserted, if it is still retained.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn final_text(&self, id: u64) -> Option<String> {

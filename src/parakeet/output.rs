@@ -108,6 +108,7 @@ pub(super) fn finish_output(
             let result = result.and_then(|mut completed| {
                 let paste_started = Instant::now();
                 let mut sent = false;
+                let mut copied = false;
                 let mut watch = Watch::default();
                 if !completed.nothing && !completed.text.trim().is_empty() {
                     match target {
@@ -140,6 +141,7 @@ pub(super) fn finish_output(
                             } else {
                                 PasteMode::Continue
                             };
+                            copied = matches!(mode, PasteMode::CopyOnly);
                             // Labs › Return to app: the app the capture
                             // started in comes back first. When it can't,
                             // nothing is pasted; the text stays for Paste
@@ -196,6 +198,11 @@ pub(super) fn finish_output(
                         record_history(history, target, sent, &mut completed)
                     });
                     watch.recorded(corrections, history, entry_id, &completed.text);
+                    // Labs › Tidy after paste: a review of an older dictation
+                    // closes, and a copy-only one offers a copy.
+                    if !matches!(target, TranscriptionTarget::Service) {
+                        crate::dictation::tidy::last::committed(entry_id, copied);
+                    }
                 }
                 tracing::info!(
                     audio_ms = completed.timings.audio_ms,
