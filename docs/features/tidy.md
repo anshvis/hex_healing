@@ -68,11 +68,13 @@ Apply                                                // dictation::tidy::apply
 ├── locate the pasted text by hash: exactly once, else Moved (D-75); the
 │   dictation inside it may only differ by leading whitespace and one first
 │   letter's case (D-76), else unsupported (Differs)
-├── every edit runs under the delivery lock a dictation's paste also takes; a
-│   dictation paste since the anchor was taken -> nothing sent (D-79)
+├── the edit, its read-backs, and any fallback run under the delivery lock a
+│   dictation's paste also takes; a dictation paste since the anchor was taken
+│   -> nothing sent (D-79)
 ├── AXSelectedTextRange + AXSelectedText when both are settable: one undo step
-│   └── ignored by the field -> the app still frontmost and the field focused,
-│       read again and placed from that read, then Hex's paste over it (D-77, D-79)
+│   └── ignored by the field -> read again and placed from that read; the app
+│       still frontmost and the field focused right before Hex's paste over it;
+│       refused -> the selection collapses to the range's end (D-77, D-79)
 └── re-read: exactly the plan (outside the range byte-identical) -> applied;
     anything else -> Unverified, "Check the text; ⌘Z undoes it", anchor spent
 ```

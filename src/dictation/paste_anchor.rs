@@ -204,7 +204,11 @@ pub(crate) fn take_for(entry_id: u64, generation: u64, now: Instant) -> Result<P
 
 /// See [`Slot::restore`]; nothing is put back once a newer paste started
 /// (`pastes` is the count noted before the anchor was taken).
+/// Compared under the delivery lock [`begin_paste`] takes, so a paste can't
+/// start between the check and the restore. Never call it while holding a
+/// [`deliver`] guard.
 pub(crate) fn restore(anchor: PasteAnchor, pastes: u64) {
+    let _delivery = deliver();
     if self::pastes() == pastes {
         SLOT.restore(anchor);
     }

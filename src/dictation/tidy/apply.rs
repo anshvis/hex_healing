@@ -354,25 +354,13 @@ pub(crate) fn apply(
         Err(NoPlan::Moved) => return Outcome::Moved,
         Err(NoPlan::Differs) => return Outcome::Unsupported(Why::Differs),
     };
-    if target.can_set_text() {
-        if let Err(why) = target.begin_edit() {
-            return Outcome::Unsupported(why);
-        }
-        let sent = target.select(plan.range.clone()) && target.set_selected_text(&plan.replacement);
-        target.end_edit();
-        if sent {
-            match read_back(target, &before, &plan) {
-                Check::Applied => return Outcome::Applied(Method::SelectedText),
-                Check::Other => return Outcome::Unsupported(Why::Unverified),
-                // Accepted but ignored (some web views): paste instead.
-                Check::Unchanged => {}
-            }
-        }
-    }
+    // The delivery lock is held from the first edit through the read-backs
+    // and any fallback, so no dictation paste lands on a range Tidy has
+    // selected or is still checking (D-79).
     if let Err(why) = target.begin_edit() {
         return Outcome::Unsupported(why);
     }
-    let pasted = paste_fallback(
+    let outcome = edit(
         target,
         &before,
         &plan,
@@ -382,20 +370,64 @@ pub(crate) fn apply(
         edits,
     );
     target.end_edit();
-    match pasted {
-        Err(outcome) => outcome,
-        Ok((before, plan)) => match read_back(target, &before, &plan) {
+    outcome
+}
+
+/// The edit itself, under the delivery lock: `AXSelectedText` when the
+/// field takes it, else (or when it ignored it) the paste fallback.
+fn edit(
+    target: &mut impl Target,
+    before: &[u16],
+    plan: &Plan,
+    inserted: &Inserted,
+    expected_start: Option<usize>,
+    text: &str,
+    edits: &[Suggestion],
+) -> Outcome {
+    if target.can_set_text() {
+        let selected = target.select(plan.range.clone());
+        if selected && target.set_selected_text(&plan.replacement) {
+            match read_back(target, before, plan) {
+                Check::Applied => return Outcome::Applied(Method::SelectedText),
+                Check::Other => return Outcome::Unsupported(Why::Unverified),
+                // Accepted but ignored (some web views): paste instead.
+                Check::Unchanged => {}
+            }
+        }
+    }
+    match paste_fallback(target, before, plan, inserted, expected_start, text, edits) {
+        Fallback::Pasted(before, plan) => match read_back(target, &before, &plan) {
             Check::Applied => Outcome::Applied(Method::Paste),
             Check::Unchanged | Check::Other => Outcome::Unsupported(Why::Unverified),
         },
+        Fallback::LandedLate => Outcome::Applied(Method::SelectedText),
+        Fallback::Refused(outcome, range) => {
+            // Nothing went in, but the pasted range may still be selected:
+            // collapse it to its end, so the next dictation's paste appends
+            // rather than replacing it.
+            if let Some(range) = range {
+                target.select(range.end..range.end);
+            }
+            outcome
+        }
     }
 }
 
-/// The paste fallback, under the delivery lock: the app must still be
-/// frontmost with the anchored field focused (the paste goes to whatever
-/// has the keys), and the field is read again, since the person may have
-/// typed during the read-backs, so the range is placed from that read.
-/// Returns the read and plan the paste went in against.
+/// What the paste fallback did.
+enum Fallback {
+    /// Pasted, against this read of the field and this plan.
+    Pasted(Vec<u16>, Plan),
+    /// The ignored `AXSelectedText` landed late after all.
+    LandedLate,
+    /// Nothing was pasted, for this outcome; the range Tidy may have left
+    /// selected, if it is still where the field says.
+    Refused(Outcome, Option<Range<usize>>),
+}
+
+/// The paste fallback: the field is read again, since the person may have
+/// typed during the read-backs, and the range is placed from that read;
+/// then, right before the paste (which goes to whatever has the keys), the
+/// app must still be frontmost with the anchored field focused.
 fn paste_fallback(
     target: &mut impl Target,
     before: &[u16],
@@ -404,31 +436,41 @@ fn paste_fallback(
     expected_start: Option<usize>,
     text: &str,
     edits: &[Suggestion],
-) -> Result<(Vec<u16>, Plan), Outcome> {
-    if !target.is_frontmost() {
-        return Err(Outcome::Unsupported(Why::OtherApp));
-    }
-    if !target.is_focused() {
-        return Err(Outcome::Unsupported(Why::OtherField));
-    }
-    let now = target.read().map_err(Outcome::Unsupported)?;
+) -> Fallback {
+    let now = match target.read() {
+        Ok(now) => now,
+        Err(why) => return Fallback::Refused(Outcome::Unsupported(why), None),
+    };
     if now == plan.after {
-        // The ignored `AXSelectedText` landed late after all.
-        return Err(Outcome::Applied(Method::SelectedText));
+        return Fallback::LandedLate;
     }
     let plan = if now == before {
         plan.clone()
     } else {
         match self::plan(&now, inserted, expected_start, text, edits) {
             Ok(plan) => plan,
-            Err(NoPlan::Moved) => return Err(Outcome::Moved),
-            Err(NoPlan::Differs) => return Err(Outcome::Unsupported(Why::Differs)),
+            Err(NoPlan::Moved) => return Fallback::Refused(Outcome::Moved, None),
+            Err(NoPlan::Differs) => {
+                return Fallback::Refused(Outcome::Unsupported(Why::Differs), None);
+            }
         }
     };
-    if !target.select(plan.range.clone()) || !target.paste(&plan.replacement) {
-        return Err(Outcome::Unsupported(Why::NotEditable));
+    let refused = |why| Fallback::Refused(Outcome::Unsupported(why), Some(plan.range.clone()));
+    if !target.select(plan.range.clone()) {
+        return refused(Why::NotEditable);
     }
-    Ok((now, plan))
+    // Checked last, after the read and the selection: the keys go wherever
+    // the focus is when the paste is sent.
+    if !target.is_frontmost() {
+        return refused(Why::OtherApp);
+    }
+    if !target.is_focused() {
+        return refused(Why::OtherField);
+    }
+    if !target.paste(&plan.replacement) {
+        return refused(Why::NotEditable);
+    }
+    Fallback::Pasted(now, plan)
 }
 
 /// Re-reads until the field shows the plan or something else, or the
@@ -833,9 +875,10 @@ mod tests {
         paste_lost: bool,
         /// Another app comes to the front during the read-backs.
         leaves_front: bool,
-        /// Typed into the field after the last read-back, just before the
-        /// fallback.
+        /// Typed into the field (at, text) after the last read-back, just
+        /// before the fallback's read.
         typed_meanwhile: Option<(usize, &'static str)>,
+        reads: usize,
         /// What `begin_edit` refuses with.
         refuse_edit: Option<Why>,
         editing: bool,
@@ -857,6 +900,7 @@ mod tests {
                 paste_lost: false,
                 leaves_front: false,
                 typed_meanwhile: None,
+                reads: 0,
                 refuse_edit: None,
                 editing: false,
                 pasted: 0,
@@ -884,6 +928,16 @@ mod tests {
         }
         fn read(&mut self) -> Result<Vec<u16>, Why> {
             assert!(!self.secure, "read a secure field");
+            if self.set + self.pasted > 0 {
+                assert!(self.editing, "read back outside the delivery lock");
+            }
+            // The first read, then every read-back of the ignored edit.
+            if self.reads == 1 + READ_BACKS
+                && let Some((at, typed)) = self.typed_meanwhile.take()
+            {
+                self.value.splice(at..at, typed.encode_utf16());
+            }
+            self.reads += 1;
             Ok(self.value.clone())
         }
         fn can_set_text(&mut self) -> bool {
@@ -904,9 +958,6 @@ mod tests {
             true
         }
         fn is_focused(&mut self) -> bool {
-            if let Some((at, typed)) = self.typed_meanwhile.take() {
-                self.value.splice(at..at, typed.encode_utf16());
-            }
             self.focused
         }
         fn paste(&mut self, text: &str) -> bool {
@@ -1063,6 +1114,9 @@ mod tests {
             Outcome::Unsupported(Why::OtherApp)
         );
         assert_eq!((fake.set, fake.pasted), (1, 0));
+        // The pasted range isn't left selected for the next paste.
+        assert_eq!(fake.selection, 13..13);
+        assert!(!fake.editing, "the delivery lock is released");
     }
 
     /// Typing after the read-backs: the fallback places the range from a

@@ -34,22 +34,34 @@ unsafe extern "C" {
 }
 
 /// Whether the element is a secure (password) field, asked before anything
-/// else is read. Fails closed: a gone or unanswering element, or a role or
-/// subrole that can't be read, is an error, never "no".
+/// else is read. Fails closed: a gone or unanswering element, a missing or
+/// non-string role, or a subrole that is there but can't be read as a
+/// string is an error, never "no". Only the subrole may be absent.
 pub fn is_secure(element: &RetainedElement) -> Result<bool, ReadError> {
     secure(&element.0)
 }
 
 fn secure(element: &CfObject) -> Result<bool, ReadError> {
-    for name in [c"AXRole", c"AXSubrole"] {
-        // An attribute the element doesn't have is `None`; any other
-        // failure is an error.
-        let value = read_attribute(element, name)?;
-        if value.and_then(|value| cf_string(value.0)).as_deref() == Some("AXSecureTextField") {
-            return Ok(true);
-        }
+    let role = read_attribute(element, c"AXRole")?
+        .and_then(|value| string_value(&value))
+        .ok_or(ReadError::Failed)?;
+    let subrole = match read_attribute(element, c"AXSubrole")? {
+        None => None,
+        Some(value) => Some(string_value(&value).ok_or(ReadError::Failed)?),
+    };
+    Ok([Some(role), subrole]
+        .into_iter()
+        .flatten()
+        .any(|name| name == "AXSecureTextField"))
+}
+
+/// A Core Foundation string's text; anything else is `None`.
+fn string_value(value: &CfObject) -> Option<String> {
+    // SAFETY: `value` is a live Core Foundation object.
+    if unsafe { CFGetTypeID(value.0) != CFStringGetTypeID() } {
+        return None;
     }
-    Ok(false)
+    cf_string(value.0)
 }
 
 /// The field's whole value in UTF-16 units, when it holds at most

@@ -60,9 +60,6 @@ pub(super) fn run_output_worker(
                 job,
                 // What the paste inserted is what the watcher is told.
                 &mut |text, mode| {
-                    // Every paste releases the last dictation's anchor, and
-                    // waits for a Tidy edit already going into a field.
-                    let _delivery = crate::dictation::paste_anchor::begin_paste();
                     paster.paste(text, mode)?;
                     Ok(paster.inserted())
                 },
@@ -161,6 +158,12 @@ pub(super) fn finish_output(
                                 );
                                 return Err(error.to_string());
                             }
+                            // Every paste releases the last dictation's
+                            // anchor, and waits for a Tidy edit already going
+                            // into a field; held through the correction
+                            // baseline read and the paste, so neither sees a
+                            // field half-way through Tidy's edit (D-79).
+                            let _delivery = crate::dictation::paste_anchor::begin_paste();
                             // Labs › Learn from corrections: not a Send or copy only.
                             if matches!(mode, PasteMode::Continue) {
                                 watch = Watch::before(corrections, history);
