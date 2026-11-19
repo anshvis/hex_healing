@@ -129,11 +129,22 @@ fn observation(latency_ms: u64, fallback: Option<String>) -> ProcessingObservati
     }
 }
 
+/// One plain-text on-device answer within [`TIME_BUDGET`]: this stage's
+/// pass, and Labs › Tidy after paste's model pass (`dictation::tidy`),
+/// share it so there is one model client and one budget.
+#[cfg(target_os = "macos")]
+pub(crate) fn ask(
+    instructions: &str,
+    prompt: &str,
+) -> Result<String, crate::meeting::generator::GenerationError> {
+    crate::apple_intelligence::generate_text(instructions, prompt, TIME_BUDGET)
+}
+
 /// One on-device pass, with the time budget the bridge enforces.
 #[cfg(target_os = "macos")]
 fn clean(text: &str) -> (String, Option<ProcessingObservation>) {
     let started = Instant::now();
-    let outcome = crate::apple_intelligence::generate_text(INSTRUCTIONS, text, TIME_BUDGET);
+    let outcome = ask(INSTRUCTIONS, text);
     let latency_ms = started.elapsed().as_millis() as u64;
     match outcome {
         Ok(answer) => {
@@ -173,6 +184,15 @@ fn fallback(text: &str, latency_ms: u64, reason: &str) -> (String, Option<Proces
         text.to_owned(),
         Some(observation(latency_ms, Some(reason.to_owned()))),
     )
+}
+
+/// Whether Apple Intelligence can run now, from the cached availability, so
+/// asking costs no wait.
+/// Until T8.3 wires Tidy after paste, nothing reaches its caller.
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+pub(crate) fn available() -> bool {
+    unavailable_reason().is_none()
 }
 
 /// Why Apple Intelligence can't run now, or `None` when it can. The answer is
@@ -346,7 +366,9 @@ const CJK_DIGITS: &[char] = &[
     '万', '萬', '亿', '億', '兆',
 ];
 
-fn words(text: &str) -> Vec<String> {
+/// `text`'s words, lowercase, with inner apostrophes kept: what the guard
+/// compares, and what Tidy after paste counts a model edit's words with.
+pub(crate) fn words(text: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut current = String::new();
     for character in text.to_lowercase().chars() {
