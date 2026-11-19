@@ -70,6 +70,9 @@ def gate_problem(state: State, version: Version) -> str | None:
     passed, was not refused, was judged against the version current now, and judged the GGUFs the
     candidate and current hold now (a restore that swapped either one voids it)."""
     name, gate = version.name, version.last_gate
+    if version.state == "rolled_back":
+        return (f"{name} was rolled back, and a rolled-back version is never promoted again; "
+                "a new training round makes a new version (D-60)")
     if version.state != "candidate":
         return f"{name} is {version.state}; only a candidate that passed the gate is promoted"
     if gate is None:
@@ -294,9 +297,11 @@ def _cleanup(binary: Path, say: Callable[[str], None]) -> None:
 # ---- rollback --------------------------------------------------------------------------------------
 
 def _rollback(to: str | None, reason: str, binary: Path, say: Callable[[str], None], confirm_s: float,
-              poll_s: float) -> int:
+              poll_s: float, expect_leaving: str | None = None) -> int:
     state = registry.load()
     leaving = state.get("current")
+    if expect_leaving is not None and leaving.name != expect_leaving:
+        raise ShipError(f"the current version is {leaving.name} now, not {expect_leaving}; nothing rolled back")
     target_name = state.get(to).name if to is not None else registry._fallback(state, leaving.name)
     if target_name is None:
         raise ShipError(f"{leaving.name} is current and no other promoted version could take over")
@@ -342,8 +347,9 @@ def promote(name: str, *, binary: Path, say: Callable[[str], None] = print, conf
 
 
 def rollback(*, binary: Path, to: str | None = None, reason: str | None = None, say: Callable[[str], None] = print,
-             confirm_s: float = CONFIRM_S, poll_s: float = POLL_S) -> int:
-    return _guarded(lambda: _rollback(to, reason or "manual", Path(binary), say, confirm_s, poll_s), say)
+             confirm_s: float = CONFIRM_S, poll_s: float = POLL_S, expect_leaving: str | None = None) -> int:
+    """`expect_leaving` (`healing watch`'s): roll back only while that version is still current."""
+    return _guarded(lambda: _rollback(to, reason or "manual", Path(binary), say, confirm_s, poll_s, expect_leaving), say)
 
 
 def main(args) -> int:
