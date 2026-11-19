@@ -56,7 +56,7 @@ const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25205;
 const AX_ERROR_NO_VALUE: i32 = -25212;
 
 /// An attribute with its failure kept: `Ok(None)` when the element has none.
-fn read_attribute(
+pub(super) fn read_attribute(
     element: &CfObject,
     name: &std::ffi::CStr,
 ) -> Result<Option<CfObject>, ReadError> {

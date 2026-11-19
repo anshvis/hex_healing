@@ -45,7 +45,7 @@ impl Inserted {
         }
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn utf16_len(&self) -> usize {
         self.utf16_len
     }
@@ -274,6 +274,7 @@ pub(crate) enum Why {
     /// An edit was sent but the re-read doesn't show exactly the plan.
     Unverified,
     /// No Accessibility on this OS.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     NotOnThisOs,
 }
 
@@ -378,6 +379,149 @@ fn read_back(target: &mut impl Target, before: &[u16], plan: &Plan) -> Check {
         }
     }
     Check::Unchanged
+}
+
+/// Applies `session`'s accepted edits to the field its dictation was
+/// pasted into, through the anchor the paste left for that dictation (the
+/// same History entry and commit). An anchor the apply didn't use up goes
+/// back for another try; one that applied, or whose edit couldn't be
+/// confirmed, is spent.
+#[cfg(target_os = "macos")]
+pub(crate) fn apply_to_last(session: &super::session::TidySession) -> Outcome {
+    let edits = session.accepted_suggestions();
+    let outcome = match crate::dictation::paste_anchor::take_for(
+        session.dictation_id,
+        session.generation,
+        std::time::Instant::now(),
+    ) {
+        Err(why) => Outcome::Unsupported(why),
+        Ok(anchor) => {
+            let outcome = apply(
+                &mut ax::AxTarget::new(&anchor),
+                &anchor.inserted,
+                anchor.expected_start,
+                &session.text,
+                &edits,
+            );
+            if !matches!(
+                outcome,
+                Outcome::Applied(_) | Outcome::Unsupported(Why::Unverified)
+            ) {
+                crate::dictation::paste_anchor::restore(anchor);
+            }
+            outcome
+        }
+    };
+    log(outcome, edits.len());
+    outcome
+}
+
+/// Linux and Windows have no tidy review (D-70) and no Accessibility edit.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn apply_to_last(session: &super::session::TidySession) -> Outcome {
+    let outcome = Outcome::Unsupported(Why::NotOnThisOs);
+    log(outcome, session.accepted_count());
+    outcome
+}
+
+/// The outcome, its method or reason, and the edit count; never text.
+fn log(outcome: Outcome, edits: usize) {
+    let method = match outcome {
+        Outcome::Applied(Method::SelectedText) => "ax-selected-text",
+        Outcome::Applied(Method::Paste) => "paste-fallback",
+        _ => "none",
+    };
+    let why = match outcome {
+        Outcome::Unsupported(why) => format!("{why:?}"),
+        _ => String::new(),
+    };
+    tracing::info!(outcome = outcome.kind(), method, why, edits, "tidy apply");
+}
+
+/// The anchored Accessibility element as an apply's [`Target`].
+#[cfg(target_os = "macos")]
+mod ax {
+    use std::ops::Range;
+    use std::time::{Duration, Instant};
+
+    use super::{MAX_FIELD_UNITS, Target, Why};
+    use crate::accessibility::{ReadError, edit};
+    use crate::dictation::paste_anchor::PasteAnchor;
+
+    /// How long the app Hex pasted into has to be frontmost again after the
+    /// capsule hands the keys back, and how often that is asked.
+    const FRONT_WAIT: Duration = Duration::from_millis(600);
+    const FRONT_POLL: Duration = Duration::from_millis(20);
+    /// Between re-reads of an edit.
+    const READ_BACK_PAUSE: Duration = Duration::from_millis(50);
+
+    pub(super) struct AxTarget<'a> {
+        anchor: &'a PasteAnchor,
+    }
+
+    impl<'a> AxTarget<'a> {
+        pub(super) fn new(anchor: &'a PasteAnchor) -> Self {
+            Self { anchor }
+        }
+    }
+
+    fn why(error: ReadError) -> Why {
+        match error {
+            ReadError::Secure => Why::SecureField,
+            ReadError::TooLarge => Why::TooLarge,
+            ReadError::ElementGone | ReadError::Timeout | ReadError::Failed => Why::Unreadable,
+        }
+    }
+
+    impl Target for AxTarget<'_> {
+        fn is_secure(&mut self) -> Result<bool, Why> {
+            edit::is_secure(&self.anchor.element).map_err(why)
+        }
+
+        fn owner_in_front(&mut self) -> bool {
+            let deadline = Instant::now() + FRONT_WAIT;
+            loop {
+                if crate::dictation::context::frontmost_pid() == Some(self.anchor.pid) {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(FRONT_POLL);
+            }
+        }
+
+        fn read(&mut self) -> Result<Vec<u16>, Why> {
+            edit::read_units(&self.anchor.element, MAX_FIELD_UNITS).map_err(why)
+        }
+
+        fn can_set_text(&mut self) -> bool {
+            edit::is_settable(&self.anchor.element, c"AXSelectedTextRange")
+                && edit::is_settable(&self.anchor.element, c"AXSelectedText")
+        }
+
+        fn select(&mut self, range: Range<usize>) -> bool {
+            edit::select(&self.anchor.element, range)
+        }
+
+        fn set_selected_text(&mut self, text: &str) -> bool {
+            edit::set_selected_text(&self.anchor.element, text)
+        }
+
+        fn is_focused(&mut self) -> bool {
+            edit::is_focused(self.anchor.pid, &self.anchor.element)
+        }
+
+        fn paste(&mut self, text: &str) -> bool {
+            crate::paste::replace_selection(text)
+                .inspect_err(|error| tracing::warn!(%error, "tidy could not paste its edit"))
+                .is_ok()
+        }
+
+        fn wait(&mut self) {
+            std::thread::sleep(READ_BACK_PAUSE);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -582,6 +726,10 @@ mod tests {
         settable: bool,
         ignores_set: bool,
         focused: bool,
+        /// `AXSelectedText` lands, but the app changes more than the range.
+        mangles: bool,
+        /// The paste goes nowhere.
+        paste_lost: bool,
         pasted: usize,
         set: usize,
     }
@@ -596,6 +744,8 @@ mod tests {
                 settable: true,
                 ignores_set: false,
                 focused: true,
+                mangles: false,
+                paste_lost: false,
                 pasted: 0,
                 set: 0,
             }
@@ -632,7 +782,9 @@ mod tests {
         }
         fn set_selected_text(&mut self, text: &str) -> bool {
             self.set += 1;
-            if !self.ignores_set {
+            if self.mangles {
+                self.replace_selection(&format!("{text}!"));
+            } else if !self.ignores_set {
                 self.replace_selection(text);
             }
             true
@@ -642,7 +794,9 @@ mod tests {
         }
         fn paste(&mut self, text: &str) -> bool {
             self.pasted += 1;
-            self.replace_selection(text);
+            if !self.paste_lost {
+                self.replace_selection(text);
+            }
             true
         }
         fn wait(&mut self) {}
@@ -723,5 +877,27 @@ mod tests {
         assert_eq!(run(&mut edited, "um we ship it", Some(0)), Outcome::Moved);
         assert_eq!((edited.set, edited.pasted), (0, 0));
         assert_eq!(edited.text(), "um we shipped it");
+    }
+
+    /// An edit the re-read can't confirm is reported, never retried or
+    /// pasted over a second time: the field may already hold it, and the
+    /// capsule says to check the text and that ⌘Z undoes it.
+    #[test]
+    fn an_edit_the_reread_cannot_confirm_is_unverified() {
+        let mut mangled = Fake::new("um we ship it");
+        mangled.mangles = true;
+        assert_eq!(
+            run(&mut mangled, "um we ship it", Some(0)),
+            Outcome::Unsupported(Why::Unverified)
+        );
+        assert_eq!((mangled.set, mangled.pasted), (1, 0));
+        let mut lost = Fake::new("um we ship it");
+        lost.settable = false;
+        lost.paste_lost = true;
+        assert_eq!(
+            run(&mut lost, "um we ship it", Some(0)),
+            Outcome::Unsupported(Why::Unverified)
+        );
+        assert_eq!((lost.set, lost.pasted), (0, 1));
     }
 }

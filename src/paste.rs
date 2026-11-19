@@ -190,7 +190,7 @@ impl Paster {
             clipboard: NSPasteboard::generalPasteboard(),
             activity,
             continuation: None,
-            clipboard_restore: Arc::new(Mutex::new(ClipboardRestore::default())),
+            clipboard_restore: shared_restore(),
             prepared_clipboard: None,
         }
     }
@@ -254,6 +254,18 @@ impl Paster {
             None if crate::labs::smart_spacing() => with_smart_spacing(text),
             None => text.to_string(),
         };
+        self.deliver(&text, mode)?;
+        self.continuation = (!matches!(mode, PasteMode::Standalone)).then_some(Continuation {
+            revision,
+            inserted: text,
+        });
+        Ok(())
+    }
+
+    /// Puts `text` into the focused field as it stands: typed into a
+    /// Chromium 155 or 156 app, else pasted through the clipboard with the
+    /// generation-safe restore.
+    fn deliver(&mut self, text: &str, mode: PasteMode) -> Result<()> {
         if crate::dictation::context::frontmost_bundle_path()
             .is_some_and(|bundle| has_clipboard_race(&bundle))
         {
@@ -261,23 +273,19 @@ impl Paster {
                 self.continuation = None;
             }
             tracing::debug!("typing instead of pasting into Chromium 155 or 156");
-            keyboard::type_text(&text)?;
+            keyboard::type_text(text)?;
             if crate::labs::keep_on_clipboard() {
                 self.clipboard_restore
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .keep();
-                if let Err(error) = write_clipboard_text(&self.clipboard, &text, false) {
+                if let Err(error) = write_clipboard_text(&self.clipboard, text, false) {
                     tracing::warn!(%error, "could not leave the dictation on the clipboard");
                 }
             }
         } else {
-            self.paste_through_clipboard(&text, mode)?;
+            self.paste_through_clipboard(text, mode)?;
         }
-        self.continuation = (!matches!(mode, PasteMode::Standalone)).then_some(Continuation {
-            revision,
-            inserted: text,
-        });
         Ok(())
     }
 
@@ -376,6 +384,22 @@ impl Paster {
             thread::sleep,
         )
     }
+}
+
+/// The one clipboard restore every [`Paster`] shares, so a paste from
+/// another thread (Tidy's fallback) supersedes a dictation's pending restore
+/// and keeps the person's original clipboard, as a second dictation would.
+fn shared_restore() -> Arc<Mutex<ClipboardRestore>> {
+    static RESTORE: std::sync::OnceLock<Arc<Mutex<ClipboardRestore>>> = std::sync::OnceLock::new();
+    RESTORE.get_or_init(Default::default).clone()
+}
+
+/// Labs › Tidy after paste's fallback: pastes `text` over the focused
+/// field's selection exactly as given (no continuation join, no Smart
+/// spacing), through the dictation path: typed into Chromium 155 or 156,
+/// else the clipboard, ⌘V, and the shared generation-safe restore.
+pub fn replace_selection(text: &str) -> Result<()> {
+    Paster::new(InputActivity::default()).deliver(text, PasteMode::Standalone)
 }
 
 /// Whether the app at `bundle` embeds a Chromium 155 or 156 framework. Every
