@@ -1,7 +1,9 @@
 """`healing schedule install|remove|show`: the user launchd jobs.
 
-`collect` (the default) runs `healing schedule run` (collect, then prune) at hours 0, 6, 12 and 18
-and at load. `train-auto` (T6.4, optional, never installed by default) runs `healing train auto`
+`collect` (the default) runs `healing schedule run` (collect, prune, clean, then `healing watch`, T7.3)
+at hours 0, 6, 12 and 18 and at load. Watch is last so it counts the clips that collect just copied and
+scores after clean has freed space; it is what rolls a significantly worse promotion back (G-8: on your
+real Hex, only this job you installed does that). `train-auto` (T6.4, optional, never installed by default) runs `healing train auto`
 once a day at 03:00, so a round starts within a day of crossing 200 minutes; not at load, so a
 login never starts hours of training.
 StartCalendarInterval is used because launchd runs a firing missed during sleep on wake, while
@@ -136,16 +138,26 @@ def show(directory: Path | None = None, job: Job = COLLECT) -> str:
 
 
 def run_once() -> int:
-    """What the job runs: collect, prune, clean. Each runs even when the one before failed."""
-    from healing.budget import PruneError, prune
+    """What the job runs: collect, prune, clean, watch. Each runs even when the one before failed."""
     from healing.collect import main_collect
-    from healing.store import Store, StoreError, process_lock
 
     try:
         code = main_collect(None, None)
     except Exception as error:  # type name only: a message could carry transcript text (G-4)
         print(f"error: collect failed ({type(error).__name__})", file=sys.stderr)
         code = 1
+    pruned = _prune_after()
+    code = code or pruned
+    cleaned = _clean_after()
+    watched = _watch_after()
+    return code or cleaned or watched
+
+
+def _prune_after() -> int:
+    """`healing prune` after collect, under its own lock."""
+    from healing.budget import PruneError, prune
+    from healing.store import Store, StoreError, process_lock
+
     try:
         with process_lock():
             store = Store()
@@ -155,12 +167,26 @@ def run_once() -> int:
                 store.close()
     except PruneError as error:
         print(f"error: {error}", file=sys.stderr)
-        code = code or error.code
+        return error.code
     except StoreError as error:
         print(f"error: {error}", file=sys.stderr)
-        code = code or 1
-    cleaned = _clean_after()
-    return code or cleaned
+        return 1
+    return 0
+
+
+def _watch_after() -> int:
+    """`healing watch` after clean (T7.3), with the `hex` the job was installed with; its lines hold
+    versions and numbers only, and an unexpected failure is named by type only (G-4)."""
+    from healing import watch
+
+    try:
+        return watch.run(binary=history_hex())
+    except BenchError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    except Exception as error:
+        print(f"error: watch failed ({type(error).__name__})", file=sys.stderr)
+        return 1
 
 
 def _clean_after() -> int:

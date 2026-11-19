@@ -85,3 +85,14 @@ def test_reads_benchmark_clip_records(tmp_path):
         )
     )
     assert read_clip_scores(path) == {"a": ClipScore("a", 2, 9)}
+
+
+def test_paired_quantile_deltas_resample_clips_together():
+    import numpy as np
+
+    from healing import stats
+
+    a = np.arange(100, dtype=float)
+    assert not stats.paired_quantile_deltas(a, a, 95, resamples=200, seed=1).any()  # same clips, same p95
+    shifted = stats.paired_quantile_deltas(a, a + 50, 95, resamples=200, seed=1)
+    assert np.allclose(shifted, 50)

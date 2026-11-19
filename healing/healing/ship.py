@@ -39,6 +39,7 @@ EXIT_HEX_DOWN = 2
 EXIT_NO_GATE = 8
 EXIT_MISMATCH = 9
 EXIT_LAB_OFF = 10
+EXIT_SWITCHED = 11  # `healing watch`'s rollback: Hex no longer runs the version it would roll back
 CONFIRM_S = 60.0
 POLL_S = 1.0
 IMPORT_TIMEOUT_S = 900  # `hex model import` copies and hashes ~700 MB
@@ -70,6 +71,9 @@ def gate_problem(state: State, version: Version) -> str | None:
     passed, was not refused, was judged against the version current now, and judged the GGUFs the
     candidate and current hold now (a restore that swapped either one voids it)."""
     name, gate = version.name, version.last_gate
+    if version.state == "rolled_back":
+        return (f"{name} was rolled back, and a rolled-back version is never promoted again; "
+                "a new training round makes a new version (D-60)")
     if version.state != "candidate":
         return f"{name} is {version.state}; only a candidate that passed the gate is promoted"
     if gate is None:
@@ -294,9 +298,16 @@ def _cleanup(binary: Path, say: Callable[[str], None]) -> None:
 # ---- rollback --------------------------------------------------------------------------------------
 
 def _rollback(to: str | None, reason: str, binary: Path, say: Callable[[str], None], confirm_s: float,
-              poll_s: float) -> int:
+              poll_s: float, expect_leaving: str | None = None, expect_running: set[str] | None = None,
+              expect_ggufs: dict[str, str] | None = None, fields: dict | None = None) -> int:
     state = registry.load()
     leaving = state.get("current")
+    if expect_leaving is not None and leaving.name != expect_leaving:
+        raise ShipError(f"the current version is {leaving.name} now, not {expect_leaving}; nothing rolled back")
+    for name, sha in (expect_ggufs or {}).items():  # under the ship lock: no restore can swap one from here on
+        if state.get(name).gguf != sha:
+            raise ShipError(f"{name}'s GGUF is {str(state.get(name).gguf)[:12]} now, not the {sha[:12]} that was "
+                            "scored (restored meanwhile?); nothing rolled back")
     target_name = state.get(to).name if to is not None else registry._fallback(state, leaving.name)
     if target_name is None:
         raise ShipError(f"{leaving.name} is current and no other promoted version could take over")
@@ -306,6 +317,9 @@ def _rollback(to: str | None, reason: str, binary: Path, say: Callable[[str], No
     if target.state != "promoted":
         raise ShipError(f"{target.name} is {target.state}; only a promoted version becomes current again")
     original = _running(_status(binary))
+    if expect_running is not None and original not in expect_running:
+        raise ShipError(f"Hex runs {original}, not {leaving.name}: you switched models by hand, so nothing is "
+                        "rolled back and your choice stays", EXIT_SWITCHED)
     selected = target.gguf  # the exact file Hex is switched to; the registry write checks it again
     model_id = _ensure_imported(binary, target, _models(binary), say)
     say(f"switching Hex from {leaving.name} to {target.name} ({model_id})")
@@ -316,7 +330,7 @@ def _rollback(to: str | None, reason: str, binary: Path, say: Callable[[str], No
         return EXIT_MISMATCH
     try:
         registry.roll_back(leaving.name, reason, to=target.name, expect_current=leaving.name, expect_gguf=selected,
-                           hex_id=model_id)
+                           hex_id=model_id, **(fields or {}))
     except RegistryError as error:
         _switch_back(binary, original, model_id, say, confirm_s, poll_s)
         raise ShipError(f"the registry refused the rollback: {error}") from error
@@ -342,8 +356,15 @@ def promote(name: str, *, binary: Path, say: Callable[[str], None] = print, conf
 
 
 def rollback(*, binary: Path, to: str | None = None, reason: str | None = None, say: Callable[[str], None] = print,
-             confirm_s: float = CONFIRM_S, poll_s: float = POLL_S) -> int:
-    return _guarded(lambda: _rollback(to, reason or "manual", Path(binary), say, confirm_s, poll_s), say)
+             confirm_s: float = CONFIRM_S, poll_s: float = POLL_S, expect_leaving: str | None = None,
+             expect_running: set[str] | None = None, expect_ggufs: dict[str, str] | None = None,
+             fields: dict | None = None) -> int:
+    """`healing watch`'s guards, all checked under the ship lock right before Hex is switched: roll back
+    only while `expect_leaving` is current, Hex runs one of `expect_running` (else exit 11: you switched
+    by hand), and each version in `expect_ggufs` still has that GGUF. `fields` ride on the `rolled_back`
+    event (the watch decision, in the same line)."""
+    return _guarded(lambda: _rollback(to, reason or "manual", Path(binary), say, confirm_s, poll_s, expect_leaving,
+                                      expect_running, expect_ggufs, fields), say)
 
 
 def main(args) -> int:

@@ -514,9 +514,10 @@ def entries(store: Store, rows: list[sqlite3.Row], clusters: dict[str, str], ses
     return result
 
 
-def write_and_pin(store: Store, split_id: str, items: list[dict]) -> SetInfo:
-    """Write a set folder and return what it pinned."""
-    out = sets_dir() / split_id
+def write_and_pin(store: Store, split_id: str, items: list[dict], root: Path | None = None) -> SetInfo:
+    """Write a set folder under `root` (default: the sets folder) and return what it pinned."""
+    root = root or sets_dir()
+    out = root / split_id
     if out.exists():
         shutil.rmtree(out)
     ids = [i["id"] for i in items]
@@ -527,7 +528,7 @@ def write_and_pin(store: Store, split_id: str, items: list[dict]) -> SetInfo:
             r["clip_id"]: r["audio_sha256"] for r in store.db.execute(
                 f"SELECT clip_id, audio_sha256 FROM clips WHERE clip_id IN ({','.join('?' * len(chunk))})", chunk)
         })
-    digest, words = manifest.write_set(out, items, lambda clip: _pcm(store, audio[clip]), sets_dir())
+    digest, words = manifest.write_set(out, items, lambda clip: _pcm(store, audio[clip]), root)
     return SetInfo(split_id, len(items), words, digest, manifest.sidecar_digest(out), out / "manifest.json")
 
 

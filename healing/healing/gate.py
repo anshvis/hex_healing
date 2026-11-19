@@ -134,7 +134,7 @@ class Verdict:
 
 # ---- judging one eval -----------------------------------------------------------------------------
 
-def _rows(document: dict, sha: str, set_name: str) -> list[dict] | None:
+def rows_for(document: dict, sha: str, set_name: str) -> list[dict] | None:
     paths = [m["gguf_path"] for m in document["models"] if m["gguf_sha256"] == sha]
     if not paths:
         raise GateError(f"the eval {document.get('eval_id')} did not score GGUF {sha[:12]}")
@@ -145,21 +145,22 @@ def _why_missing(document: dict, set_name: str) -> str:
     return f"no {set_name} set: " + document.get("unavailable_sets", {}).get(set_name, "not scored")
 
 
-def _bootstrap(name: str, a: list[dict], b: list[dict], errors: str, words: str, limit: float, margins: Margins,
-               prefix: str = "") -> Check:
-    def scores(rows):
-        return {prefix + r["id"]: stats.ClipScore(prefix + r["id"], int(r[errors]), int(r[words]))
-                for r in rows if r.get(words) is not None}
+def clip_scores(rows: list[dict], errors: str = "word_errors", words: str = "reference_words") -> dict[str, stats.ClipScore]:
+    """One model's per-clip rows as the bootstrap's scores: `errors` of `words` (word or format counts);
+    a clip with no count for `words` is left out."""
+    return {r["id"]: stats.ClipScore(r["id"], int(r[errors]), int(r[words])) for r in rows if r.get(words) is not None}
 
-    result = stats.paired_bootstrap(scores(a), scores(b), resamples=margins.resamples, seed=margins.seed,
-                                    confidence=margins.confidence)
+
+def _bootstrap(name: str, a: list[dict], b: list[dict], errors: str, words: str, limit: float, margins: Margins) -> Check:
+    result = stats.paired_bootstrap(clip_scores(a, errors, words), clip_scores(b, errors, words),
+                                    resamples=margins.resamples, seed=margins.seed, confidence=margins.confidence)
     return Check(name, "pass" if result.ci_high < limit else "fail", result.delta, result.ci_low, result.ci_high,
                  threshold=limit, note=f"{result.clips} clips, {result.reference_words} words")
 
 
 def _wer_check(name: str, document: dict, set_name: str, candidate: str, against: str, limit: float,
                margins: Margins) -> Check:
-    a, b = _rows(document, against, set_name), _rows(document, candidate, set_name)
+    a, b = rows_for(document, against, set_name), rows_for(document, candidate, set_name)
     if not a or not b:
         return Check(name, "fail", threshold=limit, note=_why_missing(document, set_name))
     return _bootstrap(name, a, b, "word_errors", "reference_words", limit, margins)
@@ -194,7 +195,7 @@ def _terms(a: list[dict] | None, b: list[dict] | None, margins: Margins) -> Chec
 def _formatting(document: dict, candidate: str, against: str, margins: Margins) -> Check:
     a, b = [], []
     for set_name in FORMATTED_SETS:
-        rows_a, rows_b = _rows(document, against, set_name), _rows(document, candidate, set_name)
+        rows_a, rows_b = rows_for(document, against, set_name), rows_for(document, candidate, set_name)
         if rows_a and rows_b:
             a += [{**r, "id": f"{set_name}:{r['id']}"} for r in rows_a]
             b += [{**r, "id": f"{set_name}:{r['id']}"} for r in rows_b]
@@ -208,7 +209,7 @@ def _wer(rows: list[dict]) -> float:
 
 
 def _drift(document: dict, candidate: str, v0: str, margins: Margins) -> Check:
-    b, base = _rows(document, candidate, "general"), _rows(document, v0, "general")
+    b, base = rows_for(document, candidate, "general"), rows_for(document, v0, "general")
     if not b or not base:
         return Check("drift_guard", "fail", threshold=margins.drift_guard, note=_why_missing(document, "general"))
     estimate = _wer(b) - _wer(base)
@@ -216,11 +217,11 @@ def _drift(document: dict, candidate: str, v0: str, margins: Margins) -> Check:
                  threshold=margins.drift_guard, note=f"general WER {_wer(b):.4f} against v0's {_wer(base):.4f}")
 
 
-def _p95_long(document: dict, sha: str, margins: Margins) -> tuple[float | None, int, str | None]:
+def p95_long(document: dict, sha: str, margins: Margins) -> tuple[float | None, int, str | None]:
     """p95 of the benchmark's per-clip `inference_ms` over the long clips of every scored set: (p95, long
     clips, None), or (None, 0, why) when the latency or the long clips are missing (unmeasured, never a
     pass; short clips never stand in for long ones)."""
-    rows = [r for s in document["sets"] for r in (_rows(document, sha, s["set"]) or [])]
+    rows = [r for s in document["sets"] for r in (rows_for(document, sha, s["set"]) or [])]
     if not rows or any(r.get("inference_ms") is None or r.get("audio_ms") is None for r in rows):
         return None, 0, "the eval holds no per-clip latency"
     long = [r["inference_ms"] for r in rows if r["audio_ms"] >= margins.long_clip_ms]
@@ -230,8 +231,8 @@ def _p95_long(document: dict, sha: str, margins: Margins) -> tuple[float | None,
 
 
 def _streaming(document: dict, candidate: str, against: str, support: StreamSupport, margins: Margins) -> Check:
-    p95_b, n, why_b = _p95_long(document, candidate, margins)
-    p95_a, _, why_a = _p95_long(document, against, margins)
+    p95_b, n, why_b = p95_long(document, candidate, margins)
+    p95_a, _, why_a = p95_long(document, against, margins)
     notes = [] if support.note is None else [support.note]
     if p95_a is None or p95_b is None:
         return Check("streaming", "fail", threshold=margins.streaming_p95_ms, unit="ms",
@@ -268,7 +269,7 @@ def _edited_span(document: dict, sha: str) -> float | None:
 def judge(document: dict, *, candidate: str, against: str, v0: str, support: StreamSupport, margins: Margins,
           golden_pin: dict | None, allow_thin: bool = False) -> Verdict:
     """Every D-12 check on one eval document; the models are named by their GGUFs' SHA-256."""
-    rolling_a, rolling_b = _rows(document, against, "rolling"), _rows(document, candidate, "rolling")
+    rolling_a, rolling_b = rows_for(document, against, "rolling"), rows_for(document, candidate, "rolling")
     checks = [
         _evidence(rolling_a, margins, allow_thin),
         _wer_check("rolling_wer", document, "rolling", candidate, against, margins.rolling_wer_ci_high, margins),
@@ -343,7 +344,7 @@ def _check_prepared(document: dict, versions: list) -> None:
 
 
 @contextlib.contextmanager
-def _model_files(versions: list):
+def model_files(versions: list):
     """Each version's GGUF from the registry's objects (pinned by hash). v0 is offered under its catalog
     file name, as `train prepare` does, so the benchmark recognizes it and pads it as Hex does."""
     from healing.registry import objects
@@ -478,7 +479,7 @@ def run(version: str, against: str = "current", *, eval_path: Path | None = None
         _check_saved(document)
         _check_prepared(document, versions)
     else:
-        with _model_files(versions) as paths:
+        with model_files(versions) as paths:
             document = (evaluate or _evaluate)(paths, GATE_SETS, parent)
         source = str(eval_run.write(document)) if document.get("sets") else None
     _check_eval(document, parent)

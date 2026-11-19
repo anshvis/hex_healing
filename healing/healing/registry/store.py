@@ -4,7 +4,7 @@ Each line is one event, `{event, version, at_ms, ...}`: `registered` (the whole 
 `scored`, `gate` (one `healing gate` decision, T7.1), `promoted`, `promote_failed` (Hex didn't confirm the
 switch, T7.2; the version stays a candidate), `hex_import` and `hex_import_removed` (an import of the
 version's GGUF that healing itself created in Hex, and its removal: the only imports cleanup may remove),
-`rejected`, `rolled_back`, `restored`,
+`rejected`, `rolled_back`, `watch` (`healing watch`'s one decision about a promotion, T7.3), `restored`,
 `pruned_artifact`, and the one `golden_frozen` pin. The current state is a fold of the events; nothing is ever rewritten.
 
 Every append is one whole line written with a single `write` and fsynced, under `registry/.lock`. A
@@ -25,7 +25,8 @@ from healing.registry import objects
 from healing.registry.objects import fsync_dir, owner_dir, registry_dir
 from healing.store import locked, now_ms
 
-EVENTS = ("registered", "scored", "gate", "promoted", "promote_failed", "hex_import", "hex_import_removed", "rejected", "rolled_back", "restored", "pruned_artifact", "golden_frozen")
+EVENTS = ("registered", "scored", "gate", "promoted", "promote_failed", "hex_import", "hex_import_removed", "rejected",
+          "rolled_back", "watch", "restored", "pruned_artifact", "golden_frozen")
 ARTIFACT_KINDS = ("gguf", "lora_delta", "merged_nemo")
 KEEP_PREVIOUS_PROMOTED = 2  # besides current and v0, the GGUFs of the last two promoted versions stay
 
@@ -133,6 +134,8 @@ class Version:
     pruned: dict[str, str] = field(default_factory=dict)  # sha pruned -> artifact kind
     gates: list[dict] = field(default_factory=list)  # every `healing gate` decision, oldest first
     promote_failures: list[dict] = field(default_factory=list)  # every `promote_failed`, oldest first
+    promotions: list[dict] = field(default_factory=list)  # every `promoted` (with `at_ms` and `previous`), oldest first
+    watches: list[dict] = field(default_factory=list)  # every `healing watch` decision, oldest first
 
     @property
     def number(self) -> int:
@@ -164,7 +167,7 @@ class Version:
     def as_dict(self) -> dict:
         return {**self.record, "version": self.name, "state": self.state, "reason": self.reason,
                 "scores": self.scores, "restores": self.restores, "pruned": self.pruned, "gates": self.gates,
-                "promote_failures": self.promote_failures}
+                "promote_failures": self.promote_failures, "promotions": self.promotions, "watches": self.watches}
 
 
 @dataclass
@@ -174,6 +177,7 @@ class State:
     promotions: list[str] = field(default_factory=list)  # promotion order, a version again if promoted again
     golden: dict | None = None
     owned_imports: dict[str, str] = field(default_factory=dict)  # Hex id healing imported -> its version
+    current_by: dict | None = None  # the event that made `current` current: a `promoted` or a `rolled_back`
 
     def get(self, name: str) -> Version:
         if name == "current":
@@ -217,7 +221,9 @@ def fold(events: list[dict]) -> State:
             version.gates.append({k: v for k, v in event.items() if k not in ("event", "version")})
         elif kind == "promoted":
             version.state, version.reason = "promoted", event.get("reason")
-            state.current = name
+            fields = {k: v for k, v in event.items() if k not in ("event", "version")}
+            version.promotions.append({**fields, "previous": event.get("previous") or state.current})
+            state.current, state.current_by = name, event
             state.promotions.append(name)
         elif kind == "hex_import":
             state.owned_imports[event["hex_id"]] = name
@@ -230,7 +236,11 @@ def fold(events: list[dict]) -> State:
         elif kind == "rolled_back":
             version.state, version.reason = "rolled_back", event.get("reason")
             if state.current == name:
-                state.current = event.get("to") or _fallback(state, name)
+                state.current, state.current_by = event.get("to") or _fallback(state, name), event
+            if isinstance(event.get("watch"), dict):  # `healing watch`'s decision rides on its rollback (D-59)
+                version.watches.append(event["watch"])
+        elif kind == "watch":
+            version.watches.append({k: v for k, v in event.items() if k not in ("event", "version")})
         elif kind == "restored":
             version.restores.append({k: v for k, v in event.items() if k not in ("event", "version")})
             _republished(state, (event.get("gguf_sha256"), event.get("rebuilt_sha256")))
@@ -393,6 +403,38 @@ def roll_back(name: str, reason: str, to: str | None = None, *, expect_current: 
                 **({"to": successor} if successor else {}),
                 **({"gguf_sha256": expect_gguf} if expect_gguf else {}), **fields})
         retain()
+
+
+def record_watch(name: str, decision: dict) -> None:
+    """Append `healing watch`'s keep (or insufficient-evidence keep) of `name`'s latest promotion
+    (`decision["promoted_at_ms"]`), at most once per promotion, while it is still current and both models
+    are still the GGUFs the watch scored (`decision["models"]`). A rollback's decision rides on its
+    `rolled_back` event instead (T7.3)."""
+    with lock():
+        state = load()
+        version = state.get(name)
+        promoted_at = decision.get("promoted_at_ms")
+        if not version.promotions or version.promotions[-1].get("at_ms") != promoted_at:
+            raise RegistryError(f"{version.name} was promoted again since this watch began; nothing recorded")
+        if any(w.get("promoted_at_ms") == promoted_at for w in version.watches):
+            raise RegistryError(f"{version.name}'s promotion is already decided")
+        if version.state != "promoted" or state.current != version.name:
+            raise RegistryError(f"{version.name} is {version.state} and {state.current} is current now; "
+                                "nothing recorded")
+        _check_scored(state, version.name, decision)
+        append({"event": "watch", "version": version.name, **decision})
+
+
+def _check_scored(state: State, name: str, decision: dict) -> None:
+    """The promoted (`name`) and previous versions' GGUFs are still the ones the watch scored."""
+    scored = decision.get("models")
+    if not scored:
+        return
+    for role, version in (("promoted", name), ("previous", decision.get("previous"))):
+        now = state.get(version).gguf
+        if now != scored.get(role):
+            raise RegistryError(f"{version}'s GGUF is {str(now)[:12]} now, not the {str(scored.get(role))[:12]} the "
+                                "watch scored (restored meanwhile?); nothing recorded, the next watch scores again")
 
 
 def pin_golden(sha256: str, n: int) -> bool:

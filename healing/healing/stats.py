@@ -72,6 +72,17 @@ def bootstrap_deltas(
     return (errors_b[draws].sum(axis=1) - errors_a[draws].sum(axis=1)) / words[draws].sum(axis=1)
 
 
+def paired_quantile_deltas(a: np.ndarray, b: np.ndarray, q: float, *, resamples: int, seed: int) -> np.ndarray:
+    """Every resample's Δ = quantile_q(b) − quantile_q(a) over paired per-clip values (`a[i]` and `b[i]`
+    are the same clip), drawn with the same clip resampling as the WER bootstrap: for a statistic that
+    is not a ratio of sums, such as p95 latency."""
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    if a.shape != b.shape or a.ndim != 1 or not len(a):
+        raise ValueError("paired values need the same, nonzero number of clips")
+    draws = resample_indices(len(a), resamples, seed)
+    return np.percentile(b[draws], q, axis=1) - np.percentile(a[draws], q, axis=1)
+
+
 def paired_bootstrap(
     a: dict[str, ClipScore],
     b: dict[str, ClipScore],
