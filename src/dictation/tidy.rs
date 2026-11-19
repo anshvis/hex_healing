@@ -537,6 +537,7 @@ mod tests {
             tidied("The demo is Tuesday, I mean, Wednesday."),
             "The demo is Wednesday."
         );
+        assert_eq!(tidied("Meet at five, I mean, at six."), "Meet at six.");
         let suggestions = rules_only("Meet at five, no wait, at six.");
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].kind, Kind::SelfCorrection);
@@ -554,6 +555,11 @@ mod tests {
             "That is what I mean, really.",
             "Ship it, no wait.",
             "Do it, scratch that, and then the rest of the long plan goes here.",
+            "I love you, I mean, I really do.",
+            "This is huge, I mean, this is massive.",
+            "We did it, sorry, we really did it.",
+            "I loved it, I mean, I adored it.",
+            "It was fine, sorry, it was great.",
         ] {
             assert!(rules_only(pasted).is_empty(), "{pasted:?}");
         }

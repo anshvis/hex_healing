@@ -310,17 +310,26 @@ fn self_corrections(text: &Text) -> Vec<Group> {
     groups
 }
 
-/// Whether the abandoned and the corrected phrase look like the same kind
-/// of thing, for a weak cue: two or more words starting with the same word
-/// ("to Bob, sorry, to Alice"), or one name or number each ("Tuesday, I
-/// mean, Wednesday"). "It's fine, I mean, mostly" stays.
+/// Whether a weak cue's corrected phrase replaces one slot of the abandoned
+/// one: every word the same but exactly one, and that pair both names or
+/// both numbers ("Tuesday, I mean, Wednesday"; "to Bob, sorry, to Alice";
+/// "at five, I mean, at six"). A shared start alone is not evidence: "I love
+/// you, I mean, I really do", "This is huge, I mean, this is massive", and
+/// "It's fine, I mean, mostly" are elaborations, and stay.
 fn alike(text: &Text, abandoned: usize, corrected: usize, length: usize) -> bool {
-    if length >= 2 {
-        return text.words[abandoned].lower == text.words[corrected].lower;
-    }
+    let differing: Vec<usize> = (0..length)
+        .filter(|offset| {
+            text.words[abandoned + offset].lower != text.words[corrected + offset].lower
+        })
+        .collect();
+    let [offset] = differing[..] else {
+        return false;
+    };
     let shape = |index: usize| {
         let word = text.word_text(index);
-        if word.chars().all(|character| character.is_numeric()) {
+        if word.chars().all(char::is_numeric)
+            || NUMBER_WORDS.contains(&text.words[index].lower.as_str())
+        {
             Some(true)
         } else if word.chars().next().is_some_and(char::is_uppercase) && word != "I" {
             Some(false)
@@ -328,8 +337,15 @@ fn alike(text: &Text, abandoned: usize, corrected: usize, length: usize) -> bool
             None
         }
     };
-    shape(abandoned).is_some() && shape(abandoned) == shape(corrected)
+    let (before, after) = (shape(abandoned + offset), shape(corrected + offset));
+    before.is_some() && before == after
 }
+
+/// Spelled-out numbers a weak cue may correct ("at five, I mean, at six").
+const NUMBER_WORDS: &[&str] = &[
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "fifteen", "twenty", "thirty", "forty", "fifty", "hundred", "thousand",
+];
 
 fn merge_adjacent(groups: Vec<Group>) -> Vec<Group> {
     let mut merged: Vec<Group> = Vec::with_capacity(groups.len());
