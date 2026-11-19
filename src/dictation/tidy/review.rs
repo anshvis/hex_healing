@@ -141,10 +141,18 @@ fn log_decisions(session: &TidySession) {
     );
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     arboard::Clipboard::new()
         .and_then(|mut clipboard| clipboard.set_text(text.to_owned()))
         .map_err(|error| error.to_string())
+}
+
+/// Linux has no tidy review (D-70) and Hex's Linux clipboard goes through
+/// `linux/clipboard`, not arboard, so there is nothing to copy with here.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn copy_to_clipboard(_text: &str) -> Result<(), String> {
+    Err("tidy has no clipboard on this OS".to_owned())
 }
 
 #[cfg(test)]
