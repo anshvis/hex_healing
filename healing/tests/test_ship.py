@@ -516,6 +516,30 @@ def test_cleanup_forgets_what_it_removed(hexbin, tmp_path):
     assert [c[2] for c in hexbin.calls("remove")] == [hex_id("v1"), hex_id("v2")]
 
 
+def test_unconfirmed_rollback_switches_back(hexbin, tmp_path):
+    candidate(tmp_path)
+    passing_gate("v1")
+    assert promote(hexbin, "v1")[0] == 0
+    hexbin.set(stuck=[CATALOG])  # Hex takes the switch but never finishes preparing it
+    before = registry.read_events()
+    lines: list[str] = []
+    code = ship.rollback(binary=hexbin.binary, say=lines.append, confirm_s=0.2, poll_s=0.01)
+    assert code == ship.EXIT_MISMATCH and registry.read_events() == before
+    assert hexbin.selected == hex_id("v1") and hexbin.calls("use")[-1][2] == hex_id("v1")
+    assert any("switched Hex back" in line for line in lines)
+
+
+def test_unconfirmed_rollback_says_when_switching_back_is_unconfirmed(hexbin, tmp_path):
+    candidate(tmp_path)
+    passing_gate("v1")
+    assert promote(hexbin, "v1")[0] == 0
+    hexbin.set(stuck=[CATALOG, hex_id("v1")])
+    lines: list[str] = []
+    code = ship.rollback(binary=hexbin.binary, say=lines.append, confirm_s=0.2, poll_s=0.01)
+    assert code == ship.EXIT_MISMATCH
+    assert any("could not confirm" in line and "hex status" in line for line in lines)
+
+
 def test_recovery_target_is_the_model_hex_runs(hexbin, tmp_path):
     """Hex saved an import that's missing and runs the catalog model in its place: a failed promote
     returns Hex to what it ran, not to the saved id."""

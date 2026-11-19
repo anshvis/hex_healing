@@ -16,7 +16,8 @@ gate passed against the version that is current now, on the GGUFs the registry h
 When Hex doesn't confirm, `promote` switches Hex back to the model it ran before, appends
 `promote_failed` (the version stays a candidate) and exits 9. `rollback` switches Hex to the previous
 version (or `--to`), importing it again from the registry when Hex no longer has it, and appends
-`rolled_back` with the reason only once `hex status` confirms.
+`rolled_back` with the reason only once `hex status` confirms; an unconfirmed rollback switches Hex back
+to what it ran and records nothing.
 
 Exit codes: 2 Hex isn't running (nothing changes), 8 no passing gate, 9 Hex didn't confirm the switch,
 10 the candidate must stream but Labs › Stream imported models is off, 1 anything else.
@@ -311,6 +312,7 @@ def _rollback(to: str | None, reason: str, binary: Path, say: Callable[[str], No
     problem = _use(binary, model_id) or _wait(binary, model_id, streams=False, confirm_s=confirm_s, poll_s=poll_s)
     if problem is not None:
         say(f"rollback failed: {problem}; the registry is unchanged")
+        _switch_back(binary, original, model_id, say, confirm_s, poll_s)  # or the queued switch lands later
         return EXIT_MISMATCH
     try:
         registry.roll_back(leaving.name, reason, to=target.name, expect_current=leaving.name, expect_gguf=selected,
