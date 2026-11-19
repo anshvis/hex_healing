@@ -246,7 +246,9 @@ substitute for source inspection or a second roadmap.
   Accessibility without touching the clipboard, including the bounded visible
   window text Labs › Screen vocabulary reads (macOS), and the post-paste
   read of the pasted-into field's value (≤ 8,192 characters, 30 s, never a secure field)
-  for Labs › Learn from corrections.
+  for Labs › Learn from corrections, and Labs › Tidy after paste's edit of the
+  pasted range (`accessibility/edit`: the whole value up to 32,768 UTF-16
+  units, `AXSelectedTextRange`/`AXSelectedText`, never a secure field).
 - `recognition`: the macOS listener coordinator for hotkey and programmatic
   dictation controls, workers, and observations. It does not own the
   authoritative microphone timeline.

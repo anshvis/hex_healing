@@ -5,11 +5,11 @@ suggests edits to the dictation Hex just pasted (fillers, repeats, the
 abandoned part of a spoken self-correction, and with Apple Intelligence a
 misheard word) and lets you accept or skip each one. Nothing happens at paste
 time: suggestions are computed only when you ask (D-37). Status: the trigger,
-the review capsule, and `hex dictation tidy [--print]` are implemented (T8.3);
-applying the accepted edits in the pasted field through Accessibility is T8.4,
-so Return copies the tidied text for now. Proof so far is unit tests and the
-`tidy-capsule` scene; no live macOS run of the overlay or its focus has been
-observed.
+the review capsule, and `hex dictation tidy [--print]` are implemented (T8.3),
+and Return applies the accepted edits to the pasted text in its field through
+Accessibility (T8.4). Proof so far is unit tests and the `tidy-capsule` scene;
+no live macOS run of the overlay, its focus, or an edit in a real app has been
+observed (the four-app matrix in T8.4's packet is owed).
 
 ```ts
 Trigger                                              // macos_rune::tidy
@@ -38,15 +38,38 @@ Review capsule                                       // rune_ui::tidy_capsule
 ├── copy-only dictation (Copy dictation only, a copy fallback, --print)
 │   -> the action reads Copy tidied text
 ├── no suggestions -> "Nothing to tidy in the last dictation", closes after 1.5 s
-├── Return -> tidy::review::apply_accepted (T8.4's seam): copies the tidied text
-│   and says "Paste it over the dictation"; nothing accepted -> closes, no change;
-│   a newer dictation or the lab off since it opened -> closes, nothing copied
+├── Return (pasted dictation) -> hides the panel, applies on hex-tidy-apply
+│   (see Apply below): done -> "Tidied the dictation"; text moved or field not
+│   editable -> the review comes back as copy-only, saying why, Return copies
+├── Return (copy-only) -> copies the tidied text; nothing accepted -> closes, no change;
+│   a newer dictation or the lab off since it opened -> closes, nothing applied
 ├── the lab turning off closes an open review (rechecked every 250 ms)
 ├── one review at a time; a new trigger replaces it, the next dictation closes it
 ├── takes keyboard focus only while a review is open (non-activating panel,
 │   KeyPolicy::OnDemand); any end of the review hides it at once, handing the keys
 │   back to the app in front
 └── notices show in a second, click-through overlay that never takes the keys
+
+Paste anchor                                         // dictation::paste_anchor
+├── while Tidy after paste or Learn from corrections is on, one read of the focused
+│   field before each dictation's paste (shared with the correction watch)
+├── kept once the paste, its History entry, and its commit happened: element,
+│   pid, caret, the inserted text's SHA-256 and UTF-16 length, entry id, commit
+│   count; never the text (D-74)
+└── one slot, in memory: every paste clears it; unusable after 10 minutes
+
+Apply                                                // dictation::tidy::apply
+├── no anchor for this review's entry and commit -> unsupported, offers a copy
+├── secure field -> refused before anything is read
+├── the pasted-into app not frontmost within 600 ms -> unsupported (OtherApp)
+├── read the whole field (≤ 32,768 UTF-16 units, else TooLarge)
+├── locate the pasted text by hash: exactly once, else Moved (D-75); the
+│   dictation inside it may only differ by leading whitespace and one first
+│   letter's case (D-76), else unsupported (Differs)
+├── AXSelectedTextRange + AXSelectedText when both are settable: one undo step
+│   └── ignored by the field -> select the range, Hex's paste over it (D-77)
+└── re-read: exactly the plan (outside the range byte-identical) -> applied;
+    anything else -> Unverified, "Check the text; ⌘Z undoes it", anchor spent
 ```
 
 Platforms: macOS only. Linux and Windows have the rule pass but no review
@@ -69,5 +92,11 @@ a stale or lab-off review never showing or applying, the lab turning off
 closing an open review, and an ended review keeping no notice of its own),
 `rune_ui::tests::tidy_capsule_accepts_all_and_cancels`,
 `app_settings::tidy::tests`, `suppression::tests::tidy_shortcut_press_is_its_own_action_only_while_bound`,
-and the `tidy-capsule` golden in light and dark (Linux). Missing: a live run of
-the overlay taking and returning focus, and the menu-bar item.
+`dictation::tidy::apply::tests` (locate by range then unique search, duplicate
+text is Moved, outside the range byte-identical, the secure check first, the
+paste fallback, unverified edits), `dictation::paste_anchor::tests`,
+`dictation::correction_watch::tests`, and the `tidy-capsule` golden in light
+and dark (Linux). Missing: a live run of the overlay taking and returning
+focus, the menu-bar item, and AC-17's four-app matrix (TextEdit, Notes, Slack,
+a Chrome textarea: only the pasted range changes, typed text around it stays,
+one ⌘Z undoes it).
