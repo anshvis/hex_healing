@@ -514,3 +514,16 @@ def test_cleanup_forgets_what_it_removed(hexbin, tmp_path):
     assert promote(hexbin, "v5")[0] == 0
     assert hex_id("v1") in hexbin.imports
     assert [c[2] for c in hexbin.calls("remove")] == [hex_id("v1"), hex_id("v2")]
+
+
+def test_recovery_target_is_the_model_hex_runs(hexbin, tmp_path):
+    """Hex saved an import that's missing and runs the catalog model in its place: a failed promote
+    returns Hex to what it ran, not to the saved id."""
+    candidate(tmp_path)
+    passing_gate("v1")
+    hexbin.set(selected="custom-ffffffffffffffff", imports={"custom-ffffffffffffffff": "gone"},
+               fallback={"for": "custom-ffffffffffffffff", "id": CATALOG, "reason": "missing"}, ignore_use=True)
+    code, lines = promote(hexbin, "v1", confirm_s=0.2)
+    assert code == ship.EXIT_MISMATCH
+    assert hexbin.calls("use")[-1][2] == CATALOG
+    assert events("promote_failed")[-1]["previous_hex_id"] == CATALOG

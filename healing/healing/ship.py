@@ -117,6 +117,16 @@ def _models(binary: Path) -> dict[str, dict]:
     return {m.get("id"): m for m in reply.get("models") or [] if isinstance(m, dict)}
 
 
+def _running(status: dict) -> str:
+    """The model Hex runs now: `model.id` is only the saved selection, and while a saved import is
+    missing, changed or switched off Hex runs `model.fallback.id` in its place. It is what a failed
+    promote or rollback returns Hex to."""
+    fallback = status["model"].get("fallback")
+    if isinstance(fallback, dict) and isinstance(fallback.get("id"), str):
+        return fallback["id"]
+    return status["model"]["id"]
+
+
 def _lab_on(status: dict) -> bool:
     """Labs › Stream imported models, as the running Hex reports it (`labs`), else its settings file."""
     if isinstance(status.get("labs"), list):
@@ -216,7 +226,7 @@ def _promote(name: str, binary: Path, say: Callable[[str], None], confirm_s: flo
         raise ShipError(problem, EXIT_NO_GATE)
     current = state.get("current")
     status = _status(binary)
-    previous_id = status["model"]["id"]
+    previous_id = _running(status)
     listed = _models(binary)
     streams = _should_stream(version, current, listed)
     if streams and not _lab_on(status):
@@ -294,7 +304,7 @@ def _rollback(to: str | None, reason: str, binary: Path, say: Callable[[str], No
         raise ShipError(f"{leaving.name} cannot roll back to itself")
     if target.state != "promoted":
         raise ShipError(f"{target.name} is {target.state}; only a promoted version becomes current again")
-    _status(binary)
+    original = _running(_status(binary))
     selected = target.gguf  # the exact file Hex is switched to; the registry write checks it again
     model_id = _ensure_imported(binary, target, _models(binary), say)
     say(f"switching Hex from {leaving.name} to {target.name} ({model_id})")
@@ -306,7 +316,7 @@ def _rollback(to: str | None, reason: str, binary: Path, say: Callable[[str], No
         registry.roll_back(leaving.name, reason, to=target.name, expect_current=leaving.name, expect_gguf=selected,
                            hex_id=model_id)
     except RegistryError as error:
-        _switch_back(binary, hex_id(leaving), model_id, say, confirm_s, poll_s)
+        _switch_back(binary, original, model_id, say, confirm_s, poll_s)
         raise ShipError(f"the registry refused the rollback: {error}") from error
     say(f"{leaving.name} rolled back ({reason}); {target.name} is current and Hex runs {model_id}")
     return 0
