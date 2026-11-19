@@ -129,7 +129,7 @@ def test_json_shape_and_list(world, capsys):
     document = json.loads(capsys.readouterr().out)
     assert set(document) == {
         "clips", "with_audio", "audio_bytes", "budget", "labels", "clusters", "last_run",
-        "oldest_uncollected_risk", "warnings", "free_bytes", "min_free", "last_clean", "registry_object_bytes",
+        "oldest_uncollected_risk", "warnings", "free_bytes", "min_free", "last_clean", "registry_object_bytes", "watch",
     }
     assert main(["status", "--list"]) == 0
     listed = capsys.readouterr().out

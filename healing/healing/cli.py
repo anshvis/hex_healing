@@ -175,6 +175,10 @@ def main(argv: list[str] | None = None) -> int:
     rollback.add_argument("--reason", default=None, help="why (default: manual)")
     rollback.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
 
+    watch = commands.add_parser("watch", help="after a promotion, roll back only if it is significantly worse on new reviewed clips (T7.3)")
+    watch.add_argument("--dry-run", action="store_true", help="say what it would do; changes nothing")
+    watch.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
+
     train_group = commands.add_parser("train", help="Tier 2 training (M6): `prepare`, `auto`, or a round with --local")
     train_group.add_argument("--local", action="store_true", help="train a LoRA round on this Mac's CPU (T6.5)")
     train_group.add_argument("--smoke", action="store_true", help="with --local: 20 steps over 50 clips")
@@ -253,6 +257,10 @@ def main(argv: list[str] | None = None) -> int:
         from healing import ship
 
         return ship.main(args)
+    if args.group == "watch":
+        from healing import watch as watch_module
+
+        return watch_module.main(args)
     if args.group == "train":
         if args.command == "prepare":
             return _train_prepare(args)

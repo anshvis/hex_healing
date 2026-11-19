@@ -84,6 +84,8 @@ def test_run_once_survives_unexpected_collect_error(monkeypatch, capsys):
     monkeypatch.setattr(store, "Store", lambda *a, **k: FakeStore())
     monkeypatch.setattr(store, "process_lock", contextlib.nullcontext)
     monkeypatch.setattr(budget, "prune", lambda s: pruned.append(1) or Fake())
+    monkeypatch.setattr(schedule, "_clean_after", lambda: 0)
+    monkeypatch.setattr(schedule, "_watch_after", lambda: 0)  # never the real registry or Hex
     assert schedule.run_once() == 1
     seen = capsys.readouterr()
     assert pruned and "SECRET" not in seen.out + seen.err and "ValueError" in seen.err

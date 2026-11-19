@@ -35,6 +35,8 @@ WARNINGS = {
     "vocabulary_biasing_off": "healing vocab apply wrote terms but Labs > Vocabulary biasing is off, so none take effect",
     "your_terms_fill_bias": "your own vocabulary terms take all 64 bias slots, so no mined term is biased",
     "settings_unreadable": "could not read Hex's settings (is Hex running?), so some warnings are unknown",
+    "watch_needs_reviews": "healing watch waits for reviewed clips from after the promotion; review some "
+                           "(`healing review --strategy random`)",
 }
 
 
@@ -75,6 +77,7 @@ class Status:
     min_free: int = DEFAULT_MIN_FREE
     last_clean: dict | None = None
     registry_object_bytes: int = 0  # the model registry's objects store (GGUFs and LoRA deltas)
+    watch: str | None = None  # `healing watch`'s waiting line while the current promotion is undecided
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -91,6 +94,7 @@ class Status:
             "min_free": self.min_free,
             "last_clean": self.last_clean,
             "registry_object_bytes": self.registry_object_bytes,
+            "watch": self.watch,
             "warnings": self.warnings,
         }
 
@@ -115,6 +119,8 @@ class Status:
         else:
             lines.append("last clean never")
         lines.append(f"registry objects {self.registry_object_bytes} bytes")
+        if self.watch:
+            lines.append(f"watch {self.watch}")
         if self.oldest_uncollected_risk_ms is not None:
             lines.append(f"oldest uncollected risk {self.oldest_uncollected_risk_ms}")
         lines += [f"warning {code}: {WARNINGS[code]}" for code in self.warnings]
@@ -210,4 +216,20 @@ def compute(
         warnings.append("disk_below_floor")
     if any(index_problems(store).values()):
         warnings.append("index_mismatch")
+    status.watch = _watch_waiting(store, now)
+    if status.watch:
+        warnings.append("watch_needs_reviews")
     return status
+
+
+def _watch_waiting(store: Store, now: int) -> str | None:
+    """The watch's waiting line (T7.3), or None: nothing promoted, already decided, or a registry this
+    status can't read (`healing models list` reports that)."""
+    from healing import watch
+    from healing.registry.store import RegistryError
+    from healing.splits import SplitError
+
+    try:
+        return watch.pending(store, now)
+    except (RegistryError, SplitError):
+        return None
