@@ -2,8 +2,10 @@
 //! correction watcher (macOS).
 //!
 //! With the lab on, the paste worker reads the focused element of the app it
-//! is about to paste into ([`Watch::before`]), and once the paste and its
-//! History record both succeed it submits a [`PasteTarget`]. The queue here
+//! is about to paste into ([`Watch::before`]; the one read
+//! [`crate::dictation::paste_anchor::Field`] that Labs › Tidy after paste
+//! shares), and once the paste and its History record both succeed it
+//! submits a [`PasteTarget`]. The queue here
 //! holds at most [`QUEUE_CAPACITY`] targets and drops the oldest; the timer
 //! and the re-read of the field belong to the watcher that drains it, which
 //! stores what it saw on the target's History entry. Nothing is read,
@@ -18,6 +20,7 @@ use std::time::Instant;
 
 use crate::accessibility::{self, RetainedElement};
 use crate::dictation::key_counts;
+use crate::dictation::paste_anchor::{Field, PasteAnchor};
 use crate::history::History;
 
 #[cfg(test)]
@@ -64,6 +67,9 @@ pub struct Pending {
     /// The field's text, when it could be read whole: the paste is found by
     /// what it added to it.
     pub before: Option<String>,
+    /// Whether Learn from corrections watches it. The field is also read
+    /// for Tidy after paste's anchor alone, and then nothing is submitted.
+    pub watch: bool,
 }
 
 impl Pending {
@@ -78,6 +84,7 @@ impl Pending {
             element,
             caret,
             before,
+            watch: true,
         }
     }
 }
@@ -88,6 +95,8 @@ pub trait Handoff {
     /// locked, or when no readable, non-secure field has focus.
     fn read(&mut self) -> Option<Pending>;
     fn submit(&mut self, target: PasteTarget);
+    /// Keeps the committed paste's anchor (Labs › Tidy after paste).
+    fn anchor(&mut self, _anchor: PasteAnchor) {}
 }
 
 /// The real handoff: reads through Accessibility and queues in [`QUEUE`].
@@ -95,17 +104,25 @@ pub struct Live;
 
 impl Handoff for Live {
     fn read(&mut self) -> Option<Pending> {
-        if !crate::labs::learn_from_corrections() {
-            return None;
-        }
-        let pid = crate::dictation::context::frontmost_pid()?;
-        let element = accessibility::focused_element(pid)?;
-        let caret = accessibility::caret(&element);
-        let before = accessibility::read_value_bounded(&element, session::READ_CHARS)
-            .ok()
-            .filter(|read| !read.windowed)
-            .map(|read| read.text);
-        Some(Pending::new(pid, element, caret, before))
+        // Either lab: the field read is shared with Tidy's anchor.
+        let Field {
+            pid,
+            element,
+            caret,
+        } = Field::read()?;
+        let watch = crate::labs::learn_from_corrections();
+        let before = if watch {
+            accessibility::read_value_bounded(&element, session::READ_CHARS)
+                .ok()
+                .filter(|read| !read.windowed)
+                .map(|read| read.text)
+        } else {
+            None
+        };
+        Some(Pending {
+            watch,
+            ..Pending::new(pid, element, caret, before)
+        })
     }
 
     fn submit(&mut self, target: PasteTarget) {
@@ -114,6 +131,10 @@ impl Handoff for Live {
             tracing::debug!(dropped, "correction watch dropped");
         }
         worker::wake();
+    }
+
+    fn anchor(&mut self, anchor: PasteAnchor) {
+        crate::dictation::paste_anchor::record(anchor);
     }
 }
 
@@ -176,7 +197,25 @@ impl Watch {
         self.0 = State::Pasted(pending, landed);
     }
 
-    /// Submits the target if History kept the dictation as `entry_id`.
+    /// The paste's anchor, once History kept it as `entry_id` and it
+    /// committed as `generation` (Labs › Tidy after paste).
+    pub fn anchor(&self, entry_id: Option<u64>, generation: u64) -> Option<PasteAnchor> {
+        let (State::Pasted(pending, landed), Some(entry_id)) = (&self.0, entry_id) else {
+            return None;
+        };
+        Some(PasteAnchor::new(
+            pending.pid,
+            &pending.element,
+            pending.caret,
+            &landed.inserted,
+            landed.at,
+            entry_id,
+            generation,
+        ))
+    }
+
+    /// Submits the target if History kept the dictation as `entry_id` and
+    /// Learn from corrections watches it.
     pub fn recorded(
         self,
         handoff: &mut impl Handoff,
@@ -186,6 +225,7 @@ impl Watch {
     ) {
         if let (State::Pasted(pending, landed), Some(history), Some(entry_id)) =
             (self.0, history, entry_id)
+            && pending.watch
         {
             handoff.submit(PasteTarget {
                 pending,

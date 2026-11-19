@@ -27,8 +27,9 @@ type Committed = Box<dyn Fn(u64) + Send + Sync>;
 static ON_COMMIT: OnceLock<Committed> = OnceLock::new();
 
 /// A dictation's output committed: pasted, copied, or printed, with its
-/// History entry when one was recorded.
-pub(crate) fn committed(entry: Option<u64>, copied: bool) {
+/// History entry when one was recorded. Returns the new generation, which
+/// the paste's anchor is tied to.
+pub(crate) fn committed(entry: Option<u64>, copied: bool) -> u64 {
     let generation = {
         let mut last = LAST.lock().unwrap_or_else(|error| error.into_inner());
         last.generation += 1;
@@ -38,6 +39,7 @@ pub(crate) fn committed(entry: Option<u64>, copied: bool) {
     if let Some(on_commit) = ON_COMMIT.get() {
         on_commit(generation);
     }
+    generation
 }
 
 /// How many dictations have committed in this process.

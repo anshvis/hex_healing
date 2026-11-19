@@ -21,6 +21,8 @@ pub(crate) mod key_counts;
 pub(crate) mod live_text;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) mod modes;
+#[cfg(target_os = "macos")]
+pub(crate) mod paste_anchor;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 pub(crate) mod processor;
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]

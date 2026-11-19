@@ -60,6 +60,8 @@ pub(super) fn run_output_worker(
                 job,
                 // What the paste inserted is what the watcher is told.
                 &mut |text, mode| {
+                    // Every paste releases the last dictation's anchor.
+                    crate::dictation::paste_anchor::clear();
                     paster.paste(text, mode)?;
                     Ok(paster.inserted())
                 },
@@ -197,12 +199,16 @@ pub(super) fn finish_output(
                     let entry_id = history.and_then(|history| {
                         record_history(history, target, sent, &mut completed)
                     });
-                    watch.recorded(corrections, history, entry_id, &completed.text);
                     // Labs › Tidy after paste: a review of an older dictation
-                    // closes, and a copy-only one offers a copy.
+                    // closes, a copy-only one offers a copy, and a pasted
+                    // one leaves its anchor, tied to this entry and commit.
                     if !matches!(target, TranscriptionTarget::Service) {
-                        crate::dictation::tidy::last::committed(entry_id, copied);
+                        let generation = crate::dictation::tidy::last::committed(entry_id, copied);
+                        if let Some(anchor) = watch.anchor(entry_id, generation) {
+                            corrections.anchor(anchor);
+                        }
                     }
+                    watch.recorded(corrections, history, entry_id, &completed.text);
                 }
                 tracing::info!(
                     audio_ms = completed.timings.audio_ms,
