@@ -11,8 +11,8 @@ use super::watch::{ReadError, read_attribute};
 use super::{
     AX_VALUE_CF_RANGE, AXUIElementSetAttributeValue, AXValueCreate, AxUiElementRef, CFEqual,
     CFGetTypeID, CFStringGetCharacters, CFStringGetLength, CFStringGetTypeID, CfObject, CfRange,
-    CfStringRef, RetainedElement, cf_string_literal, copy_element, copy_number,
-    foreign_application, is_secure_text_field,
+    CfStringRef, RetainedElement, cf_string, cf_string_literal, copy_element, copy_number,
+    foreign_application,
 };
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -34,11 +34,22 @@ unsafe extern "C" {
 }
 
 /// Whether the element is a secure (password) field, asked before anything
-/// else is read. A gone or unanswering element is an error, not "no".
+/// else is read. Fails closed: a gone or unanswering element, or a role or
+/// subrole that can't be read, is an error, never "no".
 pub fn is_secure(element: &RetainedElement) -> Result<bool, ReadError> {
-    // The liveness probe: a gone element answers "invalid" here.
-    read_attribute(&element.0, c"AXRole")?;
-    Ok(is_secure_text_field(&element.0))
+    secure(&element.0)
+}
+
+fn secure(element: &CfObject) -> Result<bool, ReadError> {
+    for name in [c"AXRole", c"AXSubrole"] {
+        // An attribute the element doesn't have is `None`; any other
+        // failure is an error.
+        let value = read_attribute(element, name)?;
+        if value.and_then(|value| cf_string(value.0)).as_deref() == Some("AXSecureTextField") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The field's whole value in UTF-16 units, when it holds at most
@@ -46,8 +57,7 @@ pub fn is_secure(element: &RetainedElement) -> Result<bool, ReadError> {
 /// is never read.
 pub fn read_units(element: &RetainedElement, max_units: usize) -> Result<Vec<u16>, ReadError> {
     let element = &element.0;
-    read_attribute(element, c"AXRole")?;
-    if is_secure_text_field(element) {
+    if secure(element)? {
         return Err(ReadError::Secure);
     }
     if copy_number(element, c"AXNumberOfCharacters").is_some_and(|count| count > max_units as i64) {
