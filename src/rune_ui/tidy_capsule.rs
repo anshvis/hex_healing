@@ -81,9 +81,11 @@ impl Offer {
         match self {
             Self::Moved => tr("The text changed since it was pasted"),
             Self::Unsupported(why) => match why {
-                Why::NoAnchor | Why::Expired | Why::OtherDictation | Why::NotOnThisOs => {
-                    tr("Hex no longer knows where this dictation was pasted")
-                }
+                Why::NoAnchor
+                | Why::Expired
+                | Why::OtherDictation
+                | Why::Disabled
+                | Why::NotOnThisOs => tr("Hex no longer knows where this dictation was pasted"),
                 Why::OtherApp | Why::OtherField => tr("The app it was pasted into isn't in front"),
                 Why::SecureField
                 | Why::Unreadable

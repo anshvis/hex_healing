@@ -60,8 +60,9 @@ pub(super) fn run_output_worker(
                 job,
                 // What the paste inserted is what the watcher is told.
                 &mut |text, mode| {
-                    // Every paste releases the last dictation's anchor.
-                    crate::dictation::paste_anchor::clear();
+                    // Every paste releases the last dictation's anchor, and
+                    // waits for a Tidy edit already going into a field.
+                    let _delivery = crate::dictation::paste_anchor::begin_paste();
                     paster.paste(text, mode)?;
                     Ok(paster.inserted())
                 },

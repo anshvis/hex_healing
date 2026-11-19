@@ -282,13 +282,14 @@ mod tests {
         assert_eq!(apply_accepted(&session), Applied::Nothing);
     }
 
-    /// A review whose dictation left no anchor (neither lab kept one, or
-    /// the next paste cleared it) edits nothing and says why.
+    /// With the lab off (as in tests) Return edits nothing and says why,
+    /// before any anchor is taken; the anchor rules are
+    /// `paste_anchor::tests`.
     #[test]
-    fn apply_without_an_anchor_edits_nothing() {
+    fn apply_with_the_lab_off_edits_nothing() {
         let session = preview();
         let expected = if cfg!(target_os = "macos") {
-            Why::NoAnchor
+            Why::Disabled
         } else {
             Why::NotOnThisOs
         };

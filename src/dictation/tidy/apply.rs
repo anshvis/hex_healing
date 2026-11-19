@@ -273,6 +273,8 @@ pub(crate) enum Why {
     NotEditable,
     /// An edit was sent but the re-read doesn't show exactly the plan.
     Unverified,
+    /// Labs › Tidy after paste was turned off before the edit.
+    Disabled,
     /// No Accessibility on this OS.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     NotOnThisOs,
@@ -304,6 +306,15 @@ pub(crate) trait Target {
     fn set_selected_text(&mut self, text: &str) -> bool;
     /// Whether the field has the keyboard focus, as a paste needs.
     fn is_focused(&mut self) -> bool;
+    /// Whether the app Hex pasted into is frontmost now (no waiting).
+    fn is_frontmost(&mut self) -> bool;
+    /// Starts sending an edit: takes the delivery lock, held until
+    /// [`Self::end_edit`], so no dictation paste goes in meanwhile, and
+    /// refuses when a dictation paste started since the anchor was taken
+    /// ([`Why::OtherDictation`]) or the lab is off ([`Why::Disabled`]).
+    fn begin_edit(&mut self) -> Result<(), Why>;
+    /// Releases the delivery lock.
+    fn end_edit(&mut self);
     /// Pastes over the selection through Hex's paste path.
     fn paste(&mut self, text: &str) -> bool;
     /// Waits between re-reads, for the app to apply an edit.
@@ -343,38 +354,92 @@ pub(crate) fn apply(
         Err(NoPlan::Moved) => return Outcome::Moved,
         Err(NoPlan::Differs) => return Outcome::Unsupported(Why::Differs),
     };
-    if target.can_set_text()
-        && target.select(plan.range.clone())
-        && target.set_selected_text(&plan.replacement)
-    {
-        match read_back(target, &before, &plan) {
-            Check::Applied => return Outcome::Applied(Method::SelectedText),
-            Check::Other => return Outcome::Unsupported(Why::Unverified),
-            // Accepted but ignored (some web views): paste instead.
-            Check::Unchanged => {}
+    if target.can_set_text() {
+        if let Err(why) = target.begin_edit() {
+            return Outcome::Unsupported(why);
+        }
+        let sent = target.select(plan.range.clone()) && target.set_selected_text(&plan.replacement);
+        target.end_edit();
+        if sent {
+            match read_back(target, &before, &plan) {
+                Check::Applied => return Outcome::Applied(Method::SelectedText),
+                Check::Other => return Outcome::Unsupported(Why::Unverified),
+                // Accepted but ignored (some web views): paste instead.
+                Check::Unchanged => {}
+            }
         }
     }
+    if let Err(why) = target.begin_edit() {
+        return Outcome::Unsupported(why);
+    }
+    let pasted = paste_fallback(
+        target,
+        &before,
+        &plan,
+        inserted,
+        expected_start,
+        text,
+        edits,
+    );
+    target.end_edit();
+    match pasted {
+        Err(outcome) => outcome,
+        Ok((before, plan)) => match read_back(target, &before, &plan) {
+            Check::Applied => Outcome::Applied(Method::Paste),
+            Check::Unchanged | Check::Other => Outcome::Unsupported(Why::Unverified),
+        },
+    }
+}
+
+/// The paste fallback, under the delivery lock: the app must still be
+/// frontmost with the anchored field focused (the paste goes to whatever
+/// has the keys), and the field is read again, since the person may have
+/// typed during the read-backs, so the range is placed from that read.
+/// Returns the read and plan the paste went in against.
+fn paste_fallback(
+    target: &mut impl Target,
+    before: &[u16],
+    plan: &Plan,
+    inserted: &Inserted,
+    expected_start: Option<usize>,
+    text: &str,
+    edits: &[Suggestion],
+) -> Result<(Vec<u16>, Plan), Outcome> {
+    if !target.is_frontmost() {
+        return Err(Outcome::Unsupported(Why::OtherApp));
+    }
     if !target.is_focused() {
-        return Outcome::Unsupported(Why::OtherField);
+        return Err(Outcome::Unsupported(Why::OtherField));
     }
+    let now = target.read().map_err(Outcome::Unsupported)?;
+    if now == plan.after {
+        // The ignored `AXSelectedText` landed late after all.
+        return Err(Outcome::Applied(Method::SelectedText));
+    }
+    let plan = if now == before {
+        plan.clone()
+    } else {
+        match self::plan(&now, inserted, expected_start, text, edits) {
+            Ok(plan) => plan,
+            Err(NoPlan::Moved) => return Err(Outcome::Moved),
+            Err(NoPlan::Differs) => return Err(Outcome::Unsupported(Why::Differs)),
+        }
+    };
     if !target.select(plan.range.clone()) || !target.paste(&plan.replacement) {
-        return Outcome::Unsupported(Why::NotEditable);
+        return Err(Outcome::Unsupported(Why::NotEditable));
     }
-    match read_back(target, &before, &plan) {
-        Check::Applied => Outcome::Applied(Method::Paste),
-        Check::Unchanged | Check::Other => Outcome::Unsupported(Why::Unverified),
-    }
+    Ok((now, plan))
 }
 
 /// Re-reads until the field shows the plan or something else, or the
 /// re-reads run out with it unchanged.
 fn read_back(target: &mut impl Target, before: &[u16], plan: &Plan) -> Check {
-    for _ in 0..READ_BACKS {
+    for attempt in 1..=READ_BACKS {
         let Ok(now) = target.read() else {
             return Check::Other;
         };
         match check(before, plan, &now) {
-            Check::Unchanged => target.wait(),
+            Check::Unchanged if attempt < READ_BACKS => target.wait(),
             decided => return decided,
         }
     }
@@ -389,6 +454,13 @@ fn read_back(target: &mut impl Target, before: &[u16], plan: &Plan) -> Check {
 #[cfg(target_os = "macos")]
 pub(crate) fn apply_to_last(session: &super::session::TidySession) -> Outcome {
     let edits = session.accepted_suggestions();
+    if !crate::labs::tidy_after_paste() {
+        let outcome = Outcome::Unsupported(Why::Disabled);
+        log(outcome, edits.len());
+        return outcome;
+    }
+    // Noted before the take: a paste starting after this is caught.
+    let pastes = crate::dictation::paste_anchor::pastes();
     let outcome = match crate::dictation::paste_anchor::take_for(
         session.dictation_id,
         session.generation,
@@ -397,7 +469,7 @@ pub(crate) fn apply_to_last(session: &super::session::TidySession) -> Outcome {
         Err(why) => Outcome::Unsupported(why),
         Ok(anchor) => {
             let outcome = apply(
-                &mut ax::AxTarget::new(&anchor),
+                &mut ax::AxTarget::new(&anchor, pastes),
                 &anchor.inserted,
                 anchor.expected_start,
                 &session.text,
@@ -407,7 +479,7 @@ pub(crate) fn apply_to_last(session: &super::session::TidySession) -> Outcome {
                 outcome,
                 Outcome::Applied(_) | Outcome::Unsupported(Why::Unverified)
             ) {
-                crate::dictation::paste_anchor::restore(anchor);
+                crate::dictation::paste_anchor::restore(anchor, pastes);
             }
             outcome
         }
@@ -444,9 +516,11 @@ mod ax {
     use std::ops::Range;
     use std::time::{Duration, Instant};
 
+    use std::sync::MutexGuard;
+
     use super::{MAX_FIELD_UNITS, Target, Why};
     use crate::accessibility::{ReadError, edit};
-    use crate::dictation::paste_anchor::PasteAnchor;
+    use crate::dictation::paste_anchor::{self, PasteAnchor};
 
     /// How long the app Hex pasted into has to be frontmost again after the
     /// capsule hands the keys back, and how often that is asked.
@@ -457,11 +531,18 @@ mod ax {
 
     pub(super) struct AxTarget<'a> {
         anchor: &'a PasteAnchor,
+        /// Dictation pastes started before the anchor was taken.
+        pastes: u64,
+        delivery: Option<MutexGuard<'static, ()>>,
     }
 
     impl<'a> AxTarget<'a> {
-        pub(super) fn new(anchor: &'a PasteAnchor) -> Self {
-            Self { anchor }
+        pub(super) fn new(anchor: &'a PasteAnchor, pastes: u64) -> Self {
+            Self {
+                anchor,
+                pastes,
+                delivery: None,
+            }
         }
     }
 
@@ -510,6 +591,26 @@ mod ax {
 
         fn is_focused(&mut self) -> bool {
             edit::is_focused(self.anchor.pid, &self.anchor.element)
+        }
+
+        fn is_frontmost(&mut self) -> bool {
+            crate::dictation::context::frontmost_pid() == Some(self.anchor.pid)
+        }
+
+        fn begin_edit(&mut self) -> Result<(), Why> {
+            let delivery = paste_anchor::deliver();
+            if paste_anchor::pastes() != self.pastes {
+                return Err(Why::OtherDictation);
+            }
+            if !crate::labs::tidy_after_paste() {
+                return Err(Why::Disabled);
+            }
+            self.delivery = Some(delivery);
+            Ok(())
+        }
+
+        fn end_edit(&mut self) {
+            self.delivery = None;
         }
 
         fn paste(&mut self, text: &str) -> bool {
@@ -730,6 +831,14 @@ mod tests {
         mangles: bool,
         /// The paste goes nowhere.
         paste_lost: bool,
+        /// Another app comes to the front during the read-backs.
+        leaves_front: bool,
+        /// Typed into the field after the last read-back, just before the
+        /// fallback.
+        typed_meanwhile: Option<(usize, &'static str)>,
+        /// What `begin_edit` refuses with.
+        refuse_edit: Option<Why>,
+        editing: bool,
         pasted: usize,
         set: usize,
     }
@@ -746,6 +855,10 @@ mod tests {
                 focused: true,
                 mangles: false,
                 paste_lost: false,
+                leaves_front: false,
+                typed_meanwhile: None,
+                refuse_edit: None,
+                editing: false,
                 pasted: 0,
                 set: 0,
             }
@@ -781,6 +894,7 @@ mod tests {
             true
         }
         fn set_selected_text(&mut self, text: &str) -> bool {
+            assert!(self.editing, "edited outside the delivery lock");
             self.set += 1;
             if self.mangles {
                 self.replace_selection(&format!("{text}!"));
@@ -790,14 +904,31 @@ mod tests {
             true
         }
         fn is_focused(&mut self) -> bool {
+            if let Some((at, typed)) = self.typed_meanwhile.take() {
+                self.value.splice(at..at, typed.encode_utf16());
+            }
             self.focused
         }
         fn paste(&mut self, text: &str) -> bool {
+            assert!(self.editing, "pasted outside the delivery lock");
             self.pasted += 1;
             if !self.paste_lost {
                 self.replace_selection(text);
             }
             true
+        }
+        fn is_frontmost(&mut self) -> bool {
+            !self.leaves_front
+        }
+        fn begin_edit(&mut self) -> Result<(), Why> {
+            if let Some(why) = self.refuse_edit {
+                return Err(why);
+            }
+            self.editing = true;
+            Ok(())
+        }
+        fn end_edit(&mut self) {
+            self.editing = false;
         }
         fn wait(&mut self) {}
     }
@@ -899,5 +1030,59 @@ mod tests {
             Outcome::Unsupported(Why::Unverified)
         );
         assert_eq!((lost.set, lost.pasted), (0, 1));
+    }
+
+    /// A newer dictation's paste, or the lab turning off, since the anchor
+    /// was taken: nothing is sent.
+    #[test]
+    fn a_newer_paste_or_the_lab_off_sends_nothing() {
+        for why in [Why::OtherDictation, Why::Disabled] {
+            for settable in [true, false] {
+                let mut fake = Fake::new("um we ship it");
+                fake.settable = settable;
+                fake.refuse_edit = Some(why);
+                assert_eq!(
+                    run(&mut fake, "um we ship it", Some(0)),
+                    Outcome::Unsupported(why)
+                );
+                assert_eq!((fake.set, fake.pasted), (0, 0));
+                assert_eq!(fake.text(), "um we ship it");
+            }
+        }
+    }
+
+    /// The fallback goes only to the anchored app while it is in front:
+    /// another app coming forward during the read-backs gets nothing.
+    #[test]
+    fn the_fallback_rechecks_the_front_app() {
+        let mut fake = Fake::new("um we ship it");
+        fake.ignores_set = true;
+        fake.leaves_front = true;
+        assert_eq!(
+            run(&mut fake, "um we ship it", Some(0)),
+            Outcome::Unsupported(Why::OtherApp)
+        );
+        assert_eq!((fake.set, fake.pasted), (1, 0));
+    }
+
+    /// Typing after the read-backs: the fallback places the range from a
+    /// fresh read, so text typed before the paste survives, and an edit
+    /// inside it is Moved with nothing pasted.
+    #[test]
+    fn the_fallback_rereads_the_field_before_pasting() {
+        let mut before = Fake::new("um we ship it");
+        before.ignores_set = true;
+        before.typed_meanwhile = Some((0, "Note: "));
+        assert_eq!(
+            run(&mut before, "um we ship it", Some(0)),
+            Outcome::Applied(Method::Paste)
+        );
+        assert_eq!(before.text(), "Note: We ship it");
+        let mut inside = Fake::new("um we ship it");
+        inside.ignores_set = true;
+        inside.typed_meanwhile = Some((6, "really "));
+        assert_eq!(run(&mut inside, "um we ship it", Some(0)), Outcome::Moved);
+        assert_eq!(inside.pasted, 0);
+        assert_eq!(inside.text(), "um we really ship it");
     }
 }

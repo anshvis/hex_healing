@@ -13,7 +13,8 @@
 //! next paste clears it, and after [`TTL`] it is never handed out (and is
 //! released at the next access).
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::accessibility::{self, RetainedElement};
@@ -161,14 +162,39 @@ impl Slot {
     }
 }
 
+/// Held while text goes into a field: a dictation's paste, or Tidy's edit
+/// of the pasted range, so the two never interleave (their keystrokes and
+/// clipboard writes included).
+static DELIVERY: Mutex<()> = Mutex::new(());
+
+/// How many dictation pastes have started. An apply notes it before taking
+/// its anchor; a change since means a newer paste may have moved the text
+/// or the selection, and the anchor's range can't be trusted.
+static PASTES: AtomicU64 = AtomicU64::new(0);
+
 /// Keeps the anchor of the dictation that just committed.
 pub(crate) fn record(anchor: PasteAnchor) {
     SLOT.record(anchor);
 }
 
-/// Releases the anchor: called as every paste starts.
-pub(crate) fn clear() {
+/// A dictation's paste is starting: waits for any Tidy edit in progress,
+/// counts the paste, and releases the anchor. Hold the guard through the
+/// paste.
+pub(crate) fn begin_paste() -> MutexGuard<'static, ()> {
+    let delivery = deliver();
+    PASTES.fetch_add(1, Ordering::SeqCst);
     SLOT.clear();
+    delivery
+}
+
+/// Takes the delivery lock for a Tidy edit.
+pub(crate) fn deliver() -> MutexGuard<'static, ()> {
+    DELIVERY.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+/// The count of dictation pastes started so far.
+pub(crate) fn pastes() -> u64 {
+    PASTES.load(Ordering::SeqCst)
 }
 
 /// See [`Slot::take_for`].
@@ -176,9 +202,12 @@ pub(crate) fn take_for(entry_id: u64, generation: u64, now: Instant) -> Result<P
     SLOT.take_for(entry_id, generation, now)
 }
 
-/// See [`Slot::restore`].
-pub(crate) fn restore(anchor: PasteAnchor) {
-    SLOT.restore(anchor);
+/// See [`Slot::restore`]; nothing is put back once a newer paste started
+/// (`pastes` is the count noted before the anchor was taken).
+pub(crate) fn restore(anchor: PasteAnchor, pastes: u64) {
+    if self::pastes() == pastes {
+        SLOT.restore(anchor);
+    }
 }
 
 #[cfg(test)]
