@@ -12,7 +12,7 @@ use super::{
     AX_VALUE_CF_RANGE, AXUIElementSetAttributeValue, AXValueCreate, AxUiElementRef, CFEqual,
     CFGetTypeID, CFStringGetCharacters, CFStringGetLength, CFStringGetTypeID, CfObject, CfRange,
     CfStringRef, RetainedElement, cf_string, cf_string_literal, copy_element, copy_number,
-    foreign_application,
+    copy_range, foreign_application,
 };
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -125,6 +125,14 @@ pub fn select(element: &RetainedElement, range: Range<usize>) -> bool {
         return false;
     }
     set(element, c"AXSelectedTextRange", &CfObject(value))
+}
+
+/// The field's selected range (UTF-16 units), if it says.
+pub fn selected_range(element: &RetainedElement) -> Option<Range<usize>> {
+    let range = copy_range(&element.0, c"AXSelectedTextRange")?;
+    let start = usize::try_from(range.location).ok()?;
+    let length = usize::try_from(range.length).ok()?;
+    Some(start..start + length)
 }
 
 /// Replaces the field's selection with `text`, as typing would: one undo

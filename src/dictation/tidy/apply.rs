@@ -317,9 +317,13 @@ pub(crate) trait Target {
     fn end_edit(&mut self);
     /// Whether Labs › Tidy after paste is still on.
     fn lab_on(&mut self) -> bool;
-    /// Pastes over the selection through Hex's paste path, checking the
-    /// app, the field, and the lab again right before the keys are sent.
-    fn paste(&mut self, text: &str) -> Result<(), Why>;
+    /// The field's selected range, if it says.
+    fn selection(&mut self) -> Option<Range<usize>>;
+    /// Pastes over the selection through Hex's paste path. Right before the
+    /// keys are sent it checks the lab, the app, and the field again, and
+    /// that the selection is still `range` and the field still `field`
+    /// (else [`Outcome::Moved`]).
+    fn paste(&mut self, text: &str, range: Range<usize>, field: &[u16]) -> Result<(), Outcome>;
     /// Waits between re-reads, for the app to apply an edit.
     fn wait(&mut self);
 }
@@ -377,7 +381,10 @@ pub(crate) fn apply(
 }
 
 /// The edit itself, under the delivery lock: `AXSelectedText` when the
-/// field takes it, else (or when it ignored it) the paste fallback.
+/// field takes it, else (or when it ignored it) the paste fallback. On any
+/// outcome but applied, a range Tidy selected that is still selected
+/// exactly is collapsed to its end, so the next dictation's paste appends
+/// rather than replacing it.
 fn edit(
     target: &mut impl Target,
     before: &[u16],
@@ -387,9 +394,43 @@ fn edit(
     text: &str,
     edits: &[Suggestion],
 ) -> Outcome {
+    let mut selected = Vec::new();
+    let outcome = edit_selecting(
+        target,
+        before,
+        plan,
+        inserted,
+        expected_start,
+        text,
+        edits,
+        &mut selected,
+    );
+    if !matches!(outcome, Outcome::Applied(_)) {
+        for range in selected.into_iter().rev() {
+            if target.selection() == Some(range.clone()) {
+                target.select(range.end..range.end);
+                break;
+            }
+        }
+    }
+    outcome
+}
+
+/// [`edit`]'s steps, noting each range it selected in `selected`.
+#[allow(clippy::too_many_arguments)]
+fn edit_selecting(
+    target: &mut impl Target,
+    before: &[u16],
+    plan: &Plan,
+    inserted: &Inserted,
+    expected_start: Option<usize>,
+    text: &str,
+    edits: &[Suggestion],
+    selected: &mut Vec<Range<usize>>,
+) -> Outcome {
     if target.can_set_text() {
-        let selected = target.select(plan.range.clone());
-        if selected && target.set_selected_text(&plan.replacement) {
+        selected.push(plan.range.clone());
+        if target.select(plan.range.clone()) && target.set_selected_text(&plan.replacement) {
             match read_back(target, before, plan) {
                 Check::Applied => return Outcome::Applied(Method::SelectedText),
                 Check::Other => return Outcome::Unsupported(Why::Unverified),
@@ -398,73 +439,43 @@ fn edit(
             }
         }
     }
-    match paste_fallback(target, before, plan, inserted, expected_start, text, edits) {
-        Fallback::Pasted(before, plan) => match read_back(target, &before, &plan) {
-            Check::Applied => Outcome::Applied(Method::Paste),
-            Check::Unchanged | Check::Other => Outcome::Unsupported(Why::Unverified),
-        },
-        Fallback::LandedLate => Outcome::Applied(Method::SelectedText),
-        Fallback::Refused(outcome, range) => {
-            // Nothing went in, but the pasted range may still be selected:
-            // collapse it to its end, so the next dictation's paste appends
-            // rather than replacing it.
-            if let Some(range) = range {
-                target.select(range.end..range.end);
-            }
-            outcome
-        }
-    }
-}
-
-/// What the paste fallback did.
-enum Fallback {
-    /// Pasted, against this read of the field and this plan.
-    Pasted(Vec<u16>, Plan),
-    /// The ignored `AXSelectedText` landed late after all.
-    LandedLate,
-    /// Nothing was pasted, for this outcome; the range Tidy may have left
-    /// selected, if it is still where the field says.
-    Refused(Outcome, Option<Range<usize>>),
-}
-
-/// The paste fallback: the field is read again, since the person may have
-/// typed during the read-backs, and the range is placed from that read;
-/// then, right before the paste (which goes to whatever has the keys), the
-/// app must still be frontmost with the anchored field focused.
-fn paste_fallback(
-    target: &mut impl Target,
-    before: &[u16],
-    plan: &Plan,
-    inserted: &Inserted,
-    expected_start: Option<usize>,
-    text: &str,
-    edits: &[Suggestion],
-) -> Fallback {
     let now = match target.read() {
         Ok(now) => now,
-        Err(why) => return Fallback::Refused(Outcome::Unsupported(why), None),
+        Err(why) => return Outcome::Unsupported(why),
     };
     if now == plan.after {
-        return Fallback::LandedLate;
+        // The ignored `AXSelectedText` landed late after all.
+        return Outcome::Applied(Method::SelectedText);
     }
     let plan = if now == before {
         plan.clone()
     } else {
         match self::plan(&now, inserted, expected_start, text, edits) {
             Ok(plan) => plan,
-            Err(NoPlan::Moved) => return Fallback::Refused(Outcome::Moved, None),
-            Err(NoPlan::Differs) => {
-                return Fallback::Refused(Outcome::Unsupported(Why::Differs), None);
-            }
+            Err(NoPlan::Moved) => return Outcome::Moved,
+            Err(NoPlan::Differs) => return Outcome::Unsupported(Why::Differs),
         }
     };
-    let refused = |why| Fallback::Refused(Outcome::Unsupported(why), Some(plan.range.clone()));
+    selected.push(plan.range.clone());
+    if let Err(outcome) = paste_fallback(target, &now, &plan) {
+        return outcome;
+    }
+    match read_back(target, &now, &plan) {
+        Check::Applied => Outcome::Applied(Method::Paste),
+        Check::Unchanged | Check::Other => Outcome::Unsupported(Why::Unverified),
+    }
+}
+
+/// The paste fallback over `plan.range` of `field` (a fresh read, since
+/// the person may have typed during the read-backs). Right before the
+/// paste, which goes to whatever has the keys, the lab must be on and the
+/// app frontmost with the anchored field focused; `paste` asks again after
+/// its clipboard capture, with the selection and the field as well.
+fn paste_fallback(target: &mut impl Target, field: &[u16], plan: &Plan) -> Result<(), Outcome> {
+    let refused = |why| Err(Outcome::Unsupported(why));
     if !target.select(plan.range.clone()) {
         return refused(Why::NotEditable);
     }
-    // Checked last, after the read and the selection: the keys go wherever
-    // the focus is when the paste is sent (and `paste` asks once more after
-    // its clipboard capture).
     if !target.lab_on() {
         return refused(Why::Disabled);
     }
@@ -474,10 +485,7 @@ fn paste_fallback(
     if !target.is_focused() {
         return refused(Why::OtherField);
     }
-    if let Err(why) = target.paste(&plan.replacement) {
-        return refused(why);
-    }
-    Fallback::Pasted(now, plan)
+    target.paste(&plan.replacement, plan.range.clone(), field)
 }
 
 /// Re-reads until the field shows the plan or something else, or the
@@ -567,7 +575,7 @@ mod ax {
 
     use std::sync::MutexGuard;
 
-    use super::{MAX_FIELD_UNITS, Target, Why};
+    use super::{MAX_FIELD_UNITS, Outcome, Target, Why};
     use crate::accessibility::{ReadError, edit};
     use crate::dictation::paste_anchor::{self, PasteAnchor};
 
@@ -666,27 +674,36 @@ mod ax {
             crate::labs::tidy_after_paste()
         }
 
-        fn paste(&mut self, text: &str) -> Result<(), Why> {
+        fn selection(&mut self) -> Option<Range<usize>> {
+            edit::selected_range(&self.anchor.element)
+        }
+
+        fn paste(&mut self, text: &str, range: Range<usize>, field: &[u16]) -> Result<(), Outcome> {
             let (pid, element) = (self.anchor.pid, &self.anchor.element);
-            let mut why = Why::NotEditable;
+            let mut refused = Outcome::Unsupported(Why::NotEditable);
             let ready = || {
-                let refused = if !crate::labs::tidy_after_paste() {
-                    Some(Why::Disabled)
+                let why = if !crate::labs::tidy_after_paste() {
+                    Some(Outcome::Unsupported(Why::Disabled))
                 } else if crate::dictation::context::frontmost_pid() != Some(pid) {
-                    Some(Why::OtherApp)
+                    Some(Outcome::Unsupported(Why::OtherApp))
                 } else if !edit::is_focused(pid, element) {
-                    Some(Why::OtherField)
+                    Some(Outcome::Unsupported(Why::OtherField))
+                } else if edit::selected_range(element) != Some(range.clone())
+                    || edit::read_units(element, MAX_FIELD_UNITS).ok().as_deref() != Some(field)
+                {
+                    // The person moved the selection or typed meanwhile.
+                    Some(Outcome::Moved)
                 } else {
                     None
                 };
-                if let Some(refused) = refused {
-                    why = refused;
+                if let Some(why) = why {
+                    refused = why;
                 }
-                refused.is_none()
+                why.is_none()
             };
             crate::paste::replace_selection(text, ready).map_err(|error| {
                 tracing::warn!(%error, "tidy could not paste its edit");
-                why
+                refused
             })
         }
 
@@ -910,6 +927,10 @@ mod tests {
         reads: usize,
         /// The lab turns off during the read-backs.
         lab_off_later: bool,
+        /// The person selects this during the paste's clipboard capture.
+        selects_meanwhile: Option<Range<usize>>,
+        /// Reads fail from this one on (0 is the first).
+        reads_fail_from: Option<usize>,
         /// What `begin_edit` refuses with.
         refuse_edit: Option<Why>,
         editing: bool,
@@ -933,6 +954,8 @@ mod tests {
                 typed_meanwhile: None,
                 reads: 0,
                 lab_off_later: false,
+                selects_meanwhile: None,
+                reads_fail_from: None,
                 refuse_edit: None,
                 editing: false,
                 pasted: 0,
@@ -962,6 +985,10 @@ mod tests {
             assert!(!self.secure, "read a secure field");
             if self.set + self.pasted > 0 {
                 assert!(self.editing, "read back outside the delivery lock");
+            }
+            if self.reads_fail_from.is_some_and(|from| self.reads >= from) {
+                self.reads += 1;
+                return Err(Why::Unreadable);
             }
             // The first read, then every read-back of the ignored edit.
             if self.reads == 1 + READ_BACKS
@@ -995,8 +1022,17 @@ mod tests {
         fn lab_on(&mut self) -> bool {
             !self.lab_off_later
         }
-        fn paste(&mut self, text: &str) -> Result<(), Why> {
+        fn selection(&mut self) -> Option<Range<usize>> {
+            Some(self.selection.clone())
+        }
+        fn paste(&mut self, text: &str, range: Range<usize>, field: &[u16]) -> Result<(), Outcome> {
             assert!(self.editing, "pasted outside the delivery lock");
+            if let Some(selected) = self.selects_meanwhile.take() {
+                self.selection = selected;
+            }
+            if self.selection != range || self.value != field {
+                return Err(Outcome::Moved);
+            }
             self.pasted += 1;
             if !self.paste_lost {
                 self.replace_selection(text);
@@ -1187,5 +1223,39 @@ mod tests {
         assert_eq!(run(&mut inside, "um we ship it", Some(0)), Outcome::Moved);
         assert_eq!(inside.pasted, 0);
         assert_eq!(inside.text(), "um we really ship it");
+    }
+
+    /// A selection the person made during the paste's clipboard capture is
+    /// theirs: nothing is pasted over it, and it stays as they made it.
+    #[test]
+    fn a_selection_moved_before_the_paste_is_left_alone() {
+        let mut fake = Fake::new("um we ship it");
+        fake.settable = false;
+        fake.selects_meanwhile = Some(3..5);
+        assert_eq!(run(&mut fake, "um we ship it", Some(0)), Outcome::Moved);
+        assert_eq!(fake.text(), "um we ship it");
+        assert_eq!(fake.selection, 3..5);
+    }
+
+    /// An ignored edit whose read-back then fails leaves the pasted range
+    /// unselected, so the next dictation appends.
+    #[test]
+    fn a_failed_read_after_an_ignored_edit_releases_the_selection() {
+        let mut fake = Fake::new("um we ship it");
+        fake.ignores_set = true;
+        fake.reads_fail_from = Some(1);
+        assert_eq!(
+            run(&mut fake, "um we ship it", Some(0)),
+            Outcome::Unsupported(Why::Unverified)
+        );
+        assert_eq!(fake.selection, 13..13);
+        let mut fallback = Fake::new("um we ship it");
+        fallback.ignores_set = true;
+        fallback.reads_fail_from = Some(1 + READ_BACKS);
+        assert_eq!(
+            run(&mut fallback, "um we ship it", Some(0)),
+            Outcome::Unsupported(Why::Unreadable)
+        );
+        assert_eq!(fallback.selection, 13..13);
     }
 }

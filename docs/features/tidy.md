@@ -74,8 +74,9 @@ Apply                                                // dictation::tidy::apply
 ├── AXSelectedTextRange + AXSelectedText when both are settable: one undo step
 │   └── ignored by the field -> read again and placed from that read; the app
 │       still frontmost and the field focused right before Hex's paste over it;
-│       (asked again after its clipboard capture, right before the keys);
-│       refused -> the selection collapses to the range's end (D-77, D-79)
+│       (asked again after its clipboard capture, right before the keys, with
+│       the selection and the field unchanged); not applied -> a range Tidy
+│       still has selected collapses to its end (D-77, D-79)
 └── re-read: exactly the plan (outside the range byte-identical) -> applied;
     anything else -> Unverified, "Check the text; ⌘Z undoes it", anchor spent
 ```
