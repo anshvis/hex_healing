@@ -315,8 +315,11 @@ pub(crate) trait Target {
     fn begin_edit(&mut self) -> Result<(), Why>;
     /// Releases the delivery lock.
     fn end_edit(&mut self);
-    /// Pastes over the selection through Hex's paste path.
-    fn paste(&mut self, text: &str) -> bool;
+    /// Whether Labs › Tidy after paste is still on.
+    fn lab_on(&mut self) -> bool;
+    /// Pastes over the selection through Hex's paste path, checking the
+    /// app, the field, and the lab again right before the keys are sent.
+    fn paste(&mut self, text: &str) -> Result<(), Why>;
     /// Waits between re-reads, for the app to apply an edit.
     fn wait(&mut self);
 }
@@ -460,15 +463,19 @@ fn paste_fallback(
         return refused(Why::NotEditable);
     }
     // Checked last, after the read and the selection: the keys go wherever
-    // the focus is when the paste is sent.
+    // the focus is when the paste is sent (and `paste` asks once more after
+    // its clipboard capture).
+    if !target.lab_on() {
+        return refused(Why::Disabled);
+    }
     if !target.is_frontmost() {
         return refused(Why::OtherApp);
     }
     if !target.is_focused() {
         return refused(Why::OtherField);
     }
-    if !target.paste(&plan.replacement) {
-        return refused(Why::NotEditable);
+    if let Err(why) = target.paste(&plan.replacement) {
+        return refused(why);
     }
     Fallback::Pasted(now, plan)
 }
@@ -655,10 +662,32 @@ mod ax {
             self.delivery = None;
         }
 
-        fn paste(&mut self, text: &str) -> bool {
-            crate::paste::replace_selection(text)
-                .inspect_err(|error| tracing::warn!(%error, "tidy could not paste its edit"))
-                .is_ok()
+        fn lab_on(&mut self) -> bool {
+            crate::labs::tidy_after_paste()
+        }
+
+        fn paste(&mut self, text: &str) -> Result<(), Why> {
+            let (pid, element) = (self.anchor.pid, &self.anchor.element);
+            let mut why = Why::NotEditable;
+            let ready = || {
+                let refused = if !crate::labs::tidy_after_paste() {
+                    Some(Why::Disabled)
+                } else if crate::dictation::context::frontmost_pid() != Some(pid) {
+                    Some(Why::OtherApp)
+                } else if !edit::is_focused(pid, element) {
+                    Some(Why::OtherField)
+                } else {
+                    None
+                };
+                if let Some(refused) = refused {
+                    why = refused;
+                }
+                refused.is_none()
+            };
+            crate::paste::replace_selection(text, ready).map_err(|error| {
+                tracing::warn!(%error, "tidy could not paste its edit");
+                why
+            })
         }
 
         fn wait(&mut self) {
@@ -879,6 +908,8 @@ mod tests {
         /// before the fallback's read.
         typed_meanwhile: Option<(usize, &'static str)>,
         reads: usize,
+        /// The lab turns off during the read-backs.
+        lab_off_later: bool,
         /// What `begin_edit` refuses with.
         refuse_edit: Option<Why>,
         editing: bool,
@@ -901,6 +932,7 @@ mod tests {
                 leaves_front: false,
                 typed_meanwhile: None,
                 reads: 0,
+                lab_off_later: false,
                 refuse_edit: None,
                 editing: false,
                 pasted: 0,
@@ -960,13 +992,16 @@ mod tests {
         fn is_focused(&mut self) -> bool {
             self.focused
         }
-        fn paste(&mut self, text: &str) -> bool {
+        fn lab_on(&mut self) -> bool {
+            !self.lab_off_later
+        }
+        fn paste(&mut self, text: &str) -> Result<(), Why> {
             assert!(self.editing, "pasted outside the delivery lock");
             self.pasted += 1;
             if !self.paste_lost {
                 self.replace_selection(text);
             }
-            true
+            Ok(())
         }
         fn is_frontmost(&mut self) -> bool {
             !self.leaves_front
@@ -1100,6 +1135,20 @@ mod tests {
                 assert_eq!(fake.text(), "um we ship it");
             }
         }
+    }
+
+    /// The lab turning off during the read-backs stops the fallback.
+    #[test]
+    fn the_fallback_rechecks_the_lab() {
+        let mut fake = Fake::new("um we ship it");
+        fake.ignores_set = true;
+        fake.lab_off_later = true;
+        assert_eq!(
+            run(&mut fake, "um we ship it", Some(0)),
+            Outcome::Unsupported(Why::Disabled)
+        );
+        assert_eq!((fake.set, fake.pasted), (1, 0));
+        assert_eq!(fake.text(), "um we ship it");
     }
 
     /// The fallback goes only to the anchored app while it is in front:

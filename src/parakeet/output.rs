@@ -245,6 +245,9 @@ pub(super) fn finish_output(
             }
         }
         OutputJob::Paste { kind, .. } => {
+            // As for a dictation: waits for a Tidy edit in progress and
+            // releases the anchor, since the text around it may move.
+            let _delivery = crate::dictation::paste_anchor::begin_paste();
             let result = match kind {
                 PasteKind::LastTranscript => last_transcript
                     .as_deref()
