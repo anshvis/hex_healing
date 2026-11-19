@@ -10,9 +10,10 @@ however recently the last one ran. Otherwise it prints what it is waiting on.
   and not a line of the parent's snapshot. v0 has no snapshot, so every trainable clip is new.
 - **A failed round** registers no version, so the parent and its snapshot stay and the same minutes
   count at the next run (the train row its prepare wrote is not a version).
-- **An undecided candidate** (not promoted or rejected) blocks the next round, gated or not: no second
+- **An undecided candidate** (not promoted, rejected or rolled back) blocks the next round, gated or not: no second
   round is stacked on top of it (D-53). The wait names its gate state: never gated, refused for thin
-  evidence (it stays a candidate, D-54) or passed and awaiting promotion.
+  evidence (it stays a candidate, D-54), passed and awaiting promotion, or passed but its promote
+  failed (`promote_failed`, T7.2; it stays a candidate).
 - **One round at a time:** `$HEALING_HOME/train-auto.lock`; a second `train auto` exits at once.
 
 The round (D-51, D-52): `prepare` (T6.1), then the runner. `local` (the default) trains on this Mac
@@ -95,6 +96,7 @@ class Progress:
     pending: str | None  # an undecided candidate
     next_version: str
     pending_gate: dict | None = None  # its latest `healing gate` decision
+    pending_failure: dict | None = None  # its latest `promote_failed` since that gate (T7.2)
 
     @property
     def enough(self) -> bool:
@@ -111,7 +113,10 @@ class Progress:
     def waiting(self) -> str:
         if self.pending:
             gate = self.pending_gate or {}
-            if gate.get("pass"):
+            if gate.get("pass") and self.pending_failure:
+                why = (f"passed the gate, but its promote failed ({self.pending_failure.get('reason')}); "
+                       f"`healing promote {self.pending}` again")
+            elif gate.get("pass"):
                 why = f"passed the gate; promote it (`healing promote {self.pending}`, T7.2)"
             elif gate.get("refused"):
                 why = (f"the gate refused it for thin evidence; review more clips, then `healing gate {self.pending}` "
@@ -146,8 +151,12 @@ def progress(store: Store, now: int | None = None) -> Progress:
     ).fetchall())
     minutes = sum(samples.get(c) or 0 for c in new) / SAMPLE_RATE / 60
     pending = next((v for v in state.ordered() if v.number > 0 and v.state == "candidate"), None)
+    failure = None
+    if pending and pending.promote_failures and pending.last_gate:
+        latest = pending.promote_failures[-1]
+        failure = latest if latest.get("at_ms", 0) >= pending.last_gate.get("at_ms", 0) else None
     return Progress(parent.name if parent else None, len(new), minutes, pending.name if pending else None,
-                    state.next_name(), pending.last_gate if pending else None)
+                    state.next_name(), pending.last_gate if pending else None, failure)
 
 
 def _progress(now: int | None) -> Progress:
