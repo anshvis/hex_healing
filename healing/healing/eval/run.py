@@ -253,9 +253,11 @@ def evaluate(
     parent: str = "current",
     vocabulary_entries: list[dict] | None = None,
     vocabulary_boost: str | None = None,
+    resolved: dict[str, SetRef] | None = None,
 ) -> dict:
     """Score `models` on `set_names`: the one place a request is validated (`EvalUsageError`) and its
-    set names deduplicated; the CLI only parses."""
+    set names deduplicated; the CLI only parses. `resolved` hands in a set already written (`healing
+    watch`'s post-promotion clips, scored with the named set's policy) instead of looking it up."""
     if not models:
         raise EvalUsageError("healing eval needs at least one --model <gguf>")
     if vocabulary not in VOCABULARY_MODES:
@@ -276,7 +278,7 @@ def evaluate(
     refs: list[SetRef] = []
     missing: dict[str, str] = {}
     for name in set_names:
-        found = resolve_set(name, store, parent)
+        found = (resolved or {}).get(name) or resolve_set(name, store, parent)
         if isinstance(found, Unavailable):
             missing[name] = found.reason
             progress(f"{name}: n/a ({found.reason})")
