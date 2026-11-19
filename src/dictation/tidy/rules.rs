@@ -34,7 +34,6 @@ const CUES: &[(&[&str], bool)] = &[
 const MAX_CORRECTION_WORDS: usize = 4;
 
 pub(super) const FILLER_CONFIDENCE: f32 = 0.95;
-const HABIT_CONFIDENCE: f32 = 0.7;
 const REPEAT_CONFIDENCE: f32 = 0.9;
 const STRONG_CUE_CONFIDENCE: f32 = 0.8;
 const WEAK_CUE_CONFIDENCE: f32 = 0.6;
@@ -188,8 +187,9 @@ pub(super) fn is_filler(word: &str) -> bool {
 /// "Like I said" keeps its "like"; "it's, like, fine" loses it.
 fn habit_phrases(text: &Text, habits: &Habits) -> Vec<Group> {
     let mut groups = Vec::new();
-    for phrase in &habits.phrases {
-        let phrase: Vec<String> = phrase
+    for habit in &habits.phrases {
+        let phrase: Vec<String> = habit
+            .phrase
             .split_whitespace()
             .map(|word| word.to_lowercase())
             .collect();
@@ -215,7 +215,7 @@ fn habit_phrases(text: &Text, habits: &Habits) -> Vec<Group> {
                     first,
                     last,
                     kind: Kind::Filler,
-                    confidence: HABIT_CONFIDENCE,
+                    confidence: habit.confidence,
                 });
             }
         }

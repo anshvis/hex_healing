@@ -13,6 +13,7 @@
 //!
 //! Nothing here stores the pasted text, and the log keeps counts only.
 
+mod habits;
 mod rules;
 
 use std::ops::Range;
@@ -58,10 +59,26 @@ pub(crate) struct Suggestion {
 }
 
 /// The person's filler habits (T8.2): words and phrases they usually accept
-/// removing, suggested only where a filler sits.
+/// removing, suggested only where a filler sits. Ranked: the first claims
+/// words another phrase also matches.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Habits {
-    pub(crate) phrases: Vec<String>,
+    pub(crate) phrases: Vec<Habit>,
+}
+
+/// One habit phrase (lowercase words) and the confidence its removal is
+/// suggested with: its accept rate, or less while still on trial (D-64, D-65).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Habit {
+    pub(crate) phrase: String,
+    pub(crate) confidence: f32,
+}
+
+/// The habits the settings' `tidy.habits_file` holds, read now: T8.3 calls
+/// this at each tidy, so a new `healing tidy habits` export applies to the
+/// next one. An unset, missing, oversized, or invalid file gives none.
+pub(crate) fn current_habits(settings: &crate::app_settings::TidySettings) -> Habits {
+    habits::load_habits(settings.habits_file.as_deref())
 }
 
 /// What the model is asked, after Clean up with Apple Intelligence's
@@ -823,9 +840,13 @@ mod tests {
     }
 
     #[test]
-    fn habits_only_in_filler_position() {
+    fn habit_only_in_filler_position() {
+        let habit = |phrase: &str| Habit {
+            phrase: phrase.into(),
+            confidence: 0.8,
+        };
         let habits = Habits {
-            phrases: vec!["like".into(), "you know".into()],
+            phrases: vec![habit("like"), habit("you know")],
         };
         let run = |pasted: &str| {
             let suggestions = suggest_with(pasted, "", "en", &habits, |_| None);
@@ -836,5 +857,47 @@ mod tests {
         assert_eq!(run("Like I said, it works."), "Like I said, it works.");
         assert_eq!(run("I like it."), "I like it.");
         assert_eq!(run("Do you know the way?"), "Do you know the way?");
+    }
+
+    /// AC-16 end to end on Hex's side: the file `healing tidy habits` wrote
+    /// from "basically" accepted 8 of 10 times and "actually" 1 of 10 has
+    /// basically and not actually, so basically is suggested in filler
+    /// position, ranked by its accept rate, and actually never is.
+    #[test]
+    fn habits_file_suggests_accepted_habit_not_skipped_one() {
+        let path = habits::scratch_file(
+            br#"{"version": 1, "generated_at_ms": 1,
+                "habits": [{"phrase": "basically", "accept_rate": 0.8}],
+                "trial": ["kind of"]}"#,
+        );
+        let habits = current_habits(&crate::app_settings::TidySettings {
+            habits_file: Some(path),
+        });
+        let run = |pasted: &str| suggest_with(pasted, "", "en", &habits, |_| None);
+
+        let pasted = "So, basically, we ship it today.";
+        let suggestions = run(pasted);
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(removed(pasted, &suggestions[0]), ", basically,");
+        assert_eq!(suggestions[0].kind, Kind::Filler);
+        assert_eq!(suggestions[0].confidence, 0.8);
+        assert_eq!(
+            assert_invariants(pasted, &suggestions),
+            "So we ship it today."
+        );
+        assert_eq!(tidied_with(&habits, "Basically, it works."), "It works.");
+        // Not where it means something.
+        assert!(run("It basically works.").is_empty());
+        // Skipped too often: never suggested, even in filler position.
+        assert!(run("So, actually, we ship it today.").is_empty());
+        // A trial phrase ranks below the habit.
+        let both = run("Basically, it's, kind of, done.");
+        assert_eq!(both.len(), 2);
+        assert!(both[0].confidence > both[1].confidence);
+    }
+
+    fn tidied_with(habits: &Habits, pasted: &str) -> String {
+        let suggestions = suggest_with(pasted, "", "en", habits, |_| None);
+        assert_invariants(pasted, &suggestions)
     }
 }
