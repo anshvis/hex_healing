@@ -67,16 +67,86 @@ impl Notice {
     }
 }
 
+/// Which copy of the capsule a state is.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum Role {
+    /// The `tidy-capsule` scene and the tests: Return and Copy change
+    /// nothing outside it, and its notices stay in it.
+    #[default]
+    Preview,
+    /// The overlay that takes the keys while a review is open. A review
+    /// that ends hides it at once and hands any notice to [`Role::Notice`].
+    Review,
+    /// The click-through overlay that never takes the keys, for the notices
+    /// a review leaves and the ones no review precedes.
+    Notice,
+}
+
+/// What a review must still match to show or apply: the dictation count
+/// and the lab's live gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Live {
+    pub(crate) generation: u64,
+    pub(crate) lab_on: bool,
+}
+
+impl Live {
+    /// The real gate: [`crate::dictation::tidy::last`] and the lab.
+    fn now() -> Self {
+        Self {
+            generation: crate::dictation::tidy::last::generation(),
+            lab_on: crate::labs::tidy_after_paste(),
+        }
+    }
+
+    /// The scene's: always current, the lab always on.
+    fn preview() -> Self {
+        Self {
+            generation: 0,
+            lab_on: true,
+        }
+    }
+
+    /// Why `session` may no longer show or apply, if it may not.
+    fn refuses(self, session: &TidySession) -> Option<&'static str> {
+        if !self.lab_on {
+            Some("the lab is off")
+        } else if session.is_stale(self.generation) {
+            Some("a newer dictation committed")
+        } else {
+            None
+        }
+    }
+}
+
+/// How often an open review rereads the lab and the dictation count, so
+/// turning the lab off closes it.
+const RECHECK_SECONDS: f64 = 0.25;
+
 /// The capsule's state.
-#[derive(Default)]
 pub(crate) struct TidyCapsule {
     pub(crate) session: Option<TidySession>,
     pub(crate) notice: Option<Notice>,
     /// When the notice closes the capsule, on the overlay's clock.
     closing_at: Option<f64>,
-    /// The scene's copy: Return and Copy change nothing outside it.
-    preview: bool,
+    role: Role,
+    /// The live gate a review is checked against before it shows, while it
+    /// is open, and before Return applies it.
+    live: fn() -> Live,
     overlay: Option<OverlayHandle<TidyCapsule>>,
+}
+
+impl Default for TidyCapsule {
+    fn default() -> Self {
+        Self {
+            session: None,
+            notice: None,
+            closing_at: None,
+            role: Role::Preview,
+            live: Live::preview,
+            overlay: None,
+        }
+    }
 }
 
 impl TidyCapsule {
@@ -84,28 +154,48 @@ impl TidyCapsule {
     pub(crate) fn preview() -> Self {
         Self {
             session: Some(crate::dictation::tidy::session::preview()),
-            preview: true,
+            ..Self::default()
+        }
+    }
+
+    fn overlay_state(role: Role) -> Self {
+        Self {
+            role,
+            live: Live::now,
             ..Self::default()
         }
     }
 
     /// Shows `session`, in place of any review open; with no suggestions it
-    /// says so and closes itself.
-    pub(crate) fn show(&mut self, session: TidySession) {
+    /// says so (and closes itself). Refuses, showing nothing, a review whose
+    /// dictation is no longer the last or whose lab turned off while it was
+    /// computed; returns whether the review is now open.
+    pub(crate) fn show(&mut self, session: TidySession) -> bool {
+        if let Some(why) = (self.live)().refuses(&session) {
+            tracing::info!(why, "tidy review not shown");
+            return false;
+        }
         self.closing_at = None;
         if session.is_empty() {
-            self.session = None;
-            self.notice = Some(Notice::NothingToTidy);
+            self.say(Notice::NothingToTidy);
         } else {
             self.session = Some(session);
             self.notice = None;
         }
+        true
     }
 
+    /// Ends any review and says `notice`. The review overlay hides at once,
+    /// giving the keys back, and the notice overlay shows it.
     fn say(&mut self, notice: Notice) {
         self.session = None;
-        self.notice = Some(notice);
         self.closing_at = None;
+        if self.role == Role::Review {
+            self.close();
+            notify(notice);
+        } else {
+            self.notice = Some(notice);
+        }
     }
 
     pub(crate) fn toggle(&mut self, index: usize) {
@@ -122,12 +212,19 @@ impl TidyCapsule {
 
     /// Return: applies the accepted edits through [`review::apply_accepted`]
     /// (T8.4's seam) or, for a copy-only dictation, copies the tidied text.
+    /// A review whose dictation is no longer the last, or whose lab turned
+    /// off, closes with nothing applied.
     pub(crate) fn apply(&mut self) {
         let Some(session) = self.session.take() else {
             return;
         };
+        if let Some(why) = (self.live)().refuses(&session) {
+            tracing::info!(why, "tidy review closed without applying");
+            self.close();
+            return;
+        }
         let pasted = session.delivery == Delivery::Pasted;
-        let applied = match (self.preview, pasted) {
+        let applied = match (self.role == Role::Preview, pasted) {
             (true, _) if session.accepted_count() == 0 => Applied::Nothing,
             (true, _) => Applied::Copied,
             (false, true) => review::apply_accepted(&session),
@@ -173,8 +270,19 @@ impl TidyCapsule {
         }
     }
 
-    /// Counts a notice down from when it first shows, then closes.
+    /// While a review is open, rereads the live gate every
+    /// [`RECHECK_SECONDS`] and closes it once it refuses; a notice counts
+    /// down from when it first shows, then closes.
     fn tick(&mut self, now: f64, tx: &mut Tx) -> bool {
+        if let Some(session) = &self.session {
+            if let Some(why) = (self.live)().refuses(session) {
+                tracing::info!(why, "tidy review closed");
+                self.close();
+                return true;
+            }
+            tx.wake_after(Duration::from_secs_f64(RECHECK_SECONDS));
+            return false;
+        }
         if self.notice.is_none() {
             return false;
         }
@@ -455,9 +563,15 @@ pub(super) fn scene(capsule: &TidyCapsule, p: Paint) -> El {
         }))
 }
 
-// ─── The macOS overlay ───────────────────────────────────────────────────────
+// ─── The macOS overlays ──────────────────────────────────────────────────────
 
+/// The review, which takes the keys while a review is open.
 static OVERLAY: OnceLock<OverlayHandle<TidyCapsule>> = OnceLock::new();
+/// The notices, click-through and never key, so typing or ⌘V right after a
+/// review reaches the app in front.
+static NOTICE: OnceLock<OverlayHandle<TidyCapsule>> = OnceLock::new();
+/// The notice window: one line of the panel.
+const NOTICE_WINDOW: (f32, f32) = (PANEL_WIDTH + 2.0 * INSET, 96.0);
 
 fn view(capsule: &TidyCapsule, cx: &mut Cx<TidyCapsule>) -> El {
     let p = Paint::new(cx.system_dark(), cx.env().scale);
@@ -479,43 +593,67 @@ fn poll(capsule: &mut TidyCapsule, now: f64, tx: &mut Tx) -> bool {
     capsule.tick(now, tx)
 }
 
-/// Adds the capsule's overlay, hidden, and closes an open review when a
-/// dictation commits.
+/// Adds the review and notice overlays, hidden, and closes an open review
+/// when a dictation commits.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn install<S: 'static>(app: &mut rune::App<S>) {
     use rune::{
         Align, DisplayTarget, KeyPolicy, OverlayInput, OverlayOptions, OverlayPlacement,
         OverlaySpec, ScreenEdge,
     };
-    let spec = OverlaySpec::new("Hex tidy review", WINDOW, view)
-        .options(OverlayOptions {
-            placement: Some(OverlayPlacement::Edge {
-                edge: ScreenEdge::Top,
-                margin: TOP_MARGIN,
-                align: Align::Center,
-                inset: 0.0,
-            }),
-            display: DisplayTarget::UnderPointer,
-            exclude_from_capture: true,
-            input: OverlayInput::Regions,
-            keys: KeyPolicy::OnDemand,
-            ..Default::default()
-        })
-        .release_gpu_when_hidden()
-        .on_key(on_key)
-        .poll(poll);
-    let overlay = app.overlay(spec, TidyCapsule::default());
-    let handle = overlay.clone();
-    overlay.update(move |capsule, _| capsule.overlay = Some(handle));
-    let committed = overlay.clone();
+    let options = |input, keys| OverlayOptions {
+        placement: Some(OverlayPlacement::Edge {
+            edge: ScreenEdge::Top,
+            margin: TOP_MARGIN,
+            align: Align::Center,
+            inset: 0.0,
+        }),
+        display: DisplayTarget::UnderPointer,
+        exclude_from_capture: true,
+        input,
+        keys,
+        ..Default::default()
+    };
+    let add = |app: &mut rune::App<S>, name, size, input, keys, role| {
+        let spec = OverlaySpec::new(name, size, view)
+            .options(options(input, keys))
+            .release_gpu_when_hidden()
+            .on_key(on_key)
+            .poll(poll);
+        let overlay = app.overlay(spec, TidyCapsule::overlay_state(role));
+        let handle = overlay.clone();
+        overlay.update(move |capsule, _| capsule.overlay = Some(handle));
+        overlay
+    };
+    let review = add(
+        app,
+        "Hex tidy review",
+        WINDOW,
+        OverlayInput::Regions,
+        KeyPolicy::OnDemand,
+        Role::Review,
+    );
+    let notice = add(
+        app,
+        "Hex tidy notice",
+        NOTICE_WINDOW,
+        OverlayInput::None,
+        KeyPolicy::None,
+        Role::Notice,
+    );
+    let committed = review.clone();
     crate::dictation::tidy::last::on_commit(move |generation| {
         committed.update(move |capsule, _| capsule.dictation_committed(generation));
     });
-    let _ = OVERLAY.set(overlay);
+    let _ = OVERLAY.set(review);
+    let _ = NOTICE.set(notice);
 }
 
 /// Opens the review of `session`, in place of any open, and takes the keys
-/// while it shows. Safe from any thread.
+/// while it shows. Safe from any thread. On the main loop it checks again
+/// that the session's dictation is still the last and the lab still on, so a
+/// dictation that committed after the worker's check never meets a stale
+/// review.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn open(session: TidySession) {
     let Some(overlay) = OVERLAY.get().cloned() else {
@@ -523,11 +661,24 @@ pub(crate) fn open(session: TidySession) {
     };
     let handle = overlay.clone();
     overlay.update(move |capsule, tx| {
-        capsule.show(session);
-        handle.show();
-        if capsule.session.is_some() {
+        if capsule.show(session) && capsule.session.is_some() {
+            handle.show();
             handle.request_keys();
+            tx.animated();
         }
+    });
+}
+
+/// Shows `notice` in the click-through notice overlay, which closes itself
+/// after a moment. Safe from any thread.
+fn notify(notice: Notice) {
+    let Some(overlay) = NOTICE.get().cloned() else {
+        return;
+    };
+    let handle = overlay.clone();
+    overlay.update(move |capsule, tx| {
+        capsule.say(notice);
+        handle.show();
         tx.animated();
     });
 }
@@ -535,15 +686,7 @@ pub(crate) fn open(session: TidySession) {
 /// Says there is no dictation to tidy, and closes after a moment.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn nothing_to_tidy() {
-    let Some(overlay) = OVERLAY.get().cloned() else {
-        return;
-    };
-    let handle = overlay.clone();
-    overlay.update(move |capsule, tx| {
-        capsule.say(Notice::NoDictation);
-        handle.show();
-        tx.animated();
-    });
+    notify(Notice::NoDictation);
 }
 
 #[cfg(test)]
@@ -628,6 +771,100 @@ mod tests {
         assert!(capsule.session.is_some(), "the same generation stays open");
         capsule.dictation_committed(1);
         assert!(capsule.session.is_none());
+    }
+
+    fn review(live: fn() -> Live) -> TidyCapsule {
+        TidyCapsule {
+            role: Role::Review,
+            live,
+            ..TidyCapsule::default()
+        }
+    }
+
+    fn current() -> Live {
+        Live {
+            generation: 0,
+            lab_on: true,
+        }
+    }
+
+    /// A dictation that committed after the review was computed (but
+    /// before the main loop showed it) keeps the stale review from opening.
+    #[test]
+    fn a_stale_review_never_shows() {
+        let mut capsule = review(|| Live {
+            generation: 1,
+            lab_on: true,
+        });
+        assert!(!capsule.show(crate::dictation::tidy::session::preview()));
+        assert!(capsule.session.is_none() && capsule.notice.is_none());
+        let mut fresh = review(current);
+        assert!(fresh.show(crate::dictation::tidy::session::preview()));
+        assert!(fresh.session.is_some());
+    }
+
+    /// The lab turned off while suggestions computed: nothing shows.
+    #[test]
+    fn a_review_computed_before_the_lab_turned_off_never_shows() {
+        let mut capsule = review(|| Live {
+            generation: 0,
+            lab_on: false,
+        });
+        assert!(!capsule.show(crate::dictation::tidy::session::preview()));
+        assert!(capsule.session.is_none());
+    }
+
+    /// Return checks again: a newer dictation or the lab going off since
+    /// the review opened closes it with nothing copied.
+    #[test]
+    fn return_refuses_a_stale_review_or_one_whose_lab_turned_off() {
+        for live in [
+            (|| Live {
+                generation: 1,
+                lab_on: true,
+            }) as fn() -> Live,
+            || Live {
+                generation: 0,
+                lab_on: false,
+            },
+        ] {
+            let mut capsule = TidyCapsule::preview();
+            capsule.live = live;
+            capsule.apply();
+            assert!(capsule.session.is_none());
+            assert_eq!(capsule.notice, None, "nothing was copied");
+        }
+    }
+
+    /// An open review closes within a poll of the lab turning off.
+    #[test]
+    fn turning_the_lab_off_closes_an_open_review() {
+        let mut capsule = review(current);
+        assert!(capsule.show(crate::dictation::tidy::session::preview()));
+        let mut tx = Tx::default();
+        assert!(!capsule.tick(0.0, &mut tx));
+        assert!(capsule.session.is_some());
+        capsule.live = || Live {
+            generation: 0,
+            lab_on: false,
+        };
+        assert!(capsule.tick(0.25, &mut tx));
+        assert!(capsule.session.is_none());
+    }
+
+    /// When a review ends, its key-taking panel leaves at once: the notice
+    /// goes to the click-through notice overlay, never this one.
+    #[test]
+    fn a_review_that_ends_keeps_no_notice_of_its_own() {
+        let mut capsule = review(current);
+        assert!(capsule.show(crate::dictation::tidy::session::preview()));
+        capsule.apply();
+        assert!(capsule.session.is_none() && capsule.notice.is_none());
+        let mut empty = crate::dictation::tidy::session::preview();
+        empty.suggestions.clear();
+        empty.accepted.clear();
+        assert!(capsule.show(empty));
+        assert!(capsule.session.is_none() && capsule.notice.is_none());
     }
 
     /// Accepting nothing and pressing Return closes with nothing changed.
