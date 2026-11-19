@@ -221,6 +221,10 @@ def main(argv: list[str] | None = None) -> int:
     seeded.add_argument("--settle", type=float, default=SETTLE_S, help="seconds to wait for Hex's 30 s watch (run)")
     seeded.add_argument("--apps", help="comma list to run a subset (run)")
 
+    tidy_group = commands.add_parser("tidy").add_subparsers(dest="command", required=True)
+    habits = tidy_group.add_parser("habits", help="which fillers you accept removing; writes tidy/habits.json for Hex (T8.2)")
+    habits.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     if args.group == "label":
         return _label_all(args) if args.command == "all" else _label(args)
@@ -279,6 +283,10 @@ def main(argv: list[str] | None = None) -> int:
         from healing import export as export_module
 
         return export_module.main(args)
+    if args.group == "tidy":
+        from healing import tidy as tidy_module
+
+        return tidy_module.main(args)
     if args.group == "protocol":
         return _protocol(args)
     if args.group == "schedule":
