@@ -13,6 +13,7 @@ pub(crate) mod developer_control;
 #[cfg(not(target_os = "macos"))]
 pub(crate) mod host;
 pub mod settings;
+pub(crate) mod tidy;
 pub(crate) mod transcript_cli;
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
@@ -98,6 +99,12 @@ pub enum ControlCommand {
         raw: bool,
     },
     PasteLast,
+    /// Labs › Tidy after paste (macOS): opens the review of the last
+    /// dictation's suggested edits, or with `print` answers them as JSON.
+    DictationTidy {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        print: bool,
+    },
     /// Labs › Transform typed text (Linux): runs the focused field's text
     /// through its Output steps and replaces it, as its shortcut does.
     TypedText,
@@ -255,6 +262,8 @@ pub enum ControlReply {
     Transcript {
         text: String,
     },
+    /// `hex dictation tidy --print`: the last dictation's suggestions.
+    TidySuggestions(Box<tidy::TidyReport>),
     Error {
         code: String,
         message: String,
@@ -1282,6 +1291,8 @@ mod tests {
                 raw: true,
             },
             ControlCommand::PasteLast,
+            ControlCommand::DictationTidy { print: false },
+            ControlCommand::DictationTidy { print: true },
             ControlCommand::TypedText,
             ControlCommand::Screenshot { pick: false },
             ControlCommand::Screenshot { pick: true },

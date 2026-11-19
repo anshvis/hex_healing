@@ -189,6 +189,12 @@ pub(super) const KEYS: &[Key] = &[
          the Output steps; none (the default) turns it off",
     ),
     optional(
+        "tidy_hotkey",
+        Kind::Shortcut(HotkeySlot::Tidy),
+        "Labs: opens the review of the last dictation's suggested tidy edits (macOS, with \
+         labs.tidy_after_paste; needs a key); none (the default) turns it off",
+    ),
+    optional(
         "second_dictation_hotkey",
         Kind::Shortcut(HotkeySlot::SecondDictation),
         "Labs: another shortcut that dictates like dictation_hotkey, such as a key on an \
@@ -331,6 +337,11 @@ pub(super) const KEYS: &[Key] = &[
         "labs.learn_from_corrections",
         Kind::Bool,
         "Labs: watch the field a dictation pasted into for a short time and keep the edited span on its History entry (macOS); password fields are never read",
+    ),
+    key(
+        "labs.tidy_after_paste",
+        Kind::Bool,
+        "Labs: tidy_hotkey, the menu bar's Tidy Last Dictation, and `hex dictation tidy` review suggested edits (fillers, repeats, spoken self-corrections) to the last dictation, accepted one by one (macOS)",
     ),
     key(
         "labs.mouse_shortcuts",

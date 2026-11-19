@@ -89,10 +89,11 @@ pub enum Feature {
     CursorContext,
     LearnFromCorrections,
     StreamImportedModels,
+    TidyAfterPaste,
 }
 
 impl Feature {
-    pub const ALL: [Self; 84] = [
+    pub const ALL: [Self; 85] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -177,6 +178,7 @@ impl Feature {
         Self::CursorContext,
         Self::LearnFromCorrections,
         Self::StreamImportedModels,
+        Self::TidyAfterPaste,
     ];
 }
 
@@ -268,6 +270,7 @@ impl Feature {
             Self::CursorContext => "cursor-context",
             Self::LearnFromCorrections => "learn-from-corrections",
             Self::MoreDictationShortcuts => "more-dictation-shortcuts",
+            Self::TidyAfterPaste => "tidy-after-paste",
         }
     }
 }

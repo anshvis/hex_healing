@@ -1279,6 +1279,13 @@ impl AppSettings {
         {
             others.push(raw.clone());
         }
+        if slot != HotkeySlot::Tidy
+            && cfg!(target_os = "macos")
+            && self.labs.tidy_after_paste
+            && let Some(tidy) = &self.tidy_hotkey
+        {
+            others.push(tidy.clone());
+        }
         if slot != HotkeySlot::TypedText
             && cfg!(target_os = "linux")
             && self.labs.typed_text
@@ -1352,6 +1359,8 @@ pub struct RuntimeHotkeys {
     pub capture_replay: Option<RuntimeHotkey>,
     /// Dictate without processing, while it is bound.
     pub raw_dictation: Option<RuntimeHotkey>,
+    /// Labs › Tidy after paste (macOS), while it is on and bound.
+    pub tidy: Option<RuntimeHotkey>,
     /// Labs › Transform typed text (Linux), while it is on and bound.
     pub typed_text: Option<RuntimeHotkey>,
     /// Labs › Second dictation shortcut, while it is on and bound.
@@ -1369,7 +1378,7 @@ pub struct RuntimeHotkeys {
 
 impl RuntimeHotkeys {
     /// The shortcuts [`Self::all`] lists by name, before the extra rows.
-    const NAMED: usize = 8;
+    const NAMED: usize = 9;
 
     /// Every shortcut Hex matches, for suppression and chord evidence.
     pub fn all(self) -> [Option<RuntimeHotkey>; Self::NAMED + MAX_EXTRA_DICTATION_SHORTCUTS] {
@@ -1382,6 +1391,7 @@ impl RuntimeHotkeys {
             self.raw_dictation,
             self.typed_text,
             self.second_dictation,
+            self.tidy,
         ];
         let mut all = [None; Self::NAMED + MAX_EXTRA_DICTATION_SHORTCUTS];
         all[..named.len()].copy_from_slice(&named);
@@ -1400,6 +1410,7 @@ impl Default for RuntimeHotkeys {
             capture: None,
             capture_replay: None,
             raw_dictation: None,
+            tidy: None,
             typed_text: None,
             second_dictation: None,
             extra_dictation: [None; MAX_EXTRA_DICTATION_SHORTCUTS],

@@ -12,7 +12,8 @@ use super::super::Ui;
 use super::super::controls::{DESCRIPTION, METRICS, Paint, PushSize, segmented_tx};
 use super::super::list_detail::{FOLDED, UNFOLDED};
 use super::super::lists::{Tone, tone_tag};
-use super::{Row, Tab, extras, flip, group, row_key, shown};
+use super::row_keys::row_key;
+use super::{Row, Tab, extras, flip, group, shown};
 use crate::desktop::i18n::{tr, tr_fill};
 use crate::labs::Group;
 

@@ -535,6 +535,7 @@ pub(super) fn validate_hotkey(
             | ShortcutTarget::Cancel
             | ShortcutTarget::Screenshot
             | ShortcutTarget::ScreenshotRecord
+            | ShortcutTarget::Tidy
     ) && binding.key.is_none()
     {
         return Err(tr("Add a key"));

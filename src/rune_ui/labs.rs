@@ -9,9 +9,12 @@
 mod accessibility_rows;
 mod browser_access;
 mod group;
+mod row_keys;
 #[cfg(all(target_os = "macos", hex_capture))]
 mod screenshots;
 mod store;
+#[cfg(target_os = "macos")]
+mod tidy;
 mod voice_prompt;
 mod yolo_mode;
 
@@ -944,6 +947,16 @@ fn rows(ui: &Ui) -> Vec<Row> {
     // macOS's Accessibility reads the focused text field.
     if caps.os == super::platform::Os::Macos {
         rows.extend(accessibility_rows::rows(&row));
+        // Labs › Tidy after paste: its capsule, shortcut, and menu item are
+        // macOS's so far (`platform::DIFFERENCES`).
+        if caps.tidy {
+            rows.push(row(
+                Feature::TidyAfterPaste,
+                Some(&BOOK),
+                tr("Tidy after paste"),
+                tr("Review suggested cleanups of the last dictation and accept each one"),
+            ));
+        }
     }
     rows.push(row(
         Feature::PickerSortFilter,
@@ -1170,100 +1183,6 @@ fn live_text_note_for(
     }
 }
 
-fn row_key(lab: Lab) -> &'static str {
-    let feature = match lab {
-        Lab::Feature(feature) => feature,
-        #[cfg(hex_capture)]
-        Lab::Annotate => return "lab-annotate",
-    };
-    match feature {
-        Feature::Meetings => "lab-meetings",
-        Feature::VoiceFilter => "lab-voice-filter",
-        Feature::Playground => "lab-playground",
-        Feature::LiveText => "lab-live-text",
-        Feature::FailureNotices => "lab-failure-notices",
-        Feature::LiveTyping => "lab-live-typing",
-        Feature::LiveChapters => "lab-live-chapters",
-        Feature::VocabularyBiasing => "lab-vocabulary-biasing",
-        Feature::ScreenVocabulary => "lab-screen-vocabulary",
-        Feature::TerminalPaste => "lab-terminal-paste",
-        Feature::KeyboardModelSwitching => "lab-keyboard-model-switching",
-        Feature::AppModelSwitching => "lab-app-model-switching",
-        Feature::MouseShortcuts => "lab-mouse-shortcuts",
-        Feature::PauseBrowser => "lab-pause-browser",
-        Feature::ShareShortcut => "lab-share-shortcut",
-        Feature::UnloadIdle => "lab-unload-idle",
-        Feature::KeepOnClipboard => "lab-keep-on-clipboard",
-        Feature::CopyOnly => "lab-copy-only",
-        Feature::ReturnToApp => "lab-return-to-app",
-        Feature::SpokenFormatting => "lab-spoken-formatting",
-        Feature::FillerWords => "lab-filler-words",
-        Feature::CleanUpWithAppleIntelligence => "lab-clean-up",
-        Feature::SubtitleExport => "lab-subtitle-export",
-        Feature::SecondDictationShortcut => "lab-second-dictation-shortcut",
-        Feature::MoreDictationShortcuts => "lab-more-dictation-shortcuts",
-        Feature::TerminalPasteShortcut => "lab-terminal-paste-shortcut",
-        Feature::SmartSpacing => "lab-smart-spacing",
-        Feature::SpokenSymbols => "lab-spoken-symbols",
-        Feature::PickerSortFilter => "lab-picker-sort-filter",
-        Feature::SidedChords => "lab-sided-modifier-chords",
-        Feature::TapOrHold => "lab-tap-or-hold",
-        Feature::DoubleTapModifiers => "lab-double-tap-modifiers",
-        Feature::BenchmarkDetails => "lab-benchmark-details",
-        Feature::ParakeetUltra => "lab-parakeet-ultra",
-        Feature::StandaloneSpecialKeys => "lab-special-keys",
-        Feature::HistoryStats => "lab-history-stats",
-        Feature::RecentDictations => "lab-recent-dictations",
-        Feature::SkipPauses => "lab-skip-pauses",
-        Feature::StopWhenCallEnds => "lab-stop-when-call-ends",
-        Feature::OutputFixes => "lab-output-fixes",
-        Feature::PickerActiveFirst => "lab-picker-active-first",
-        Feature::ModelInPlace => "lab-model-in-place",
-        Feature::KQuantModels => "lab-k-quant-models",
-        Feature::StreamImportedModels => "lab-stream-imported-models",
-        Feature::PickerDownloaded => "lab-picker-downloaded",
-        Feature::SectionKeyAlone => "lab-section-key",
-        Feature::KeepRecordings => "lab-keep-recordings",
-        Feature::HistoryMultiSelect => "lab-history-multi-select",
-        Feature::SettingsSearch => "lab-settings-search",
-        Feature::Appearance => "lab-appearance",
-        Feature::ReleaseNotesLink => "lab-release-notes-link",
-        Feature::HideMenuBarIcon => "lab-hide-menu-bar-icon",
-        Feature::PauseMenu => "lab-pause-menu",
-        Feature::QuitClosesWindow => "lab-quit-closes-window",
-        Feature::CapsLockDictation => "lab-caps-lock-dictation",
-        Feature::MovableMeetingCapsules => "lab-movable-meeting-capsules",
-        Feature::GnomeClipboardRestore => "lab-gnome-clipboard-restore",
-        Feature::TypedText => "lab-typed-text",
-        Feature::MeetingNotesVocabulary => "lab-meeting-notes-vocabulary",
-        Feature::NotchIndicator => "lab-notch-indicator",
-        Feature::MeetingFinishedEvent => "lab-meeting-finished-event",
-        Feature::GnomeMeetingCapsules => "lab-gnome-meeting-capsules",
-        Feature::GnomeAnnotate => "lab-gnome-annotate",
-        Feature::Screenshots => "lab-screenshots",
-        Feature::FollowLiveTranscript => "lab-follow-live-transcript",
-        Feature::MoreCallApps => "lab-more-call-apps",
-        Feature::AnnotateReplay => "lab-annotate-replay",
-        Feature::CopyCaptureZip => "lab-copy-capture-zip",
-        Feature::MeetingImport => "lab-meeting-import",
-        Feature::MeetingDescriptiveFilenames => "lab-meeting-descriptive-filenames",
-        Feature::MeetingNotesFile => "lab-meeting-notes-file",
-        Feature::ExpireMeetingAudio => "lab-expire-meeting-audio",
-        Feature::OpenCodeInWsl => "lab-opencode-in-wsl",
-        Feature::ShellCompletions => "lab-shell-completions",
-        Feature::YoloMode => "lab-yolo-mode",
-        Feature::ApiProcessing => "lab-api-processing",
-        Feature::ApiTimestamps => "lab-api-timestamps",
-        Feature::ApiBrowserAccess => "lab-api-browser-access",
-        Feature::SpeakersOnly => "lab-speakers-only",
-        Feature::KeepMicrophoneOpen => "lab-keep-microphone-open",
-        Feature::PrintStart => "lab-print-start",
-        Feature::VoicePrompt => "lab-voice-prompt",
-        Feature::CursorContext => "lab-cursor-context",
-        Feature::LearnFromCorrections => "lab-learn-from-corrections",
-    }
-}
-
 fn flip(ui: &mut Ui, lab: Lab) {
     let feature = match lab {
         Lab::Feature(feature) => feature,
@@ -1390,6 +1309,8 @@ fn extras(ui: &Ui, p: Paint, entry: &Row, layer: &mut Vec<El>) -> Option<El> {
         ),
         Lab::Feature(Feature::VoicePrompt) => Some(voice_prompt::body(ui, p)),
         Lab::Feature(Feature::ApiBrowserAccess) => Some(browser_access::body(ui, p)),
+        #[cfg(target_os = "macos")]
+        Lab::Feature(Feature::TidyAfterPaste) => Some(tidy::body(ui, p)),
         #[cfg(all(target_os = "macos", hex_capture))]
         Lab::Feature(Feature::Screenshots) => Some(screenshots::body(
             ui,

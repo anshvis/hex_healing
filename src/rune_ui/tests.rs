@@ -3383,6 +3383,8 @@ fn goldens() {
         ] {
             check_golden(scene, dark, PANE_SIZE);
         }
+        // Labs › Tidy after paste's review capsule, at its own size.
+        check_golden("tidy-capsule", dark, (600.0, 340.0));
     }
     check_golden("commands", true, GOLDEN_SIZE);
     check_golden("menus", false, GOLDEN_SIZE);
@@ -3400,6 +3402,27 @@ fn goldens() {
 
 mod onboarding_check;
 mod panes;
+
+/// Labs › Tidy after paste's capsule in its scene: Accept all turns every
+/// edit on, and Cancel closes it with nothing applied.
+#[test]
+fn tidy_capsule_accepts_all_and_cancels() {
+    let mut rt = runtime("tidy-capsule", false, (600.0, 340.0));
+    let accepted = |rt: &rune::Runtime<Ui>| {
+        rt.state
+            .tidy_preview
+            .as_ref()
+            .and_then(|capsule| capsule.session.as_ref())
+            .map(|session| session.accepted.clone())
+    };
+    assert_eq!(accepted(&rt), Some(vec![true, true, false, true]));
+    tap(&mut rt, "tidy-accept-all");
+    settle(&mut rt);
+    assert_eq!(accepted(&rt), Some(vec![true; 4]));
+    tap(&mut rt, "tidy-cancel");
+    settle(&mut rt);
+    assert_eq!(accepted(&rt), None);
+}
 
 /// Rune hands focus back to a menu's trigger when it closes. A key the
 /// window means for something else must not reach that trigger.

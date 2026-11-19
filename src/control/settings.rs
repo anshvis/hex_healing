@@ -342,6 +342,7 @@ pub fn apply(
         "dictation_hotkey"
         | "paste_last_hotkey"
         | "raw_dictation_hotkey"
+        | "tidy_hotkey"
         | "typed_text_hotkey"
         | "second_dictation_hotkey"
         | "terminal_paste_hotkey"
@@ -357,6 +358,7 @@ pub fn apply(
                 HotkeySlot::Dictation => Some(&candidate.dictation_hotkey),
                 HotkeySlot::PasteLast => candidate.paste_last_hotkey.as_ref(),
                 HotkeySlot::RawDictation => candidate.raw_dictation_hotkey.as_ref(),
+                HotkeySlot::Tidy => candidate.tidy_hotkey.as_ref(),
                 HotkeySlot::TypedText => candidate.typed_text_hotkey.as_ref(),
                 HotkeySlot::SecondDictation => candidate.second_dictation_hotkey.as_ref(),
                 // Each row of `extra_dictation_hotkeys` is validated from

@@ -78,6 +78,17 @@ pub fn learn_from_corrections() -> bool {
     LEARN_FROM_CORRECTIONS.load(Ordering::Acquire) && Feature::LearnFromCorrections.on_this_os()
 }
 
+/// Labs › Tidy after paste (macOS): its shortcut, menu-bar item, and `hex
+/// dictation tidy` open the review of the last dictation's suggested edits
+/// (read where each trigger starts). Off, they do nothing.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn tidy_after_paste() -> bool {
+    // The state word has no bit for it: its own atomic, as for
+    // `cursor_context`.
+    let _ = state();
+    TIDY_AFTER_PASTE.load(Ordering::Acquire) && Feature::TidyAfterPaste.on_this_os()
+}
+
 /// A finished Annotate capture copies to the clipboard as one light zip file
 /// rather than its image and summary (read where a written capture is copied).
 #[cfg_attr(not(hex_capture), allow(dead_code))]

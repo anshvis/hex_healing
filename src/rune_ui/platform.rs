@@ -70,6 +70,9 @@ pub(super) struct Capabilities {
     /// Labs › Transform typed text: run Output steps on text already typed in
     /// the focused field and replace it (Linux).
     pub(super) typed_text: bool,
+    /// Labs › Tidy after paste: its review capsule, Tidy shortcut, and
+    /// menu-bar item (macOS).
+    pub(super) tidy: bool,
 }
 
 impl Capabilities {
@@ -90,6 +93,7 @@ impl Capabilities {
         keyboard_model_switching: true,
         app_model_switching: false,
         typed_text: true,
+        tidy: false,
     };
 
     pub(super) const MACOS: Self = Self {
@@ -109,6 +113,7 @@ impl Capabilities {
         keyboard_model_switching: true,
         app_model_switching: true,
         typed_text: false,
+        tidy: true,
     };
 
     pub(super) const WINDOWS: Self = Self {
@@ -128,6 +133,7 @@ impl Capabilities {
         keyboard_model_switching: true,
         app_model_switching: true,
         typed_text: false,
+        tidy: false,
     };
 
     /// This OS's capabilities, with the rows its window host decides.
@@ -896,6 +902,13 @@ const DIFFERENCES: &[(&str, Difference)] = &[
         ),
     ),
     (
+        "tidy",
+        Difference::Pending(
+            "Linux and Windows have the rule pass; they need the review overlay to take \
+             keys, a tray item, and their shortcut adapters, and get no model pass",
+        ),
+    ),
+    (
         "typed_text",
         Difference::OsPattern(
             "the feature reads and replaces text in the focused Linux app; macOS and Windows \
@@ -907,7 +920,7 @@ const DIFFERENCES: &[(&str, Difference)] = &[
 impl Capabilities {
     /// Every capability by name. Destructuring makes a new capability a
     /// compile error here until it is named.
-    pub(super) fn fields(self) -> [(&'static str, bool); 15] {
+    pub(super) fn fields(self) -> [(&'static str, bool); 16] {
         let Self {
             os: _,
             meetings,
@@ -925,6 +938,7 @@ impl Capabilities {
             keyboard_model_switching,
             app_model_switching,
             typed_text,
+            tidy,
         } = self;
         [
             ("meetings", meetings),
@@ -942,6 +956,7 @@ impl Capabilities {
             ("keyboard_model_switching", keyboard_model_switching),
             ("app_model_switching", app_model_switching),
             ("typed_text", typed_text),
+            ("tidy", tidy),
         ]
     }
 }
@@ -949,6 +964,20 @@ impl Capabilities {
 #[cfg(test)]
 mod parity_tests {
     use super::*;
+
+    /// Labs › Tidy after paste lists, and its window rows show, exactly
+    /// where its capsule runs.
+    #[test]
+    fn tidy_capability_matches_its_lab() {
+        let here = if cfg!(target_os = "macos") {
+            Capabilities::MACOS
+        } else if cfg!(target_os = "windows") {
+            Capabilities::WINDOWS
+        } else {
+            Capabilities::LINUX
+        };
+        assert_eq!(here.tidy, crate::labs::Feature::TidyAfterPaste.on_this_os());
+    }
 
     #[test]
     fn capabilities_differ_across_oses_only_for_a_recorded_reason() {

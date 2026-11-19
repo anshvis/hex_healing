@@ -344,6 +344,7 @@ impl Hotkeys {
             }
             HotkeyAction::PasteLast
             | HotkeyAction::PasteMeeting
+            | HotkeyAction::Tidy
             | HotkeyAction::Cancel
             | HotkeyAction::CancelShortcut => print.send(PrintedTranscript::Cancelled),
         }
@@ -385,7 +386,7 @@ impl Hotkeys {
                 Some(HotkeyAction::Start) if others_recording => {
                     machine.suspend();
                 }
-                Some(HotkeyAction::PasteLast | HotkeyAction::PasteMeeting)
+                Some(HotkeyAction::PasteLast | HotkeyAction::PasteMeeting | HotkeyAction::Tidy)
                     if shortcut != Shortcut::Dictation => {}
                 Some(action) => actions.push((shortcut, action)),
                 None => {}

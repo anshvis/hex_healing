@@ -174,6 +174,12 @@ impl Pump {
                 "Transform typed text is Linux only",
             )),
             ControlCommand::Screenshot { pick } => screenshot(pick, reply),
+            // Labs › Tidy after paste: computed off this thread (T8.1's model
+            // pass can take 2 s), then the review opens on the main loop.
+            ControlCommand::DictationTidy { print } => {
+                background(reply, move || super::tidy::control(print));
+                None
+            }
             ControlCommand::MeetingRecord { title } => self.meeting(false, title, reply),
             ControlCommand::MeetingStop => self.meeting(true, None, reply),
             ControlCommand::MeetingCopyLast => Some(

@@ -8,6 +8,7 @@
 
 use std::io::Write;
 mod completions;
+mod dictation;
 mod embedded;
 mod human;
 mod prepare;
@@ -17,10 +18,7 @@ mod vocabulary_set;
 
 use clap::{Args, Subcommand};
 
-use super::{
-    CONTROL_VERSION, CaptureAction, ControlCommand, ControlReply, ControlRequest, ControlResponse,
-    Pane,
-};
+use super::{CONTROL_VERSION, ControlCommand, ControlReply, ControlRequest, ControlResponse, Pane};
 
 pub const EXIT_REFUSED: u8 = 1;
 pub const EXIT_NOT_RUNNING: u8 = 3;
@@ -67,17 +65,21 @@ pub enum ControlCli {
         #[command(flatten)]
         output: Output,
     },
-    /// Start, stop, toggle, or cancel a dictation, as the shortcut would.
+    /// Start, stop, toggle, or cancel a dictation, as the shortcut would,
+    /// or tidy the last one.
     ///
     /// `start` locks the recording: `stop` or the shortcut finishes it,
-    /// `cancel` discards it. Repeating a command changes nothing.
+    /// `cancel` discards it. Repeating a command changes nothing. `tidy`
+    /// opens the review of the last dictation's suggested edits (Labs ›
+    /// Tidy after paste, macOS).
     Dictation {
         #[arg(value_enum)]
-        action: CaptureAction,
+        action: dictation::Verb,
         /// With `start` (Labs › Print-only CLI dictation, macOS) or `stop`:
         /// answer with the transcript instead of pasting it. A printing start
         /// waits for its recording to end. Exits 4, printing nothing, when no
-        /// speech was heard.
+        /// speech was heard. With `tidy`: print the suggestions as JSON,
+        /// opening and applying nothing.
         #[arg(long)]
         print: bool,
         /// With `start` or `toggle`: paste the transcript as heard,
@@ -466,13 +468,7 @@ pub fn run(command: ControlCli, top_level: impl FnOnce() -> clap::Command) -> u8
             print,
             raw,
             output,
-        } => {
-            if let Err(error) = super::check_flags(action, print, raw) {
-                eprintln!("hex: {}", error.message);
-                return 2;
-            }
-            send(ControlCommand::Dictation { action, print, raw }, output)
-        }
+        } => dictation::run(action, print, raw, output),
         ControlCli::PasteLast { output } => send(ControlCommand::PasteLast, output),
         ControlCli::TypedText { output } => send(ControlCommand::TypedText, output),
         ControlCli::Transcribe {

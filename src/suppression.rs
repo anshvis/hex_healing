@@ -1177,6 +1177,12 @@ fn paste_action(input: InputEvent, hotkeys: RuntimeHotkeys) -> Option<HotkeyActi
                 .filter(|binding| binding.matches_key_press(code, flags))
                 .map(|_| HotkeyAction::PasteMeeting)
         })
+        .or_else(|| {
+            hotkeys
+                .tidy
+                .filter(|binding| binding.matches_key_press(code, flags))
+                .map(|_| HotkeyAction::Tidy)
+        })
 }
 
 #[cfg(test)]

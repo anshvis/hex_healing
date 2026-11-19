@@ -1296,15 +1296,15 @@ fn handle_hotkey_action(
                 indicator,
             )
         }
-        HotkeyAction::PasteLast | HotkeyAction::PasteMeeting => {
+        HotkeyAction::PasteLast | HotkeyAction::PasteMeeting | HotkeyAction::Tidy => {
             // The paste chord's modifier press started a provisional capture.
             context.cancel();
             feedback::retract_start();
             dictation.cancel()?;
             let paste_result = match action {
                 HotkeyAction::PasteLast => worker.paste_last(),
-                HotkeyAction::PasteMeeting => worker.paste_meeting(),
-                _ => unreachable!(),
+                HotkeyAction::Tidy => crate::macos_rune::tidy::shortcut(),
+                _ => worker.paste_meeting(),
             };
             if let Err(error) = paste_result {
                 feedback::play(Tone::Error);

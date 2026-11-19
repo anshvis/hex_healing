@@ -80,6 +80,10 @@ pub struct LabsSettings {
     /// After a paste, Hex watches the pasted-into field briefly and keeps the
     /// edited span on the History entry (macOS).
     pub learn_from_corrections: bool,
+    /// Labs › Tidy after paste (macOS): `tidy_hotkey`, the menu bar's Tidy
+    /// Last Dictation, and `hex dictation tidy` review suggested edits to the
+    /// last dictation (M8).
+    pub tidy_after_paste: bool,
     /// Mouse buttons may be recorded as shortcuts (macOS, issue 209).
     pub mouse_shortcuts: bool,
     /// The engine unloads the speech model after `unload_idle_minutes` (5, 15 default, 30, 60) unused (issue 442).
@@ -369,6 +373,7 @@ impl Default for LabsSettings {
             screen_vocabulary: false,
             cursor_context: false,
             learn_from_corrections: false,
+            tidy_after_paste: false,
             mouse_shortcuts: false,
             unload_idle: false,
             unload_idle_minutes: 15,

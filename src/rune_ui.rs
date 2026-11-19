@@ -69,6 +69,7 @@ mod spark;
 mod speech_model;
 #[cfg(target_os = "macos")]
 pub(crate) mod story_link;
+pub(crate) mod tidy_capsule;
 mod vocabulary;
 
 use std::sync::Arc;
@@ -659,6 +660,9 @@ pub(crate) struct Ui {
     advanced: Vec<Pane>,
     /// The Labs page shows in place of a pane.
     labs_open: bool,
+    /// The `tidy-capsule` scene: Labs › Tidy after paste's review, drawn
+    /// in place of the window.
+    tidy_preview: Option<tidy_capsule::TidyCapsule>,
     /// The Labs store's search, tab, and chip.
     lab_store: labs::Store,
     /// A scene previewing the badge of a build kind this binary is not.
@@ -790,6 +794,7 @@ impl Ui {
             general_search: TextEdit::default(),
             advanced: Vec::new(),
             labs_open: false,
+            tidy_preview: None,
             lab_store: labs::Store::default(),
             build_preview: None,
             capture: Capture::Idle,
@@ -1449,6 +1454,9 @@ fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
     // subclass re-applies it after each one while a theme is forced.
     #[cfg(target_os = "windows")]
     crate::windows::rune::match_title_bar(p.k.c.bg_deep, dark, cx.system_dark());
+    if let Some(capsule) = &ui.tidy_preview {
+        return tidy_capsule::scene(capsule, p);
+    }
     // Menus and popovers mount above the page (rune-kit overlays).
     let mut layer = Vec::new();
     let (actions, body) = match ui.pane {
