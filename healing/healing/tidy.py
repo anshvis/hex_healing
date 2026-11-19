@@ -31,7 +31,7 @@ from healing.store import now_ms
 
 STARTERS = ("like", "you know", "basically", "actually", "kind of", "sort of", "i guess")
 # Hex's own fillers, which its rule pass always suggests: never a habit (`tidy/rules.rs` FILLERS).
-BUILT_IN_FILLERS = frozenset({"um", "umm", "uh", "uhh", "erm", "er", "hmm", "hm", "ah"})
+BUILT_IN_FILLERS = frozenset({"um", "umm", "uh", "uhh", "erm", "er", "hmm", "hm"})
 # The decision kinds that are a removal of the phrase as a filler. A model-pass removal of a habit word
 # is classified a self-correction by T8.1 (it isn't a built-in filler), and it is the same decision.
 REMOVAL_KINDS = frozenset({"filler", "self_correction"})

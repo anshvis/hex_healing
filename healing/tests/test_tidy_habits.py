@@ -168,3 +168,17 @@ def test_cli_prints_and_writes(store, capsys):
     assert printed["file"].endswith("tidy/habits.json")
     assert main(["tidy", "habits"]) == 0
     assert "basically" in capsys.readouterr().out
+
+
+def test_ah_is_learnable_since_tidy_does_not_suggest_it_built_in(store):
+    """Only Hex's own rule fillers are excluded; "ah" isn't one of them (`tidy/rules.rs` FILLERS)."""
+    for i in range(5):
+        cid = add_clip(store, next(_n), raw="ah we ship today", ts=NOW - DAY + 20 + i, audio=False,
+                       outcome="edited", edited="We ship today.")
+        if i < 3:
+            store.db.execute("INSERT INTO edits (clip_id, idx, raw_from, final_from, to_text, kind) VALUES (?, 0, 'ah', 'Ah,', '', 'rewrite')",
+                             (cid,))
+    store.db.commit()
+    rows = by_phrase(tidy.habit_table(store, now=NOW))
+    assert rows["ah"].status == "trial"
+    assert not tidy.BUILT_IN_FILLERS & {"ah"}
