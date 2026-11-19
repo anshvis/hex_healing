@@ -272,13 +272,21 @@ pub fn apply(
     let value = parse(key, raw, shortcuts)?;
     let mut json = serde_json::to_value(settings)
         .map_err(|error| ControlError::new("internal", error.to_string()))?;
-    // An unset optional setting is left out of the file, so give it a slot.
+    // An unset optional setting is left out of the file, and so is a group
+    // holding only unset ones (`tidy`), so give it a slot.
     let path = pointer(key.key);
-    if json.pointer(&path).is_none()
-        && let Some((parent, leaf)) = path.rsplit_once('/')
-        && let Some(Value::Object(object)) = json.pointer_mut(parent)
-    {
-        object.insert(leaf.to_owned(), Value::Null);
+    if json.pointer(&path).is_none() {
+        let (groups, leaf) = key.key.rsplit_once('.').unwrap_or(("", key.key));
+        let mut slot = &mut json;
+        for group in groups.split('.').filter(|group| !group.is_empty()) {
+            let Value::Object(object) = slot else { break };
+            slot = object
+                .entry(group.to_owned())
+                .or_insert_with(|| Value::Object(Default::default()));
+        }
+        if let Value::Object(object) = slot {
+            object.insert(leaf.to_owned(), Value::Null);
+        }
     }
     let slot = json
         .pointer_mut(&path)
@@ -804,6 +812,9 @@ mod tests {
                 opencode_model: Some("anthropic/claude-haiku".into()),
                 ..Default::default()
             },
+            tidy: crate::app_settings::TidySettings {
+                habits_file: Some("/tmp/habits.json".into()),
+            },
             ..Default::default()
         };
         let json = serde_json::to_value(settings).unwrap();
@@ -831,6 +842,47 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), keys().count(), "a key is listed twice");
+    }
+
+    /// `tidy` is left out of the file while unset, so setting its one key
+    /// gives it a slot first; clearing it leaves `tidy` out again.
+    #[test]
+    fn tidy_habits_file_sets_from_nothing_and_clears() {
+        let change = apply(
+            &AppSettings::default(),
+            "tidy.habits_file",
+            "/tmp/hex-healing/tidy/habits.json",
+            &rules(),
+        )
+        .unwrap();
+        assert_eq!(
+            change.settings.tidy.habits_file.as_deref(),
+            Some(std::path::Path::new("/tmp/hex-healing/tidy/habits.json"))
+        );
+        let shown = get(&change.settings, "tidy.habits_file").unwrap();
+        assert_eq!(
+            shown[0].value,
+            Value::String("/tmp/hex-healing/tidy/habits.json".into())
+        );
+        assert!(
+            apply(
+                &AppSettings::default(),
+                "tidy.habits_file",
+                "habits.json",
+                &rules()
+            )
+            .is_err()
+        );
+        let cleared = apply(&change.settings, "tidy.habits_file", "none", &rules()).unwrap();
+        assert_eq!(cleared.settings.tidy.habits_file, None);
+        assert!(
+            serde_json::to_value(&cleared.settings)
+                .unwrap()
+                .get("tidy")
+                .is_none()
+        );
+        let unset = get(&AppSettings::default(), "tidy.habits_file").unwrap();
+        assert_eq!(unset[0].value, Value::Null);
     }
 
     #[test]

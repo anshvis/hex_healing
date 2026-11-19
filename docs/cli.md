@@ -590,6 +590,11 @@ support this lab.
   (follow the system language), the same languages Settings offers. Following
   the system, a Chinese locale with the Hant script or the TW, HK, or MO
   region shows Traditional Chinese; other Chinese locales show Simplified.
+- `tidy.habits_file` takes an absolute path (`~/` expands) or `none` (the
+  default: no habits). It names the filler habits file `healing tidy habits`
+  writes (`$HEALING_HOME/tidy/habits.json`), which Labs › Tidy after paste
+  reads at each tidy; a missing, invalid, or oversized file (over 64 KiB or 64
+  phrases) means no habits. Unset, `tidy` stays out of `settings.json`.
 - `updates.channel` takes `stable`, `dev`, or `none` (follow the build: the
   channel it was published on), and checks for updates at once. Choosing
   another channel than the build's offers that channel's current release
@@ -641,7 +646,8 @@ Writable keys: `release_microphone_while_idle`,
 `experimental.hex_microphone`, `experimental.hex_microphone_mode`,
 `experimental.hex_microphone_comfort_noise`,
 `experimental.hex_microphone_strength`, `enable_on_launch`,
-`paste_with_shift`, `ui_language`, `indicator_position`, `updates.channel`.
+`paste_with_shift`, `ui_language`, `indicator_position`, `tidy.habits_file`,
+`updates.channel`.
 
 `transcription.recognition_hints` is deprecated: recognition hints merged into
 the [vocabulary](features/vocabulary.md). `get` returns the vocabulary's terms,
