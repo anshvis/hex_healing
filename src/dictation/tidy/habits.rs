@@ -65,10 +65,7 @@ pub(super) fn load_habits(file: Option<&Path>) -> Habits {
 }
 
 fn read(path: &Path) -> Result<Habits, &'static str> {
-    let file = std::fs::File::open(path).map_err(|error| match error.kind() {
-        std::io::ErrorKind::NotFound => "missing",
-        _ => "unreadable",
-    })?;
+    let file = open_regular(path)?;
     let mut bytes = Vec::new();
     file.take(MAX_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -77,6 +74,28 @@ fn read(path: &Path) -> Result<Habits, &'static str> {
         return Err("oversized");
     }
     parse(&bytes)
+}
+
+/// Opens `path` only if it is a regular file. On Unix it opens without
+/// blocking, so a FIFO or device named by the setting never stalls the
+/// tidy worker, and checks the opened descriptor rather than the path.
+fn open_regular(path: &Path) -> Result<std::fs::File, &'static str> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => "missing",
+        _ => "unreadable",
+    })?;
+    let metadata = file.metadata().map_err(|_| "unreadable")?;
+    if !metadata.is_file() {
+        return Err("not a regular file");
+    }
+    Ok(file)
 }
 
 fn parse(bytes: &[u8]) -> Result<Habits, &'static str> {
@@ -172,6 +191,27 @@ mod tests {
                 ("i guess", TRIAL_CONFIDENCE),
             ]
         );
+    }
+
+    /// A FIFO with no writer would block a plain open forever; a folder is
+    /// not a habits file either. Both read as no habits, at once.
+    #[cfg(unix)]
+    #[test]
+    fn special_files_mean_no_habits_without_blocking() {
+        let fifo = scratch_file(b"").with_file_name("habits.fifo");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (done, finished) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(load_habits(Some(&path)).phrases.is_empty());
+        });
+        let empty = finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reading a FIFO habits file blocked");
+        assert!(empty);
+        let folder = scratch_file(b"").with_file_name("");
+        assert!(load_habits(Some(&folder)).phrases.is_empty());
     }
 
     #[test]
