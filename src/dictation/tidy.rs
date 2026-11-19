@@ -259,10 +259,10 @@ fn parse_answer(answer: &str) -> Result<Vec<ModelEdit>, AnswerError> {
 
 /// The model's edits that survive every check, and how many were dropped.
 /// Each `find` must occur exactly once, on word boundaries; a removal must
-/// leave a subsequence of its words, and a replacement may swap in at most
-/// one word, never lengthen; each edit alone, and all of them together,
-/// must pass Clean up with Apple Intelligence's guard (numbers, negations,
-/// overlap). Later edits that overlap earlier ones are dropped.
+/// leave a subsequence of its words, and a misheard fix swaps words one for
+/// one with at most one new word; each edit alone, and all of them together, must leave
+/// the text made of its own words and pass Clean up with Apple
+/// Intelligence's guard (`composes`). Later edits that overlap earlier ones are dropped.
 fn model_edits(text: &Text, answer: &str) -> (Vec<Edit>, usize) {
     let Ok(edits) = parse_answer(answer) else {
         return (Vec::new(), 1);
@@ -278,8 +278,7 @@ fn model_edits(text: &Text, answer: &str) -> (Vec<Edit>, usize) {
     }
     let mut all = kept.clone();
     all.sort_by_key(|edit| edit.range.start);
-    if !crate::dictation::apple_cleanup::is_acceptable(text.source, &apply_edits(text.source, &all))
-    {
+    if !composes(text.source, &all) {
         return (Vec::new(), total);
     }
     let dropped = total - kept.len();
@@ -324,7 +323,7 @@ fn model_edit(text: &Text, edit: &ModelEdit) -> Option<Edit> {
             };
             plain(start..end, &edit.replace, kind, MODEL_REMOVAL_CONFIDENCE)
         }
-        1 if found.len() <= MAX_MISHEARD_WORDS => plain(
+        1 if found.len() <= MAX_MISHEARD_WORDS && replaced.len() == found.len() => plain(
             start..end,
             &edit.replace,
             Kind::Misheard,
@@ -332,8 +331,30 @@ fn model_edit(text: &Text, edit: &ModelEdit) -> Option<Edit> {
         ),
         _ => return None,
     };
-    let applied = apply_edits(source, std::slice::from_ref(&edit));
-    crate::dictation::apple_cleanup::is_acceptable(source, &applied).then_some(edit)
+    composes(source, std::slice::from_ref(&edit)).then_some(edit)
+}
+
+/// Whether `edits` together leave `source` made of its own words: the
+/// result's words are a subsequence of the original's, plus at most one
+/// new word per misheard edit, so no edit merges two words into a new one
+/// ("send it" → "sendit"); and the result passes Clean up with Apple
+/// Intelligence's guard (numbers, negations, overlap).
+fn composes(source: &str, edits: &[Edit]) -> bool {
+    let applied = apply_edits(source, edits);
+    let lower = |text: &str| -> Vec<String> {
+        Text::new(text)
+            .words
+            .into_iter()
+            .map(|word| word.lower)
+            .collect()
+    };
+    let (before, after) = (lower(source), lower(&applied));
+    let misheard = edits
+        .iter()
+        .filter(|edit| edit.kind == Kind::Misheard)
+        .count();
+    after.len() - common_subsequence(&before, &after) <= misheard
+        && crate::dictation::apple_cleanup::is_acceptable(source, &applied)
 }
 
 fn plain(range: Range<usize>, replacement: &str, kind: Kind, confidence: f32) -> Edit {
@@ -612,6 +633,21 @@ mod tests {
             assert_invariants(pasted, &suggestions),
             "We should use Claude code for this"
         );
+    }
+
+    /// A model edit that merges two words ("send " → "send" gives "sendit")
+    /// makes a new word, so it is dropped, alone or among others.
+    #[test]
+    fn model_edit_merging_words_rejected() {
+        let pasted = "We send it today";
+        assert!(with_model(pasted, r#"[{"find": "send ", "replace": "send"}]"#).is_empty());
+        assert!(with_model(pasted, r#"[{"find": "We send", "replace": "Wesend"}]"#).is_empty());
+        let suggestions = with_model(
+            pasted,
+            r#"[{"find": "send ", "replace": "send"}, {"find": "today", "replace": "Tuesday"}]"#,
+        );
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].kind, Kind::Misheard);
     }
 
     #[test]
