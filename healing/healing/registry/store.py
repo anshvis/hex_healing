@@ -1,7 +1,8 @@
 """`$HEALING_HOME/registry/versions.jsonl`: the append-only model registry.
 
 Each line is one event, `{event, version, at_ms, ...}`: `registered` (the whole version record),
-`scored`, `gate` (one `healing gate` decision, T7.1), `promoted`, `rejected`, `rolled_back`, `restored`,
+`scored`, `gate` (one `healing gate` decision, T7.1), `promoted`, `promote_failed` (Hex didn't confirm the
+switch, T7.2; the version stays a candidate), `rejected`, `rolled_back`, `restored`,
 `pruned_artifact`, and the one `golden_frozen` pin. The current state is a fold of the events; nothing is ever rewritten.
 
 Every append is one whole line written with a single `write` and fsynced, under `registry/.lock`. A
@@ -16,12 +17,13 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from healing.registry import objects
 from healing.registry.objects import fsync_dir, owner_dir, registry_dir
 from healing.store import locked, now_ms
 
-EVENTS = ("registered", "scored", "gate", "promoted", "rejected", "rolled_back", "restored", "pruned_artifact", "golden_frozen")
+EVENTS = ("registered", "scored", "gate", "promoted", "promote_failed", "rejected", "rolled_back", "restored", "pruned_artifact", "golden_frozen")
 ARTIFACT_KINDS = ("gguf", "lora_delta", "merged_nemo")
 KEEP_PREVIOUS_PROMOTED = 2  # besides current and v0, the GGUFs of the last two promoted versions stay
 
@@ -114,6 +116,7 @@ class Version:
     restores: list[dict] = field(default_factory=list)
     pruned: dict[str, str] = field(default_factory=dict)  # sha pruned -> artifact kind
     gates: list[dict] = field(default_factory=list)  # every `healing gate` decision, oldest first
+    promote_failures: list[dict] = field(default_factory=list)  # every `promote_failed`, oldest first
 
     @property
     def number(self) -> int:
@@ -144,7 +147,8 @@ class Version:
 
     def as_dict(self) -> dict:
         return {**self.record, "version": self.name, "state": self.state, "reason": self.reason,
-                "scores": self.scores, "restores": self.restores, "pruned": self.pruned, "gates": self.gates}
+                "scores": self.scores, "restores": self.restores, "pruned": self.pruned, "gates": self.gates,
+                "promote_failures": self.promote_failures}
 
 
 @dataclass
@@ -198,6 +202,8 @@ def fold(events: list[dict]) -> State:
             version.state, version.reason = "promoted", event.get("reason")
             state.current = name
             state.promotions.append(name)
+        elif kind == "promote_failed":
+            version.promote_failures.append({k: v for k, v in event.items() if k not in ("event", "version")})
         elif kind == "rejected":
             version.state, version.reason = "rejected", event.get("reason")
         elif kind == "rolled_back":
@@ -264,13 +270,33 @@ def record_scores(name: str, scores: dict) -> None:
         append({"event": "scored", "version": version.name, "scores": scores})
 
 
-def promote(name: str, reason: str | None = None) -> None:
+def promote(name: str, reason: str | None = None, *, expect_current: str | None = None,
+            check: Callable[[State, Version], str | None] | None = None, **fields) -> None:
+    """Make a candidate current. With `expect_current`, the current version must still be that one, and
+    `check(state, version)` (a problem, or None) is asked again, both under the lock, so of two promotes
+    started from the same current only the first is recorded."""
+    with lock():
+        state = load()
+        version = state.get(name)
+        if version.state != "candidate":
+            raise RegistryError(f"{version.name} is {version.state}; only a candidate is promoted")
+        if expect_current is not None and state.current != expect_current:
+            raise RegistryError(f"the current version is {state.current} now, not {expect_current}; "
+                                "another promote or rollback ran meanwhile")
+        problem = check(state, version) if check else None
+        if problem:
+            raise RegistryError(problem)
+        append({"event": "promoted", "version": version.name, "reason": reason, **fields})
+        retain()
+
+
+def record_promote_failure(name: str, reason: str, **fields) -> None:
+    """Hex didn't confirm a promote's switch: the version stays a candidate (promote may run again)."""
     with lock():
         version = load().get(name)
         if version.state != "candidate":
-            raise RegistryError(f"{version.name} is {version.state}; only a candidate is promoted")
-        append({"event": "promoted", "version": version.name, "reason": reason})
-        retain()
+            raise RegistryError(f"{version.name} is {version.state}; only a candidate's promote fails")
+        append({"event": "promote_failed", "version": version.name, "reason": reason, **fields})
 
 
 def reject(name: str, reason: str) -> None:
@@ -305,11 +331,16 @@ def record_gate(name: str, decision: dict, reject_reason: str | None) -> None:
             retain()
 
 
-def roll_back(name: str, reason: str, to: str | None = None) -> None:
+def roll_back(name: str, reason: str, to: str | None = None, *, expect_current: str | None = None,
+              **fields) -> None:
     """Roll back a promoted version. When it is current, a distinct, still-promoted successor (`to`, else
-    the latest other promoted version) becomes current, so exactly one version stays current."""
+    the latest other promoted version) becomes current, so exactly one version stays current. With
+    `expect_current`, the current version must still be that one."""
     with lock():
         state = load()
+        if expect_current is not None and state.current != expect_current:
+            raise RegistryError(f"the current version is {state.current} now, not {expect_current}; "
+                                "another promote or rollback ran meanwhile")
         version = state.get(name)
         if version.state != "promoted":
             raise RegistryError(f"{version.name} is {version.state}; only a promoted version rolls back")
@@ -323,7 +354,7 @@ def roll_back(name: str, reason: str, to: str | None = None) -> None:
             if successor is None:
                 raise RegistryError(f"{version.name} is current and no other promoted version could take over")
         append({"event": "rolled_back", "version": version.name, "reason": reason,
-                **({"to": successor} if successor else {})})
+                **({"to": successor} if successor else {}), **fields})
         retain()
 
 
@@ -344,9 +375,9 @@ def pin_golden(sha256: str, n: int) -> bool:
 
 # ---- retention ----------------------------------------------------------------------------------
 
-def gguf_keepers(state: State) -> set[str]:
-    """Versions whose GGUF stays: v0, current, the previous two promoted, and undecided candidates
-    (a candidate still waiting for its gate needs its file; once rejected it goes)."""
+def promoted_keepers(state: State) -> set[str]:
+    """v0, current and the previous two promoted versions: the GGUFs retention keeps for a rollback, and
+    the imports `healing promote` leaves in Hex (T7.2)."""
     keep = {"v0"} if "v0" in state.versions else set()
     if state.current:
         keep.add(state.current)
@@ -357,8 +388,13 @@ def gguf_keepers(state: State) -> set[str]:
         if len(previous) == KEEP_PREVIOUS_PROMOTED:
             break
     keep.update(previous)
-    keep.update(v.name for v in state.versions.values() if v.state == "candidate")
     return keep
+
+
+def gguf_keepers(state: State) -> set[str]:
+    """Versions whose GGUF stays: `promoted_keepers` and undecided candidates (a candidate still waiting
+    for its gate needs its file; once rejected it goes)."""
+    return promoted_keepers(state) | {v.name for v in state.versions.values() if v.state == "candidate"}
 
 
 def retain() -> list[tuple[str, str, str]]:
