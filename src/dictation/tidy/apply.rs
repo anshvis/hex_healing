@@ -394,7 +394,7 @@ fn edit(
     text: &str,
     edits: &[Suggestion],
 ) -> Outcome {
-    let mut selected = Vec::new();
+    let mut selected = None;
     let outcome = edit_selecting(
         target,
         before,
@@ -405,18 +405,16 @@ fn edit(
         edits,
         &mut selected,
     );
-    if !matches!(outcome, Outcome::Applied(_)) {
-        for range in selected.into_iter().rev() {
-            if target.selection() == Some(range.clone()) {
-                target.select(range.end..range.end);
-                break;
-            }
-        }
+    if !matches!(outcome, Outcome::Applied(_))
+        && let Some(range) = selected
+        && target.selection() == Some(range.clone())
+    {
+        target.select(range.end..range.end);
     }
     outcome
 }
 
-/// [`edit`]'s steps, noting each range it selected in `selected`.
+/// [`edit`]'s steps, noting in `selected` the last range it selected.
 #[allow(clippy::too_many_arguments)]
 fn edit_selecting(
     target: &mut impl Target,
@@ -426,17 +424,21 @@ fn edit_selecting(
     expected_start: Option<usize>,
     text: &str,
     edits: &[Suggestion],
-    selected: &mut Vec<Range<usize>>,
+    selected: &mut Option<Range<usize>>,
 ) -> Outcome {
-    if target.can_set_text() {
-        selected.push(plan.range.clone());
-        if target.select(plan.range.clone()) && target.set_selected_text(&plan.replacement) {
-            match read_back(target, before, plan) {
-                Check::Applied => return Outcome::Applied(Method::SelectedText),
-                Check::Other => return Outcome::Unsupported(Why::Unverified),
-                // Accepted but ignored (some web views): paste instead.
-                Check::Unchanged => {}
-            }
+    // Only when the field is still the read the plan came from, with the
+    // range selected: anything typed meanwhile goes to the fallback, which
+    // places the range from a fresh read.
+    if target.can_set_text()
+        && select(target, &plan.range, selected)
+        && target.read().ok().as_deref() == Some(before)
+        && target.set_selected_text(&plan.replacement)
+    {
+        match read_back(target, before, plan) {
+            Check::Applied => return Outcome::Applied(Method::SelectedText),
+            Check::Other => return Outcome::Unsupported(Why::Unverified),
+            // Accepted but ignored (some web views): paste instead.
+            Check::Unchanged => {}
         }
     }
     let now = match target.read() {
@@ -456,8 +458,7 @@ fn edit_selecting(
             Err(NoPlan::Differs) => return Outcome::Unsupported(Why::Differs),
         }
     };
-    selected.push(plan.range.clone());
-    if let Err(outcome) = paste_fallback(target, &now, &plan) {
+    if let Err(outcome) = paste_fallback(target, &now, &plan, selected) {
         return outcome;
     }
     match read_back(target, &now, &plan) {
@@ -471,9 +472,14 @@ fn edit_selecting(
 /// paste, which goes to whatever has the keys, the lab must be on and the
 /// app frontmost with the anchored field focused; `paste` asks again after
 /// its clipboard capture, with the selection and the field as well.
-fn paste_fallback(target: &mut impl Target, field: &[u16], plan: &Plan) -> Result<(), Outcome> {
+fn paste_fallback(
+    target: &mut impl Target,
+    field: &[u16],
+    plan: &Plan,
+    selected: &mut Option<Range<usize>>,
+) -> Result<(), Outcome> {
     let refused = |why| Err(Outcome::Unsupported(why));
-    if !target.select(plan.range.clone()) {
+    if !select(target, &plan.range, selected) {
         return refused(Why::NotEditable);
     }
     if !target.lab_on() {
@@ -486,6 +492,20 @@ fn paste_fallback(target: &mut impl Target, field: &[u16], plan: &Plan) -> Resul
         return refused(Why::OtherField);
     }
     target.paste(&plan.replacement, plan.range.clone(), field)
+}
+
+/// Selects `range` and, when the field reports it selected, notes it as
+/// the range Tidy holds.
+fn select(
+    target: &mut impl Target,
+    range: &Range<usize>,
+    selected: &mut Option<Range<usize>>,
+) -> bool {
+    if !target.select(range.clone()) {
+        return false;
+    }
+    *selected = Some(range.clone());
+    target.selection().is_none_or(|now| now == *range)
 }
 
 /// Re-reads until the field shows the plan or something else, or the
@@ -921,9 +941,9 @@ mod tests {
         paste_lost: bool,
         /// Another app comes to the front during the read-backs.
         leaves_front: bool,
-        /// Typed into the field (at, text) after the last read-back, just
-        /// before the fallback's read.
-        typed_meanwhile: Option<(usize, &'static str)>,
+        /// Typed into the field (at, text) just before read number `.0`
+        /// (0 is the first).
+        typed_meanwhile: Option<(usize, usize, &'static str)>,
         reads: usize,
         /// The lab turns off during the read-backs.
         lab_off_later: bool,
@@ -990,10 +1010,10 @@ mod tests {
                 self.reads += 1;
                 return Err(Why::Unreadable);
             }
-            // The first read, then every read-back of the ignored edit.
-            if self.reads == 1 + READ_BACKS
-                && let Some((at, typed)) = self.typed_meanwhile.take()
+            if let Some((read, at, typed)) = self.typed_meanwhile
+                && read == self.reads
             {
+                self.typed_meanwhile = None;
                 self.value.splice(at..at, typed.encode_utf16());
             }
             self.reads += 1;
@@ -1054,6 +1074,10 @@ mod tests {
         }
         fn wait(&mut self) {}
     }
+
+    /// The fallback's read when `AXSelectedText` was sent and ignored: after
+    /// the first read, the check before the edit, and the read-backs.
+    const FALLBACK_READ: usize = 2 + READ_BACKS;
 
     fn run(fake: &mut Fake, inserted: &str, expected: Option<usize>) -> Outcome {
         apply(
@@ -1211,7 +1235,7 @@ mod tests {
     fn the_fallback_rereads_the_field_before_pasting() {
         let mut before = Fake::new("um we ship it");
         before.ignores_set = true;
-        before.typed_meanwhile = Some((0, "Note: "));
+        before.typed_meanwhile = Some((FALLBACK_READ, 0, "Note: "));
         assert_eq!(
             run(&mut before, "um we ship it", Some(0)),
             Outcome::Applied(Method::Paste)
@@ -1219,7 +1243,7 @@ mod tests {
         assert_eq!(before.text(), "Note: We ship it");
         let mut inside = Fake::new("um we ship it");
         inside.ignores_set = true;
-        inside.typed_meanwhile = Some((6, "really "));
+        inside.typed_meanwhile = Some((FALLBACK_READ, 6, "really "));
         assert_eq!(run(&mut inside, "um we ship it", Some(0)), Outcome::Moved);
         assert_eq!(inside.pasted, 0);
         assert_eq!(inside.text(), "um we really ship it");
@@ -1243,7 +1267,7 @@ mod tests {
     fn a_failed_read_after_an_ignored_edit_releases_the_selection() {
         let mut fake = Fake::new("um we ship it");
         fake.ignores_set = true;
-        fake.reads_fail_from = Some(1);
+        fake.reads_fail_from = Some(2);
         assert_eq!(
             run(&mut fake, "um we ship it", Some(0)),
             Outcome::Unsupported(Why::Unverified)
@@ -1251,11 +1275,26 @@ mod tests {
         assert_eq!(fake.selection, 13..13);
         let mut fallback = Fake::new("um we ship it");
         fallback.ignores_set = true;
-        fallback.reads_fail_from = Some(1 + READ_BACKS);
+        fallback.reads_fail_from = Some(FALLBACK_READ);
         assert_eq!(
             run(&mut fallback, "um we ship it", Some(0)),
             Outcome::Unsupported(Why::Unreadable)
         );
         assert_eq!(fallback.selection, 13..13);
+    }
+
+    /// Typing between the first read and the `AXSelectedText` edit: the
+    /// stale range is never set; the fallback places it from a fresh read,
+    /// so the typed text survives.
+    #[test]
+    fn typing_before_the_selected_text_edit_is_kept() {
+        let mut fake = Fake::new("um we ship it");
+        fake.typed_meanwhile = Some((1, 0, "Note: "));
+        assert_eq!(
+            run(&mut fake, "um we ship it", Some(0)),
+            Outcome::Applied(Method::Paste)
+        );
+        assert_eq!(fake.set, 0);
+        assert_eq!(fake.text(), "Note: We ship it");
     }
 }
