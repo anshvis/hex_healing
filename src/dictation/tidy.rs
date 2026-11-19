@@ -260,7 +260,8 @@ fn parse_answer(answer: &str) -> Result<Vec<ModelEdit>, AnswerError> {
 /// The model's edits that survive every check, and how many were dropped.
 /// Each `find` must occur exactly once, on word boundaries; a removal must
 /// leave a subsequence of its words, and a misheard fix swaps words one for
-/// one with at most one new word; each edit alone, and all of them together, must leave
+/// one with at most one new word; a replacement brings in no other content
+/// (`adds_nothing`); each edit alone, and all of them together, must leave
 /// the text made of its own words and pass Clean up with Apple
 /// Intelligence's guard (`composes`). Later edits that overlap earlier ones are dropped.
 fn model_edits(text: &Text, answer: &str) -> (Vec<Edit>, usize) {
@@ -306,6 +307,9 @@ fn model_edit(text: &Text, edit: &ModelEdit) -> Option<Edit> {
         return None;
     }
     let new_words = replaced.len() - common_subsequence(&found, &replaced);
+    if !adds_nothing(&edit.find, &edit.replace, new_words == 1) {
+        return None;
+    }
     let edit = match new_words {
         0 if replaced.is_empty() => {
             let inside: Vec<usize> = (0..text.words.len())
@@ -355,6 +359,28 @@ fn composes(source: &str, edits: &[Edit]) -> bool {
         .count();
     after.len() - common_subsequence(&before, &after) <= misheard
         && crate::dictation::apple_cleanup::is_acceptable(source, &applied)
+}
+
+/// Whether `replace` brings in nothing `find` lacks: its whitespace-separated
+/// pieces are `find`'s in order (case aside), except that a misheard fix
+/// may swap in one piece made of letters alone. A symbol, emoji, digit, or
+/// added punctuation is new content even where the word splitter skips it.
+fn adds_nothing(find: &str, replace: &str, misheard: bool) -> bool {
+    let pieces =
+        |text: &str| -> Vec<String> { text.split_whitespace().map(str::to_lowercase).collect() };
+    let (found, replaced) = (pieces(find), pieces(replace));
+    let new = replaced.len() - common_subsequence(&found, &replaced);
+    let plain_word = |piece: &String| {
+        piece
+            .chars()
+            .all(|character| character.is_alphabetic() || rules::is_apostrophe(character))
+    };
+    new == 0
+        || (misheard
+            && new == 1
+            && replaced
+                .iter()
+                .all(|piece| found.contains(piece) || plain_word(piece)))
 }
 
 fn plain(range: Range<usize>, replacement: &str, kind: Kind, confidence: f32) -> Edit {
@@ -648,6 +674,24 @@ mod tests {
         );
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].kind, Kind::Misheard);
+    }
+
+    /// A replacement brings in nothing the found text lacks: no symbol,
+    /// emoji, punctuation, or digit, beside the one misheard word.
+    #[test]
+    fn model_edit_adding_symbols_rejected() {
+        let pasted = "We send it today";
+        for answer in [
+            r#"[{"find": "send", "replace": "send ✅"}]"#,
+            r#"[{"find": "send", "replace": "send!"}]"#,
+            r#"[{"find": "send it", "replace": "send, it"}]"#,
+            r#"[{"find": "today", "replace": "Tuesday 😀"}]"#,
+            r#"[{"find": "today", "replace": "Tuesday!"}]"#,
+            r#"[{"find": "today", "replace": "2day"}]"#,
+            r#"[{"find": "We send it today", "replace": "We send it #today"}]"#,
+        ] {
+            assert!(with_model(pasted, answer).is_empty(), "{answer}");
+        }
     }
 
     #[test]

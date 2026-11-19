@@ -104,7 +104,7 @@ fn word(source: &str, start: usize, end: usize) -> Word {
     }
 }
 
-fn is_apostrophe(character: char) -> bool {
+pub(super) fn is_apostrophe(character: char) -> bool {
     character == '\'' || character == '\u{2019}'
 }
 
