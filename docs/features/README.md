@@ -28,6 +28,8 @@ Hex                                      // macOS release
 have detailed maps.
 [Learn from corrections](corrections.md) maps what Hex reads back after a
 paste, what it keeps, and the managed lock.
+[Tidy after paste](tidy.md) maps the Tidy triggers, the review capsule, and
+what `hex dictation tidy --print` answers.
 [Accessibility](accessibility.md) maps what screen readers, Voice Control, and
 automation (strobe's benches) read from the window, the HUD, and the capsules.
 Agents can [read retained transcripts](transcript-cli.md) and

@@ -47,8 +47,8 @@ a stable build with the driver keeps its pane for Uninstall alone), Playground
 language (#216), Mouse shortcuts (#209, macOS), Also pause the browser (#301,
 macOS), Share dictation shortcut (#176, Windows), Unload model when idle
 (#442), Smaller model files (macOS), Stream imported models, Terminal paste
-(Windows), Terminal paste shortcut (Windows, Linux), and Learn from
-corrections (macOS).
+(Windows), Terminal paste shortcut (Windows, Linux), Learn from
+corrections (macOS), and Tidy after paste (macOS).
 Externally contributed features land there
 too. Annotate is a normal feature in every build, stable included, on macOS,
 Linux, and Windows; only developer tools (`dev_build::is_dev_build()` with
