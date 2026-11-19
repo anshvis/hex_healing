@@ -158,7 +158,13 @@ def _object(sha: str | None, what: str) -> Path:
 
 def restore(name: str, *, checkout: Path | None = None, converter: Converter = run_recorded,
             parity: Parity = eval_parity) -> dict:
-    """Rebuild `name`'s GGUF into the objects store and record how it was checked. Returns the event."""
+    """Rebuild `name`'s GGUF into the objects store and record how it was checked. Returns the event.
+    Holds the ship lock throughout, so no promote or rollback selects this version's GGUF meanwhile."""
+    with registry.ship_lock():
+        return _restore(name, checkout, converter, parity)
+
+
+def _restore(name: str, checkout: Path | None, converter: Converter, parity: Parity) -> dict:
     version = registry.load().get(name)
     if not version.artifact("lora_delta"):
         raise RestoreError(f"{version.name} has no LoRA delta: it is a base model and is kept, not rebuilt")

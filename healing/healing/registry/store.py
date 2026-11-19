@@ -1,7 +1,10 @@
 """`$HEALING_HOME/registry/versions.jsonl`: the append-only model registry.
 
 Each line is one event, `{event, version, at_ms, ...}`: `registered` (the whole version record),
-`scored`, `gate` (one `healing gate` decision, T7.1), `promoted`, `rejected`, `rolled_back`, `restored`,
+`scored`, `gate` (one `healing gate` decision, T7.1), `promoted`, `promote_failed` (Hex didn't confirm the
+switch, T7.2; the version stays a candidate), `hex_import` and `hex_import_removed` (an import of the
+version's GGUF that healing itself created in Hex, and its removal: the only imports cleanup may remove),
+`rejected`, `rolled_back`, `restored`,
 `pruned_artifact`, and the one `golden_frozen` pin. The current state is a fold of the events; nothing is ever rewritten.
 
 Every append is one whole line written with a single `write` and fsynced, under `registry/.lock`. A
@@ -16,12 +19,13 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from healing.registry import objects
 from healing.registry.objects import fsync_dir, owner_dir, registry_dir
 from healing.store import locked, now_ms
 
-EVENTS = ("registered", "scored", "gate", "promoted", "rejected", "rolled_back", "restored", "pruned_artifact", "golden_frozen")
+EVENTS = ("registered", "scored", "gate", "promoted", "promote_failed", "hex_import", "hex_import_removed", "rejected", "rolled_back", "restored", "pruned_artifact", "golden_frozen")
 ARTIFACT_KINDS = ("gguf", "lora_delta", "merged_nemo")
 KEEP_PREVIOUS_PROMOTED = 2  # besides current and v0, the GGUFs of the last two promoted versions stay
 
@@ -41,6 +45,20 @@ def versions_path() -> Path:
 def lock():
     owner_dir(registry_dir())
     return locked(registry_dir() / ".lock", wait=True)
+
+
+def ship_lock():
+    """One promote, rollback or restore at a time: a restore swaps a version's GGUF, which must not
+    happen while a promote or rollback selects that GGUF in Hex (T7.2). Never waits; a held lock
+    raises `StoreError`."""
+    owner_dir(registry_dir())
+    return locked(registry_dir() / ".ship.lock", wait=False, busy="another promote, rollback or restore is running")
+
+
+def _check_gguf(version: "Version", expect_gguf: str | None) -> None:
+    if expect_gguf is not None and version.gguf != expect_gguf:
+        raise RegistryError(f"{version.name}'s GGUF is {str(version.gguf)[:12]} now, not the {expect_gguf[:12]} "
+                            "selected in Hex (restored meanwhile?)")
 
 
 # ---- the log ------------------------------------------------------------------------------------
@@ -114,6 +132,7 @@ class Version:
     restores: list[dict] = field(default_factory=list)
     pruned: dict[str, str] = field(default_factory=dict)  # sha pruned -> artifact kind
     gates: list[dict] = field(default_factory=list)  # every `healing gate` decision, oldest first
+    promote_failures: list[dict] = field(default_factory=list)  # every `promote_failed`, oldest first
 
     @property
     def number(self) -> int:
@@ -144,7 +163,8 @@ class Version:
 
     def as_dict(self) -> dict:
         return {**self.record, "version": self.name, "state": self.state, "reason": self.reason,
-                "scores": self.scores, "restores": self.restores, "pruned": self.pruned, "gates": self.gates}
+                "scores": self.scores, "restores": self.restores, "pruned": self.pruned, "gates": self.gates,
+                "promote_failures": self.promote_failures}
 
 
 @dataclass
@@ -153,6 +173,7 @@ class State:
     current: str | None = None
     promotions: list[str] = field(default_factory=list)  # promotion order, a version again if promoted again
     golden: dict | None = None
+    owned_imports: dict[str, str] = field(default_factory=dict)  # Hex id healing imported -> its version
 
     def get(self, name: str) -> Version:
         if name == "current":
@@ -198,6 +219,12 @@ def fold(events: list[dict]) -> State:
             version.state, version.reason = "promoted", event.get("reason")
             state.current = name
             state.promotions.append(name)
+        elif kind == "hex_import":
+            state.owned_imports[event["hex_id"]] = name
+        elif kind == "hex_import_removed":
+            state.owned_imports.pop(event["hex_id"], None)
+        elif kind == "promote_failed":
+            version.promote_failures.append({k: v for k, v in event.items() if k not in ("event", "version")})
         elif kind == "rejected":
             version.state, version.reason = "rejected", event.get("reason")
         elif kind == "rolled_back":
@@ -264,13 +291,45 @@ def record_scores(name: str, scores: dict) -> None:
         append({"event": "scored", "version": version.name, "scores": scores})
 
 
-def promote(name: str, reason: str | None = None) -> None:
+def promote(name: str, reason: str | None = None, *, expect_current: str | None = None,
+            check: Callable[[State, Version], str | None] | None = None, expect_gguf: str | None = None,
+            **fields) -> None:
+    """Make a candidate current. With `expect_current`, the current version must still be that one, and
+    `check(state, version)` (a problem, or None) is asked again, both under the lock, so of two promotes
+    started from the same current only the first is recorded. With `expect_gguf`, the version's GGUF
+    must still be the one Hex was switched to, and the event records it."""
+    with lock():
+        state = load()
+        version = state.get(name)
+        if version.state != "candidate":
+            raise RegistryError(f"{version.name} is {version.state}; only a candidate is promoted")
+        if expect_current is not None and state.current != expect_current:
+            raise RegistryError(f"the current version is {state.current} now, not {expect_current}; "
+                                "another promote or rollback ran meanwhile")
+        problem = check(state, version) if check else None
+        if problem:
+            raise RegistryError(problem)
+        _check_gguf(version, expect_gguf)
+        append({"event": "promoted", "version": version.name, "reason": reason,
+                **({"gguf_sha256": expect_gguf} if expect_gguf else {}), **fields})
+        retain()
+
+
+def record_hex_import(name: str, hex_id: str, gguf_sha256: str, removed: bool = False) -> None:
+    """Healing created (or, `removed`, removed) the Hex import `hex_id` of `name`'s GGUF."""
+    with lock():
+        version = load().get(name)
+        append({"event": "hex_import_removed" if removed else "hex_import", "version": version.name,
+                "hex_id": hex_id, "gguf_sha256": gguf_sha256})
+
+
+def record_promote_failure(name: str, reason: str, **fields) -> None:
+    """Hex didn't confirm a promote's switch: the version stays a candidate (promote may run again)."""
     with lock():
         version = load().get(name)
         if version.state != "candidate":
-            raise RegistryError(f"{version.name} is {version.state}; only a candidate is promoted")
-        append({"event": "promoted", "version": version.name, "reason": reason})
-        retain()
+            raise RegistryError(f"{version.name} is {version.state}; only a candidate's promote fails")
+        append({"event": "promote_failed", "version": version.name, "reason": reason, **fields})
 
 
 def reject(name: str, reason: str) -> None:
@@ -305,11 +364,17 @@ def record_gate(name: str, decision: dict, reject_reason: str | None) -> None:
             retain()
 
 
-def roll_back(name: str, reason: str, to: str | None = None) -> None:
+def roll_back(name: str, reason: str, to: str | None = None, *, expect_current: str | None = None,
+              expect_gguf: str | None = None, **fields) -> None:
     """Roll back a promoted version. When it is current, a distinct, still-promoted successor (`to`, else
-    the latest other promoted version) becomes current, so exactly one version stays current."""
+    the latest other promoted version) becomes current, so exactly one version stays current. With
+    `expect_current`, the current version must still be that one; with `expect_gguf`, the successor's GGUF
+    must still be the one Hex was switched to (recorded in the event)."""
     with lock():
         state = load()
+        if expect_current is not None and state.current != expect_current:
+            raise RegistryError(f"the current version is {state.current} now, not {expect_current}; "
+                                "another promote or rollback ran meanwhile")
         version = state.get(name)
         if version.state != "promoted":
             raise RegistryError(f"{version.name} is {version.state}; only a promoted version rolls back")
@@ -322,8 +387,11 @@ def roll_back(name: str, reason: str, to: str | None = None) -> None:
             successor = _fallback(state, version.name)
             if successor is None:
                 raise RegistryError(f"{version.name} is current and no other promoted version could take over")
+        if successor is not None:
+            _check_gguf(state.versions[successor], expect_gguf)
         append({"event": "rolled_back", "version": version.name, "reason": reason,
-                **({"to": successor} if successor else {})})
+                **({"to": successor} if successor else {}),
+                **({"gguf_sha256": expect_gguf} if expect_gguf else {}), **fields})
         retain()
 
 
@@ -344,9 +412,9 @@ def pin_golden(sha256: str, n: int) -> bool:
 
 # ---- retention ----------------------------------------------------------------------------------
 
-def gguf_keepers(state: State) -> set[str]:
-    """Versions whose GGUF stays: v0, current, the previous two promoted, and undecided candidates
-    (a candidate still waiting for its gate needs its file; once rejected it goes)."""
+def promoted_keepers(state: State) -> set[str]:
+    """v0, current and the previous two promoted versions: the GGUFs retention keeps for a rollback, and
+    the imports `healing promote` leaves in Hex (T7.2)."""
     keep = {"v0"} if "v0" in state.versions else set()
     if state.current:
         keep.add(state.current)
@@ -357,8 +425,13 @@ def gguf_keepers(state: State) -> set[str]:
         if len(previous) == KEEP_PREVIOUS_PROMOTED:
             break
     keep.update(previous)
-    keep.update(v.name for v in state.versions.values() if v.state == "candidate")
     return keep
+
+
+def gguf_keepers(state: State) -> set[str]:
+    """Versions whose GGUF stays: `promoted_keepers` and undecided candidates (a candidate still waiting
+    for its gate needs its file; once rejected it goes)."""
+    return promoted_keepers(state) | {v.name for v in state.versions.values() if v.state == "candidate"}
 
 
 def retain() -> list[tuple[str, str, str]]:
