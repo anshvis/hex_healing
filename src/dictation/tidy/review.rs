@@ -6,6 +6,7 @@
 //! (D-37), and [`prepare`] blocks on T8.1's model pass for up to 2 s, so
 //! callers run it off the main thread. Logs keep counts and kinds only.
 
+use super::apply::{Method, Outcome, Why};
 use super::session::{Dictation, TidySession};
 use super::{Habits, Suggestion};
 use crate::history::HistoryEntry;
@@ -82,6 +83,13 @@ pub(crate) fn prepare(
 /// What Return did.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Applied {
+    /// The pasted text in its field now reads the tidied text (T8.4).
+    Edited(Method),
+    /// The pasted text changed since the paste; nothing was edited.
+    Moved,
+    /// The field couldn't be edited, for this reason; nothing was (or, for
+    /// [`Why::Unverified`], nothing could be confirmed).
+    Unsupported(Why),
     /// The tidied text is on the clipboard.
     Copied,
     /// Nothing was accepted, so nothing changed.
@@ -89,20 +97,31 @@ pub(crate) enum Applied {
     Failed(String),
 }
 
-/// Return in the review: applies the accepted suggestions. T8.4 replaces
-/// this with Accessibility edits to the pasted range of a pasted dictation;
-/// until then it copies the tidied text, as Copy tidied text does for a
-/// copy-only one, and the capsule says so.
+/// Return in the review of a pasted dictation: applies the accepted
+/// suggestions to the pasted range of its field through Accessibility
+/// ([`super::apply::apply_to_last`]). Blocks for the frontmost-app wait and
+/// the re-reads (under a second), so callers run it off the main thread.
+/// T8.5 records the decisions and resets Learn from corrections' baseline
+/// here, on [`Applied::Edited`].
 pub(crate) fn apply_accepted(session: &TidySession) -> Applied {
-    apply_accepted_with(session, copy_to_clipboard)
+    log_decisions(session);
+    if session.accepted_count() == 0 {
+        return Applied::Nothing;
+    }
+    match super::apply::apply_to_last(session) {
+        Outcome::Applied(method) => Applied::Edited(method),
+        Outcome::Moved => Applied::Moved,
+        Outcome::Unsupported(why) => Applied::Unsupported(why),
+    }
 }
 
-/// Copy tidied text, for a dictation that only reached the clipboard.
+/// Copy tidied text: for a dictation that only reached the clipboard, or
+/// one whose field couldn't be edited.
 pub(crate) fn copy_tidied(session: &TidySession) -> Applied {
-    apply_accepted_with(session, copy_to_clipboard)
+    copy_tidied_with(session, copy_to_clipboard)
 }
 
-fn apply_accepted_with(
+fn copy_tidied_with(
     session: &TidySession,
     copy: impl FnOnce(&str) -> Result<(), String>,
 ) -> Applied {
@@ -241,10 +260,10 @@ mod tests {
     }
 
     #[test]
-    fn return_copies_the_accepted_edits_and_nothing_without_any() {
+    fn copy_tidied_copies_the_accepted_edits_and_nothing_without_any() {
         let mut session = preview();
         let mut copied = None;
-        let applied = apply_accepted_with(&session, |text| {
+        let applied = copy_tidied_with(&session, |text| {
             copied = Some(text.to_owned());
             Ok(())
         });
@@ -258,7 +277,21 @@ mod tests {
             .collect::<Vec<_>>()
             .into_iter()
             .for_each(|index| session.toggle(index));
-        let applied = apply_accepted_with(&session, |_| panic!("copied with nothing accepted"));
+        let applied = copy_tidied_with(&session, |_| panic!("copied with nothing accepted"));
         assert_eq!(applied, Applied::Nothing);
+        assert_eq!(apply_accepted(&session), Applied::Nothing);
+    }
+
+    /// A review whose dictation left no anchor (neither lab kept one, or
+    /// the next paste cleared it) edits nothing and says why.
+    #[test]
+    fn apply_without_an_anchor_edits_nothing() {
+        let session = preview();
+        let expected = if cfg!(target_os = "macos") {
+            Why::NoAnchor
+        } else {
+            Why::NotOnThisOs
+        };
+        assert_eq!(apply_accepted(&session), Applied::Unsupported(expected));
     }
 }
