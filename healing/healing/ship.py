@@ -29,9 +29,8 @@ from typing import Callable
 from healing import hexcli
 from healing.registry import objects
 from healing.registry import store as registry
-from healing.registry.objects import owner_dir, registry_dir
 from healing.registry.store import RegistryError, State, Version
-from healing.store import StoreError, locked
+from healing.store import StoreError
 
 EXIT_HEX_DOWN = 2
 EXIT_NO_GATE = 8
@@ -51,9 +50,8 @@ class ShipError(RuntimeError):
 
 
 def ship_lock():
-    """One promote or rollback at a time, held from the first `hex` call to the registry write."""
-    owner_dir(registry_dir())
-    return locked(registry_dir() / ".ship.lock", wait=False, busy="another promote or rollback is running")
+    """One promote, rollback or restore at a time, held from the first `hex` call to the registry write."""
+    return registry.ship_lock()
 
 
 def hex_id(version: Version) -> str:
@@ -219,13 +217,14 @@ def _promote(name: str, binary: Path, say: Callable[[str], None], confirm_s: flo
     if streams and not _lab_on(status):
         raise ShipError(f"{version.name} must stream like {current.name}, and an import streams only with the lab: "
                         f"turn on Labs › Stream imported models (`hex labs on {STREAM_LAB}`, D-26)", EXIT_LAB_OFF)
+    selected = version.gguf  # the exact file Hex is switched to; the registry write checks it again
     target = _ensure_imported(binary, version, listed, say)
     say(f"switching Hex from {previous_id} to {target}")
     problem = _use(binary, target) or _wait(binary, target, streams=streams, confirm_s=confirm_s, poll_s=poll_s)
     if problem is None:
         try:
             registry.promote(version.name, "gate passed", expect_current=current.name, check=gate_problem,
-                             hex_id=target, previous=current.name, gate_eval_id=version.last_gate.get("eval_id"))
+                             expect_gguf=selected, hex_id=target, previous=current.name, gate_eval_id=version.last_gate.get("eval_id"))
         except RegistryError as error:
             problem = f"the registry refused the promotion: {error}"
             _switch_back(binary, previous_id, target, say, confirm_s, poll_s)
@@ -287,13 +286,19 @@ def _rollback(to: str | None, reason: str, binary: Path, say: Callable[[str], No
     if target.state != "promoted":
         raise ShipError(f"{target.name} is {target.state}; only a promoted version becomes current again")
     _status(binary)
+    selected = target.gguf  # the exact file Hex is switched to; the registry write checks it again
     model_id = _ensure_imported(binary, target, _models(binary), say)
     say(f"switching Hex from {leaving.name} to {target.name} ({model_id})")
     problem = _use(binary, model_id) or _wait(binary, model_id, streams=False, confirm_s=confirm_s, poll_s=poll_s)
     if problem is not None:
         say(f"rollback failed: {problem}; the registry is unchanged")
         return EXIT_MISMATCH
-    registry.roll_back(leaving.name, reason, to=target.name, expect_current=leaving.name, hex_id=model_id)
+    try:
+        registry.roll_back(leaving.name, reason, to=target.name, expect_current=leaving.name, expect_gguf=selected,
+                           hex_id=model_id)
+    except RegistryError as error:
+        _switch_back(binary, hex_id(leaving), model_id, say, confirm_s, poll_s)
+        raise ShipError(f"the registry refused the rollback: {error}") from error
     say(f"{leaving.name} rolled back ({reason}); {target.name} is current and Hex runs {model_id}")
     return 0
 

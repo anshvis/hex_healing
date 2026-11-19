@@ -50,13 +50,16 @@ def streams(model_id):
 if args[:2] == ["status", "--json"]:
     need_running()
     save()
+    fallback = state["fallback"] if state["fallback"] and state["selected"] == state["fallback"]["for"] else None
+    preparing = state["selected"] if state["selected"] in state["stuck"] else None
     print(json.dumps({{"version": 4, "status": "status", "labs": ["stream-imported-models"] if state["lab"] else [],
-                      "model": {{"id": state["selected"], "installed": True, "preparing": None, "error": None,
-                                 "fallback": None}}}}, indent=2))
+                      "model": {{"id": state["selected"], "installed": True, "preparing": preparing, "error": None,
+                                 "fallback": fallback}}}}, indent=2))
 elif args[:3] == ["model", "list", "--json"]:
     need_running()
     save()
-    models = [{{"id": i, "selected": i == state["selected"], "installed": True, "streams": streams(i)}}
+    models = [{{"id": i, "selected": i == state["selected"], "installed": True, "streams": streams(i),
+                "source": "hex" if i == state["catalog"] else state["sources"].get(i, "imported")}}
               for i in [state["catalog"], *state["imports"]]]
     print(json.dumps({{"version": 4, "status": "models", "models": models}}, indent=2))
 elif args[:2] == ["model", "import"]:
@@ -95,7 +98,7 @@ class FakeHex:
         self.path = tmp_path / "fake-hex.json"
         monkeypatch.setenv("FAKE_HEX_STATE", str(self.path))
         self.write({"running": True, "lab": True, "catalog": CATALOG, "selected": CATALOG, "imports": {},
-                    "no_stream": [], "ignore_use": False, "calls": []})
+                    "no_stream": [], "ignore_use": False, "stuck": [], "fallback": None, "sources": {}, "calls": []})
 
     def read(self) -> dict:
         return json.loads(self.path.read_text())
@@ -416,3 +419,60 @@ def test_auto_says_a_promote_failed(hexbin, tmp_path):
     finally:
         store.close()
     assert progress.pending == "v1" and "promote failed" in progress.waiting()
+
+
+# ---- review fixes ---------------------------------------------------------------------------------
+
+def test_restore_refused_while_a_promote_runs(hexbin, tmp_path):
+    from healing.registry import restore as restore_module
+    from healing.store import StoreError
+
+    candidate(tmp_path)
+    with registry.ship_lock():
+        with pytest.raises(StoreError, match="rollback or restore"):
+            restore_module.restore("v1")
+
+
+def _swap_during_wait(monkeypatch, tmp_path, name: str):
+    """A restore that lands between Hex's switch and the registry write (as if it took no lock)."""
+    real = ship._wait
+    done = []
+
+    def wait(*args, **kwargs):
+        if not done:
+            done.append(True)
+            with registry.lock():
+                registry.append({"event": "restored", "version": name, "method": "wer_parity",
+                                 "rebuilt_sha256": _put(tmp_path, f"swap-{name}"), "gguf_sha256": None})
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ship, "_wait", wait)
+
+
+def test_promote_refuses_a_gguf_swapped_after_selection(hexbin, tmp_path, monkeypatch):
+    candidate(tmp_path)
+    passing_gate("v1")
+    selected = hex_id("v1")
+    _swap_during_wait(monkeypatch, tmp_path, "v1")
+    code, lines = promote(hexbin, "v1")
+    assert code != 0 and events("promoted")[1:] == []
+    assert hexbin.selected == CATALOG and hexbin.calls("use")[0][2] == selected
+
+
+def test_rollback_refuses_a_gguf_swapped_after_selection(hexbin, tmp_path, monkeypatch):
+    for n in (1, 2):
+        candidate(tmp_path, parent=f"v{n - 1}")
+        passing_gate(f"v{n}")
+        assert promote(hexbin, f"v{n}")[0] == 0
+    v2 = hex_id("v2")
+    _swap_during_wait(monkeypatch, tmp_path, "v1")
+    code, lines = rollback(hexbin)
+    assert code != 0 and events("rolled_back") == []
+    assert registry.load().current == "v2" and hexbin.selected == v2
+
+
+def test_promoted_event_records_the_exact_gguf(hexbin, tmp_path):
+    candidate(tmp_path)
+    passing_gate("v1")
+    assert promote(hexbin, "v1")[0] == 0
+    assert events("promoted")[-1]["gguf_sha256"] == registry.load().get("v1").gguf

@@ -45,6 +45,20 @@ def lock():
     return locked(registry_dir() / ".lock", wait=True)
 
 
+def ship_lock():
+    """One promote, rollback or restore at a time: a restore swaps a version's GGUF, which must not
+    happen while a promote or rollback selects that GGUF in Hex (T7.2). Never waits; a held lock
+    raises `StoreError`."""
+    owner_dir(registry_dir())
+    return locked(registry_dir() / ".ship.lock", wait=False, busy="another promote, rollback or restore is running")
+
+
+def _check_gguf(version: "Version", expect_gguf: str | None) -> None:
+    if expect_gguf is not None and version.gguf != expect_gguf:
+        raise RegistryError(f"{version.name}'s GGUF is {str(version.gguf)[:12]} now, not the {expect_gguf[:12]} "
+                            "selected in Hex (restored meanwhile?)")
+
+
 # ---- the log ------------------------------------------------------------------------------------
 
 def read_events(path: Path | None = None) -> list[dict]:
@@ -271,10 +285,12 @@ def record_scores(name: str, scores: dict) -> None:
 
 
 def promote(name: str, reason: str | None = None, *, expect_current: str | None = None,
-            check: Callable[[State, Version], str | None] | None = None, **fields) -> None:
+            check: Callable[[State, Version], str | None] | None = None, expect_gguf: str | None = None,
+            **fields) -> None:
     """Make a candidate current. With `expect_current`, the current version must still be that one, and
     `check(state, version)` (a problem, or None) is asked again, both under the lock, so of two promotes
-    started from the same current only the first is recorded."""
+    started from the same current only the first is recorded. With `expect_gguf`, the version's GGUF
+    must still be the one Hex was switched to, and the event records it."""
     with lock():
         state = load()
         version = state.get(name)
@@ -286,7 +302,9 @@ def promote(name: str, reason: str | None = None, *, expect_current: str | None 
         problem = check(state, version) if check else None
         if problem:
             raise RegistryError(problem)
-        append({"event": "promoted", "version": version.name, "reason": reason, **fields})
+        _check_gguf(version, expect_gguf)
+        append({"event": "promoted", "version": version.name, "reason": reason,
+                **({"gguf_sha256": expect_gguf} if expect_gguf else {}), **fields})
         retain()
 
 
@@ -332,10 +350,11 @@ def record_gate(name: str, decision: dict, reject_reason: str | None) -> None:
 
 
 def roll_back(name: str, reason: str, to: str | None = None, *, expect_current: str | None = None,
-              **fields) -> None:
+              expect_gguf: str | None = None, **fields) -> None:
     """Roll back a promoted version. When it is current, a distinct, still-promoted successor (`to`, else
     the latest other promoted version) becomes current, so exactly one version stays current. With
-    `expect_current`, the current version must still be that one."""
+    `expect_current`, the current version must still be that one; with `expect_gguf`, the successor's GGUF
+    must still be the one Hex was switched to (recorded in the event)."""
     with lock():
         state = load()
         if expect_current is not None and state.current != expect_current:
@@ -353,8 +372,11 @@ def roll_back(name: str, reason: str, to: str | None = None, *, expect_current: 
             successor = _fallback(state, version.name)
             if successor is None:
                 raise RegistryError(f"{version.name} is current and no other promoted version could take over")
+        if successor is not None:
+            _check_gguf(state.versions[successor], expect_gguf)
         append({"event": "rolled_back", "version": version.name, "reason": reason,
-                **({"to": successor} if successor else {}), **fields})
+                **({"to": successor} if successor else {}),
+                **({"gguf_sha256": expect_gguf} if expect_gguf else {}), **fields})
         retain()
 
 
