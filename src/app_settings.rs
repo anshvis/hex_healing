@@ -30,6 +30,7 @@ mod screenshots;
 pub(crate) use persistence::LaunchLoad;
 pub(crate) use persistence::LaunchNote;
 mod shortcut_repair;
+mod tidy;
 
 pub use browser_origins::{normalize_browser_origins, parse_browser_origins};
 #[cfg(hex_capture)]
@@ -46,6 +47,7 @@ pub use meetings::*;
 pub use screenshots::{
     ScreenshotSettings, screenshot_hotkey, screenshot_record_hotkey, screenshot_settings,
 };
+pub use tidy::TidySettings;
 
 const DEFAULT_RECORDING_DUCK_VOLUME: f32 = 0.2;
 const DEFAULT_DOUBLE_TAP_LOCK: bool = true;
@@ -334,6 +336,9 @@ pub struct AppSettings {
     pub labs: LabsSettings,
     /// Labs › Screenshots' shortcut and folder (macOS).
     pub screenshots: ScreenshotSettings,
+    /// Labs › Tidy after paste: the habits file. Left out while unset.
+    #[serde(skip_serializing_if = "TidySettings::is_default")]
+    pub tidy: TidySettings,
     /// Start listening when Hex opens (Windows and Linux, where the
     /// listener can be off).
     pub enable_on_launch: bool,
@@ -463,6 +468,7 @@ impl Default for AppSettings {
             experimental: ExperimentalSettings::default(),
             labs: LabsSettings::default(),
             screenshots: ScreenshotSettings::default(),
+            tidy: TidySettings::default(),
             enable_on_launch: true,
             paste_with_shift: false,
             gnome_keyboard_shortcuts: false,
@@ -2338,6 +2344,57 @@ mod tests {
             reloaded.transcription.model,
             TranscriptionModelId::ParakeetV3
         );
+    }
+
+    #[test]
+    fn tidy_habits_file_round_trips_and_stays_out_while_unset() {
+        // Unset, `tidy` is left out, so files stay as older builds wrote them.
+        assert!(
+            serde_json::to_value(AppSettings::default())
+                .unwrap()
+                .get("tidy")
+                .is_none()
+        );
+        let dir = TestSettingsDir::new("tidy-habits");
+        fs::write(&dir.path, r#"{"sound_effects": false}"#).unwrap();
+        let settings = AppSettings::load_from(&dir.path).unwrap();
+        assert_eq!(settings.tidy.habits_file, None);
+
+        let filled = AppSettings {
+            tidy: TidySettings {
+                habits_file: Some("/tmp/hex-healing/tidy/habits.json".into()),
+            },
+            ..settings
+        };
+        filled.write_to(&dir.path).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dir.path).unwrap()).unwrap();
+        assert_eq!(
+            json["tidy"],
+            serde_json::json!({"habits_file": "/tmp/hex-healing/tidy/habits.json"})
+        );
+        let reloaded = AppSettings::load_from(&dir.path).unwrap();
+        assert_eq!(reloaded.tidy, filled.tidy);
+
+        // Cleared, it leaves the file again.
+        let cleared = AppSettings {
+            tidy: TidySettings::default(),
+            ..reloaded
+        };
+        cleared.write_to(&dir.path).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dir.path).unwrap()).unwrap();
+        assert!(json.get("tidy").is_none());
+
+        // An invalid value never prevents loading: it reads as unset.
+        fs::write(
+            &dir.path,
+            r#"{"sound_effects": false, "tidy": {"habits_file": 5}}"#,
+        )
+        .unwrap();
+        let loaded = AppSettings::load_from(&dir.path).unwrap();
+        assert_eq!(loaded.tidy.habits_file, None);
+        assert!(!loaded.sound_effects);
     }
 
     #[test]

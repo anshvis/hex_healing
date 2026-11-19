@@ -852,6 +852,11 @@ pub(super) const KEYS: &[Key] = &[
         "Where the dictation HUD appears",
     ),
     optional(
+        "tidy.habits_file",
+        Kind::Path,
+        "Labs › Tidy after paste: the filler habits file `healing tidy habits` writes, read at each tidy; none means no habits",
+    ),
+    optional(
         "updates.channel",
         Kind::Choice(&["stable", "dev"]),
         "Update channel; none follows the build (dev builds use dev, others stable)",
