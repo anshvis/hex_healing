@@ -32,6 +32,11 @@ pub(crate) fn print(reply: ControlReply, output: Output) -> u8 {
         ControlReply::ScrawlCaptureDetail(detail) => print!("{}", human_capture_detail(&detail)),
         ControlReply::ScrawlCaptureRoute { explanation } => print!("{explanation}"),
         ControlReply::Transcript { text } => println!("{text}"),
+        // `--print` prints its suggestions as JSON either way.
+        ControlReply::TidySuggestions(report) => match serde_json::to_string_pretty(&report) {
+            Ok(json) => println!("{json}"),
+            Err(error) => return fail(&error.to_string()),
+        },
         ControlReply::Error { message, .. } => eprintln!("hex: {message}"),
     }
     code

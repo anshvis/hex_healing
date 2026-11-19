@@ -4734,3 +4734,31 @@ fn caps_lock_leaves_a_hold_capture_alone() {
     assert_eq!(hotkey.caps_lock_toggle(), None);
     assert!(hotkey.is_recording());
 }
+
+/// Labs › Tidy after paste: its shortcut's key press is its own action,
+/// and with it unbound (the default, or its lab off) the key is nothing.
+#[test]
+fn tidy_shortcut_press_is_its_own_action_only_while_bound() {
+    let key_code = 17;
+    let input = InputEvent::Key {
+        code: key_code,
+        down: true,
+        flags: OPTION_KEY_MASK,
+    };
+    let unbound = RuntimeHotkeys {
+        paste_last: None,
+        paste_meeting: None,
+        ..RuntimeHotkeys::default()
+    };
+    assert_eq!(unbound.tidy, None);
+    assert_eq!(paste_action(input, unbound), None);
+    let bound = RuntimeHotkeys {
+        tidy: Some(RuntimeHotkey {
+            modifiers: crate::app_settings::HotkeyModifiers::option(),
+            key_code: Some(key_code),
+        }),
+        ..unbound
+    };
+    assert_eq!(paste_action(input, bound), Some(HotkeyAction::Tidy));
+    assert!(bound.all().contains(&bound.tidy));
+}

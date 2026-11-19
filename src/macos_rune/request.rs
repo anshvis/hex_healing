@@ -58,4 +58,6 @@ pub(crate) enum ShortcutTarget {
     Screenshot,
     /// Labs › Screenshots' record shortcut.
     ScreenshotRecord,
+    /// Labs › Tidy after paste's shortcut.
+    Tidy,
 }

@@ -104,12 +104,20 @@ objc2::define_class!(
             crate::screenshots::restore_last();
         }
 
+        /// Labs › Tidy after paste: the review of the last dictation, opened
+        /// from its own thread (it's safe from any thread).
+        #[unsafe(method(tidyLast:))]
+        fn tidy_last(&self, _sender: &AnyObject) {
+            super::tidy::menu();
+        }
+
         /// The status menu's delegate: it is about to open.
         #[unsafe(method(menuNeedsUpdate:))]
         fn menu_needs_update(&self, _menu: &NSMenu) {
             relabel();
             refresh_recent_dictations();
             refresh_restore_capture();
+            refresh_tidy();
             update_pause();
         }
 
@@ -191,6 +199,8 @@ enum Row {
     /// Labs › Pause from menu bar: hidden until the menu opens with it on.
     PauseHex,
     PasteLast,
+    /// Labs › Tidy after paste: hidden until the menu opens with it on.
+    TidyLast,
     /// Labs › Copy recent dictations: hidden until the menu opens with it on.
     CopyRecentDictation,
     CopyLastMeetingTranscript,
@@ -203,7 +213,7 @@ enum Row {
     Quit,
 }
 
-const ROWS: [Row; 15] = [
+const ROWS: [Row; 16] = [
     Row::MeetingStatus,
     Row::StopMeeting,
     Row::CopySection,
@@ -211,6 +221,7 @@ const ROWS: [Row; 15] = [
     Row::MeetingSeparator,
     Row::PauseHex,
     Row::PasteLast,
+    Row::TidyLast,
     Row::CopyRecentDictation,
     Row::CopyLastMeetingTranscript,
     Row::RestoreCapture,
@@ -233,6 +244,7 @@ impl Row {
             Row::RecordMeeting => label("Record Meeting", tr("Record meeting")),
             Row::PauseHex => pause_title(false),
             Row::PasteLast => label("Paste Last Dictation", tr("Paste last dictation")),
+            Row::TidyLast => label("Tidy Last Dictation", tr("Tidy last dictation")),
             Row::CopyRecentDictation => {
                 label("Copy Recent Dictation", tr("Copy recent dictations"))
             }
@@ -260,6 +272,7 @@ impl Row {
             Row::RecordMeeting => sel!(startMeeting:),
             Row::PauseHex => sel!(togglePause:),
             Row::PasteLast => sel!(pasteLast:),
+            Row::TidyLast => sel!(tidyLast:),
             Row::CopyLastMeetingTranscript => sel!(copyLastMeetingTranscript:),
             Row::RestoreCapture => sel!(restoreCapture:),
             Row::Settings => sel!(openSettings:),
@@ -293,6 +306,7 @@ impl Row {
                 | Row::RecordMeeting
                 | Row::MeetingSeparator
                 | Row::PauseHex
+                | Row::TidyLast
                 | Row::CopyRecentDictation
                 | Row::CopyLastMeetingTranscript
                 | Row::RestoreCapture
@@ -404,6 +418,7 @@ struct StatusItemController {
     recent: Retained<NSMenuItem>,
     recent_menu: Retained<NSMenu>,
     restore_capture: Retained<NSMenuItem>,
+    tidy: Retained<NSMenuItem>,
     update: Option<Retained<NSMenuItem>>,
     update_title: RefCell<String>,
     _menu: Retained<NSMenu>,
@@ -560,6 +575,7 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
             recent: row(Row::CopyRecentDictation),
             recent_menu,
             restore_capture: row(Row::RestoreCapture),
+            tidy: row(Row::TidyLast),
             update: (!update_managed).then(|| row(Row::Update)),
             update_title: RefCell::new(Row::Update.title().unwrap_or_default()),
             _menu: menu,
@@ -845,6 +861,17 @@ fn refresh_restore_capture() {
     STATUS_ITEM.with(|controller| {
         if let Some(controller) = controller.borrow().as_ref() {
             controller.restore_capture.setHidden(!shown);
+        }
+    });
+}
+
+/// Shows Tidy Last Dictation while Labs › Tidy after paste is on, as the
+/// menu opens; off, the item is absent.
+fn refresh_tidy() {
+    let shown = crate::labs::tidy_after_paste();
+    STATUS_ITEM.with(|controller| {
+        if let Some(controller) = controller.borrow().as_ref() {
+            controller.tidy.setHidden(!shown);
         }
     });
 }

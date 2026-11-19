@@ -428,6 +428,8 @@ pub(super) fn conflicts(
         ShortcutTarget::Screenshot => HotkeySlot::Screenshot,
         #[cfg(target_os = "macos")]
         ShortcutTarget::ScreenshotRecord => HotkeySlot::ScreenshotRecord,
+        #[cfg(target_os = "macos")]
+        ShortcutTarget::Tidy => HotkeySlot::Tidy,
     };
     settings.hotkey_in_use(slot, binding)
 }
@@ -473,6 +475,8 @@ pub(super) fn binding(settings: &AppSettings, target: ShortcutTarget) -> Option<
         ShortcutTarget::Screenshot => Some(&settings.screenshots.hotkey),
         #[cfg(target_os = "macos")]
         ShortcutTarget::ScreenshotRecord => settings.screenshots.record_hotkey.as_ref(),
+        #[cfg(target_os = "macos")]
+        ShortcutTarget::Tidy => settings.tidy_hotkey.as_ref(),
     }
 }
 
@@ -506,6 +510,8 @@ pub(super) fn set_binding(
         ShortcutTarget::Screenshot => settings.screenshots.hotkey = binding,
         #[cfg(target_os = "macos")]
         ShortcutTarget::ScreenshotRecord => settings.screenshots.record_hotkey = Some(binding),
+        #[cfg(target_os = "macos")]
+        ShortcutTarget::Tidy => settings.tidy_hotkey = Some(binding),
     }
 }
 
@@ -520,6 +526,8 @@ pub(super) fn can_turn_off(target: ShortcutTarget) -> bool {
         ShortcutTarget::TypedText => true,
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         ShortcutTarget::TerminalPaste => true,
+        #[cfg(target_os = "macos")]
+        ShortcutTarget::Tidy => true,
         _ => false,
     }
 }
@@ -534,6 +542,8 @@ pub(super) fn turn_off(settings: &mut AppSettings, target: ShortcutTarget) {
         ShortcutTarget::TypedText => settings.typed_text_hotkey = None,
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         ShortcutTarget::TerminalPaste => settings.terminal_paste_hotkey = None,
+        #[cfg(target_os = "macos")]
+        ShortcutTarget::Tidy => settings.tidy_hotkey = None,
         _ => {}
     }
 }
@@ -1086,6 +1096,8 @@ pub(super) fn hotkey_key(target: ShortcutTarget) -> &'static str {
         ShortcutTarget::Screenshot => "screenshot-hotkey",
         #[cfg(target_os = "macos")]
         ShortcutTarget::ScreenshotRecord => "screenshot-record-hotkey",
+        #[cfg(target_os = "macos")]
+        ShortcutTarget::Tidy => "tidy-hotkey",
     }
 }
 

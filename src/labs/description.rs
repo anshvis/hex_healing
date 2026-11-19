@@ -229,6 +229,9 @@ impl Feature {
             Self::LearnFromCorrections => {
                 "When you edit a dictation right after it pastes, Hex reads that one text field for up to 30 seconds and keeps only the edited span on the History entry. Password fields are never read"
             }
+            Self::TidyAfterPaste => {
+                "After a dictation pastes, a shortcut or the menu bar shows suggested edits to it (fillers, repeats, spoken self-corrections) to accept or skip one by one"
+            }
             Self::ShellCompletions => {
                 "Print a completion script for bash, zsh, fish, elvish, or PowerShell with hex completions <shell>"
             }

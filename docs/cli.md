@@ -36,7 +36,8 @@ hex
 ├── dictation start|stop|toggle
 │   ├── start --print              (Labs, macOS) answer with the transcript when the recording ends
 │   ├── stop --print               print the transcript instead of pasting it (below)
-│   └── start|toggle --raw         paste the transcript as heard, skipping the Output steps
+│   ├── start|toggle --raw         paste the transcript as heard, skipping the Output steps
+│   └── tidy [--print]             (Labs, macOS) review suggested edits to the last dictation; --print prints them as JSON
 ├── paste-last                     paste the last dictation (Option-Shift-V); refused while recording
 ├── typed-text                     Labs › Transform typed text (Linux): replace the focused field's text
 ├── transcribe <file> [--model <id>] [--language L]  print an audio or video file's transcript
@@ -140,6 +141,41 @@ transcript as heard, skipping the Output pane's steps, as the Dictate without
 processing shortcut (`raw_dictation_hotkey`) does. History keeps it as `raw`,
 and Paste Last pastes it. `--raw` with `stop` is a usage error
 (exit 2); `stop --print` of a raw dictation prints the transcript as heard.
+
+`dictation tidy` (Labs › Tidy after paste, `labs.tidy_after_paste`, off by
+default, macOS) opens the review capsule for the newest History entry, as the
+Tidy shortcut (`tidy_hotkey`, unbound by default) and the menu bar's Tidy Last
+Dictation do: its suggestions are computed when the command runs (up to 2 s
+for the on-device model pass), and the reply says how many it opened with.
+With the lab off it answers `disabled` and nothing is read or opened; with no
+dictation in History, `nothing-to-tidy`. Linux and Windows answer
+`unsupported`. `dictation tidy --print` opens and applies nothing and prints
+the suggestions as JSON, with or without `--json` (with it, inside the
+versioned reply):
+
+```ts
+{"entry": 1792933491953, "copy_only": false,
+ "text": "um so I think we should, uh, send it Tuesday, scratch that, Wednesday",
+ "tidied": "So I think we should send it Wednesday",
+ "suggestions": [
+   {"utf16": [0, 5], "scalar": [0, 5], "kind": "filler", "replacement": "So",
+    "source": "rule", "confidence": 0.95, "accepted": true},
+   {"utf16": [23, 28], "scalar": [23, 28], "kind": "filler", "replacement": "",
+    "source": "rule", "confidence": 0.95, "accepted": true},
+   {"utf16": [37, 60], "scalar": [37, 60], "kind": "self_correction",
+    "replacement": "", "source": "rule", "confidence": 0.8, "accepted": true}]}
+```
+
+`entry` is the History entry reviewed; `copy_only` is true when it only reached
+the clipboard (Copy dictation only, a copy fallback) or was printed, where the
+review offers Copy tidied text instead of applying. `text` is what it pasted
+and each suggestion replaces `text[start..end]` (UTF-16 code units in `utf16`,
+Unicode scalar values in `scalar`) with `replacement`, empty for a removal.
+`kind` is `filler`, `repeat`, `self_correction`, or `misheard`; `source` is
+`rule` or `model`; `accepted` is whether the review starts with it on (every
+edit but a `misheard` fix). `tidied` is `text` with the accepted ones applied.
+Suggestions are in text order and never overlap. `--raw` with `tidy` is a
+usage error (exit 2).
 
 `dictation cancel` discards the recording in any shortcut mode: nothing is
 transcribed, pasted, or saved to History, and dictations already transcribing
@@ -373,6 +409,7 @@ Requests are flat objects tagged by `command` (kebab-case):
 {"version": 4, "command": "dictation", "action": "start"}
 {"version": 4, "command": "dictation", "action": "start", "print": true}
 {"version": 4, "command": "dictation", "action": "stop", "print": true}
+{"version": 4, "command": "dictation-tidy", "print": true}
 ```
 
 ```ts
@@ -424,6 +461,8 @@ Replies are tagged by `status`:
   "contact_sheet": "…/contact-sheet.jpg"}
 {"version": 4, "status": "scrawl-capture-route", "explanation": "Capture   …"}
 {"version": 4, "status": "transcript", "text": "Ship it."}
+{"version": 4, "status": "tidy-suggestions", "entry": 1792933491953, "copy_only": false,
+  "text": "…", "tidied": "…", "suggestions": [{"utf16": [0, 5], "…": "as above"}]}
 ```
 
 `done.changed` is `false` when the command found things already so ("Already
@@ -491,6 +530,7 @@ model-unavailable      an imported model that is missing, changed, or behind its
 not-installed          `model use` on a model that isn't downloaded (`hex model install`)
 feature-off            the command needs an opt-in that is off (Meetings)
 disabled               a Labs toggle the command needs is off (the message names it)
+nothing-to-tidy        `dictation tidy` found no dictation in History
 not-ready              Hex is waiting for setup (permissions or the dictation model)
 meeting-active         quit/restart while a meeting records (pass --force)
 busy                   something is in progress (recording, transcribing, a full queue),

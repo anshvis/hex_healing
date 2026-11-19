@@ -17,6 +17,9 @@ pub enum HotkeyAction {
     CancelShortcut,
     PasteLast,
     PasteMeeting,
+    /// Labs › Tidy after paste's shortcut: review the last dictation's
+    /// suggested edits.
+    Tidy,
 }
 
 impl HotkeyAction {

@@ -11,6 +11,13 @@ pub(crate) fn shortcut_rule(slot: HotkeySlot, binding: &HotkeyBinding) -> Result
         HotkeySlot::Dictation => ShortcutTarget::Dictation,
         HotkeySlot::PasteLast => ShortcutTarget::PasteLast,
         HotkeySlot::RawDictation => ShortcutTarget::RawDictation,
+        // Labs › Tidy after paste: macOS fires it on a key press, like Paste
+        // last dictation; elsewhere, where it never registers, a saved one
+        // meets Paste last dictation's rules.
+        #[cfg(target_os = "macos")]
+        HotkeySlot::Tidy => ShortcutTarget::Tidy,
+        #[cfg(not(target_os = "macos"))]
+        HotkeySlot::Tidy => ShortcutTarget::PasteLast,
         HotkeySlot::Cancel => ShortcutTarget::Cancel,
         #[cfg(hex_capture)]
         HotkeySlot::Capture => ShortcutTarget::Capture,

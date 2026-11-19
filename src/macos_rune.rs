@@ -61,6 +61,7 @@ mod main_menu;
 mod request;
 mod runtime;
 pub(crate) mod status_item;
+pub(crate) mod tidy;
 mod wake;
 
 use activation::{observe_activation, reopen_on_activation};
@@ -513,6 +514,8 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig, hidden: bool
     #[cfg(hex_capture)]
     let capture_overlays =
         Some(crate::rune_ui::capture_capsule::feed::CaptureOverlays::install(&mut app));
+    // Labs › Tidy after paste's review capsule, hidden until a trigger.
+    crate::rune_ui::tidy_capsule::install(&mut app);
     // Labs › Screenshots: its own picker and the thumbnail.
     #[cfg(hex_capture)]
     crate::screenshots::install(&mut app);

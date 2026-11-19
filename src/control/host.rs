@@ -260,6 +260,10 @@ fn command(host: &dyn Host, command: ControlCommand) -> ControlReply {
             "unsupported",
             "screenshots are macOS only",
         ))),
+        ControlCommand::DictationTidy { .. } => reply(Err(ControlError::new(
+            "unsupported",
+            "Tidy after paste is macOS only for now",
+        ))),
         command @ (ControlCommand::ScrawlCapture { .. }
         | ControlCommand::ScrawlCaptureList { .. }
         | ControlCommand::ScrawlCaptureShow { .. }
@@ -820,6 +824,7 @@ mod tests {
         for command in [
             ControlCommand::LaunchAtLogin { enabled: None },
             ControlCommand::TypedText,
+            ControlCommand::DictationTidy { print: true },
             ControlCommand::ScrawlCaptureUndo,
             ControlCommand::WindowStory {
                 story: "HUD".into(),

@@ -178,7 +178,8 @@ impl Feature {
             | Self::YoloMode
             | Self::CursorContext
             | Self::LearnFromCorrections
-            | Self::MoreDictationShortcuts => Audience::Everyone,
+            | Self::MoreDictationShortcuts
+            | Self::TidyAfterPaste => Audience::Everyone,
         }
     }
 
@@ -266,6 +267,7 @@ impl Feature {
             | Self::CleanUpWithAppleIntelligence => 20261113,
             Self::LearnFromCorrections => 20261114,
             Self::StreamImportedModels => 20261118,
+            Self::TidyAfterPaste => 20261119,
         }
     }
 
@@ -351,7 +353,10 @@ impl Feature {
             | Self::ScreenVocabulary
             | Self::CursorContext
             | Self::LearnFromCorrections
-            | Self::MoreDictationShortcuts => cfg!(target_os = "macos"),
+            | Self::MoreDictationShortcuts
+            // Its capsule, shortcut, and menu-bar item are macOS's so far
+            // (`platform::DIFFERENCES` names the reason).
+            | Self::TidyAfterPaste => cfg!(target_os = "macos"),
             Self::CleanUpWithAppleIntelligence => cfg!(target_os = "macos"),
             Self::CopyOnly => cfg!(any(target_os = "macos", target_os = "windows")),
             Self::ReturnToApp => cfg!(target_os = "macos"),
@@ -498,6 +503,7 @@ impl Feature {
             Self::CursorContext => "labs.cursor_context",
             Self::LearnFromCorrections => "labs.learn_from_corrections",
             Self::MoreDictationShortcuts => "labs.more_dictation_shortcuts",
+            Self::TidyAfterPaste => "labs.tidy_after_paste",
         }
     }
 
@@ -592,6 +598,7 @@ impl Feature {
             Self::CursorContext => settings.labs.cursor_context,
             Self::LearnFromCorrections => settings.labs.learn_from_corrections,
             Self::MoreDictationShortcuts => settings.labs.more_dictation_shortcuts,
+            Self::TidyAfterPaste => settings.labs.tidy_after_paste,
         }
     }
 
@@ -684,6 +691,7 @@ impl Feature {
             &mut labs.cursor_context,
             &mut labs.learn_from_corrections,
             &mut labs.more_dictation_shortcuts,
+            &mut labs.tidy_after_paste,
         ]
     }
 
@@ -783,6 +791,7 @@ impl Feature {
             Self::CursorContext => settings.labs.cursor_context = on,
             Self::LearnFromCorrections => settings.labs.learn_from_corrections = on,
             Self::MoreDictationShortcuts => settings.labs.more_dictation_shortcuts = on,
+            Self::TidyAfterPaste => settings.labs.tidy_after_paste = on,
             // Off, no shortcut keeps a key only the feature allows.
             Self::StandaloneSpecialKeys => {
                 settings.labs.standalone_special_keys = on;
@@ -920,6 +929,11 @@ static CURSOR_CONTEXT: AtomicBool = AtomicBool::new(false);
 /// paste commits, and the state word has no bit for it.
 static LEARN_FROM_CORRECTIONS: AtomicBool = AtomicBool::new(false);
 
+/// Labs › Tidy after paste's switch, set beside [`STATE`] like
+/// [`LEARN_FROM_CORRECTIONS`]: the state word is full, so this lab has its
+/// own atomic, written by [`state`] and [`apply`].
+static TIDY_AFTER_PASTE: AtomicBool = AtomicBool::new(false);
+
 /// Labs › Voice prompt's switch: the state word is full too, so it has its
 /// own atomic, written by [`state`] and [`apply`].
 static VOICE_PROMPT: AtomicBool = AtomicBool::new(false);
@@ -990,6 +1004,7 @@ fn state() -> u64 {
                 CURSOR_CONTEXT.store(cursor_context_enabled(&saved), Ordering::Release);
                 LEARN_FROM_CORRECTIONS
                     .store(learn_from_corrections_enabled(&saved), Ordering::Release);
+                TIDY_AFTER_PASTE.store(tidy_after_paste_enabled(&saved), Ordering::Release);
                 VOICE_PROMPT.store(voice_prompt_enabled(&saved), Ordering::Release);
                 COPY_CAPTURE_ZIP.store(copy_capture_zip_enabled(&saved), Ordering::Release);
                 K_QUANT_MODELS.store(k_quant_models_enabled(&saved), Ordering::Release);
@@ -1043,6 +1058,15 @@ fn learn_from_corrections_enabled(settings: &LabsSettings) -> bool {
         && Feature::LearnFromCorrections.on_this_os()
         && Feature::LearnFromCorrections.shipped()
         && Feature::LearnFromCorrections.managed().is_none()
+}
+
+/// Whether `settings` turn on Labs › Tidy after paste in this build, before
+/// its managed lock (`DisableLabs`); the state word has no bit for it.
+fn tidy_after_paste_enabled(settings: &LabsSettings) -> bool {
+    settings.tidy_after_paste
+        && Feature::TidyAfterPaste.on_this_os()
+        && Feature::TidyAfterPaste.shipped()
+        && Feature::TidyAfterPaste.managed().is_none()
 }
 
 /// Whether `settings` turn on Labs › Voice prompt in this build, before its
@@ -1171,6 +1195,7 @@ pub(crate) fn apply(settings: &LabsSettings) {
     SCREEN_VOCABULARY.store(screen_vocabulary_enabled(settings), Ordering::Release);
     CURSOR_CONTEXT.store(cursor_context_enabled(settings), Ordering::Release);
     LEARN_FROM_CORRECTIONS.store(learn_from_corrections_enabled(settings), Ordering::Release);
+    TIDY_AFTER_PASTE.store(tidy_after_paste_enabled(settings), Ordering::Release);
     VOICE_PROMPT.store(voice_prompt_enabled(settings), Ordering::Release);
     COPY_CAPTURE_ZIP.store(copy_capture_zip_enabled(settings), Ordering::Release);
     K_QUANT_MODELS.store(k_quant_models_enabled(settings), Ordering::Release);
@@ -2306,6 +2331,35 @@ mod tests {
             Feature::LearnFromCorrections.name(),
             "learn-from-corrections"
         );
+    }
+
+    #[test]
+    fn tidy_off_by_default() {
+        let mut labs = LabsSettings::default();
+        assert!(!labs.tidy_after_paste);
+        assert!(!tidy_after_paste_enabled(&labs));
+        assert!(!Feature::TidyAfterPaste.on(&AppSettings::default()));
+        assert_eq!(Feature::TidyAfterPaste.audience(), Audience::Everyone);
+        assert_eq!(Feature::TidyAfterPaste.group(), Group::Dictation);
+        assert_eq!(Feature::TidyAfterPaste.added(), 20261119);
+        assert_eq!(
+            Feature::TidyAfterPaste.settings_key(),
+            "labs.tidy_after_paste"
+        );
+        assert_eq!(Feature::TidyAfterPaste.name(), "tidy-after-paste");
+        assert_eq!(
+            Feature::for_settings_key("labs.tidy_after_paste"),
+            Some(Feature::TidyAfterPaste)
+        );
+        // macOS first: the capsule, shortcut, and menu item are macOS's.
+        labs.tidy_after_paste = true;
+        assert_eq!(
+            Feature::TidyAfterPaste.on_this_os(),
+            cfg!(target_os = "macos")
+        );
+        assert_eq!(tidy_after_paste_enabled(&labs), cfg!(target_os = "macos"));
+        // Its saved shortcut stays unbound by default.
+        assert_eq!(AppSettings::default().tidy_hotkey, None);
     }
 
     #[test]

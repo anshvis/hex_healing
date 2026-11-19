@@ -29,9 +29,9 @@ pub(crate) mod service;
 pub(crate) mod spoken_formatting;
 pub(crate) mod spoken_symbols;
 pub(crate) mod text_replacements;
-// Labs › Tidy after paste's suggestion engine; T8.3 wires the trigger that
-// calls `tidy::suggest`, so until then only its tests reach any of it.
-#[allow(dead_code)]
+// Labs › Tidy after paste: the suggestion engine and its review, reached
+// from macOS's triggers (other OSes keep the rule pass for the scene).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod tidy;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod vocabulary;

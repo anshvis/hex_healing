@@ -289,6 +289,10 @@ pub struct AppSettings {
     /// Dictate without processing: records like the dictation shortcut and
     /// pastes the transcript as heard. Unbound by default.
     pub raw_dictation_hotkey: Option<HotkeyBinding>,
+    /// Labs › Tidy after paste (macOS): opens the review of the last
+    /// dictation's suggested tidy edits. Unbound by default; reserves no key
+    /// while unbound or while its Labs toggle is off.
+    pub tidy_hotkey: Option<HotkeyBinding>,
     /// Labs › Transform typed text (Linux): runs the focused app's Output
     /// steps on the text already typed in the focused field and replaces it.
     /// Unbound by default and ignored while its Labs toggle is off.
@@ -448,6 +452,7 @@ impl Default for AppSettings {
             paste_last_hotkey: Some(HotkeyBinding::paste_last_default()),
             cancel_hotkey: HotkeyBinding::cancel_default(),
             raw_dictation_hotkey: None,
+            tidy_hotkey: None,
             typed_text_hotkey: None,
             second_dictation_hotkey: None,
             extra_dictation_hotkeys: Vec::new(),
@@ -1057,6 +1062,7 @@ impl AppSettings {
                 .raw_dictation_hotkey
                 .as_ref()
                 .map(HotkeyBinding::runtime),
+            tidy: self.active_tidy_hotkey().map(HotkeyBinding::runtime),
             typed_text: self.active_typed_text_hotkey().map(HotkeyBinding::runtime),
             second_dictation: self
                 .active_second_dictation_hotkey()
@@ -1211,6 +1217,7 @@ impl AppSettings {
             self.capture.replay_hotkey = None;
         }
         self.screenshots.clear_left_click_record();
+        self.clear_left_click_tidy();
     }
 }
 
@@ -1220,6 +1227,8 @@ pub enum HotkeySlot {
     Dictation,
     PasteLast,
     RawDictation,
+    /// Labs › Tidy after paste's shortcut (macOS).
+    Tidy,
     /// Labs › Transform typed text's shortcut (Linux).
     TypedText,
     #[cfg(hex_capture)]

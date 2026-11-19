@@ -58,6 +58,7 @@ impl Feature {
             | Self::VocabularyBiasing
             | Self::ScreenVocabulary
             | Self::LearnFromCorrections
+            | Self::TidyAfterPaste
             | Self::PauseBrowser
             | Self::KeepMicrophoneOpen
             | Self::SkipPauses

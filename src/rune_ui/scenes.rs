@@ -754,6 +754,19 @@ pub(super) const SCENES: &[Scene] = &[
         ui.settings.labs.screenshots = true;
         ui.lab_store.group = Some(crate::labs::Feature::Screenshots.group());
     }),
+    // Labs › Tidy after paste's card while on, with its shortcut recorder
+    // (macOS only: elsewhere the card has no shortcut).
+    ("mac-labs-tidy", |ui| {
+        labs_with_some_on(ui);
+        ui.settings.labs.tidy_after_paste = true;
+        ui.lab_store.group = Some(crate::labs::Feature::TidyAfterPaste.group());
+    }),
+    // Labs › Tidy after paste's review capsule over AC-15's dictation: three
+    // rule edits accepted and a misheard fix still skipped.
+    ("tidy-capsule", |ui| {
+        *ui = mac_fixture();
+        ui.tidy_preview = Some(tidy_capsule::TidyCapsule::preview());
+    }),
     // Labs › YOLO mode's card while on, limited to two apps.
     ("mac-labs-yolo-mode", |ui| {
         labs_with_some_on(ui);

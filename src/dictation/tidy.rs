@@ -14,7 +14,10 @@
 //! Nothing here stores the pasted text, and the log keeps counts only.
 
 mod habits;
+pub(crate) mod last;
+pub(crate) mod review;
 mod rules;
+pub(crate) mod session;
 
 use std::ops::Range;
 

@@ -7,6 +7,7 @@
 pub(super) const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Pause Hex", ["Wstrzymaj Hex", "暂停 Hex", "Hex を一時停止", "Hex pausieren", "Pausar Hex", "Призупинити Hex"]),
     ("Resume Hex", ["Wznów Hex", "恢复 Hex", "Hex を再開", "Hex fortsetzen", "Reanudar Hex", "Відновити Hex"]),
+    ("Tidy last dictation", ["Uporządkuj ostatnie dyktowanie", "整理上次听写", "最後の音声入力を整える", "Letztes Diktat aufräumen", "Pulir el último dictado", "Упорядкувати останнє диктування"]),
     ("Restore last capture", ["Przywróć ostatnie przechwycenie", "恢复上次捕获", "前回のキャプチャを復元", "Letzte Aufnahme wiederherstellen", "Restaurar la última captura", "Відновити останнє захоплення"]),
     ("Quit {}", ["Zakończ {}", "退出 {}", "{} を終了", "{} beenden", "Salir de {}", "Вийти з {}"]),
     ("No downloaded models", ["Brak pobranych modeli", "没有已下载的模型", "ダウンロード済みのモデルはありません", "Keine geladenen Modelle", "No hay modelos descargados", "Немає завантажених моделей"]),
