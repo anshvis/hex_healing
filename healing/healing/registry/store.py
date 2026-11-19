@@ -2,7 +2,9 @@
 
 Each line is one event, `{event, version, at_ms, ...}`: `registered` (the whole version record),
 `scored`, `gate` (one `healing gate` decision, T7.1), `promoted`, `promote_failed` (Hex didn't confirm the
-switch, T7.2; the version stays a candidate), `rejected`, `rolled_back`, `restored`,
+switch, T7.2; the version stays a candidate), `hex_import` and `hex_import_removed` (an import of the
+version's GGUF that healing itself created in Hex, and its removal: the only imports cleanup may remove),
+`rejected`, `rolled_back`, `restored`,
 `pruned_artifact`, and the one `golden_frozen` pin. The current state is a fold of the events; nothing is ever rewritten.
 
 Every append is one whole line written with a single `write` and fsynced, under `registry/.lock`. A
@@ -23,7 +25,7 @@ from healing.registry import objects
 from healing.registry.objects import fsync_dir, owner_dir, registry_dir
 from healing.store import locked, now_ms
 
-EVENTS = ("registered", "scored", "gate", "promoted", "promote_failed", "rejected", "rolled_back", "restored", "pruned_artifact", "golden_frozen")
+EVENTS = ("registered", "scored", "gate", "promoted", "promote_failed", "hex_import", "hex_import_removed", "rejected", "rolled_back", "restored", "pruned_artifact", "golden_frozen")
 ARTIFACT_KINDS = ("gguf", "lora_delta", "merged_nemo")
 KEEP_PREVIOUS_PROMOTED = 2  # besides current and v0, the GGUFs of the last two promoted versions stay
 
@@ -171,6 +173,7 @@ class State:
     current: str | None = None
     promotions: list[str] = field(default_factory=list)  # promotion order, a version again if promoted again
     golden: dict | None = None
+    owned_imports: dict[str, str] = field(default_factory=dict)  # Hex id healing imported -> its version
 
     def get(self, name: str) -> Version:
         if name == "current":
@@ -216,6 +219,10 @@ def fold(events: list[dict]) -> State:
             version.state, version.reason = "promoted", event.get("reason")
             state.current = name
             state.promotions.append(name)
+        elif kind == "hex_import":
+            state.owned_imports[event["hex_id"]] = name
+        elif kind == "hex_import_removed":
+            state.owned_imports.pop(event["hex_id"], None)
         elif kind == "promote_failed":
             version.promote_failures.append({k: v for k, v in event.items() if k not in ("event", "version")})
         elif kind == "rejected":
@@ -306,6 +313,14 @@ def promote(name: str, reason: str | None = None, *, expect_current: str | None 
         append({"event": "promoted", "version": version.name, "reason": reason,
                 **({"gguf_sha256": expect_gguf} if expect_gguf else {}), **fields})
         retain()
+
+
+def record_hex_import(name: str, hex_id: str, gguf_sha256: str, removed: bool = False) -> None:
+    """Healing created (or, `removed`, removed) the Hex import `hex_id` of `name`'s GGUF."""
+    with lock():
+        version = load().get(name)
+        append({"event": "hex_import_removed" if removed else "hex_import", "version": version.name,
+                "hex_id": hex_id, "gguf_sha256": gguf_sha256})
 
 
 def record_promote_failure(name: str, reason: str, **fields) -> None:

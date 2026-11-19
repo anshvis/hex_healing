@@ -4,12 +4,14 @@
 gate passed against the version that is current now, on the GGUFs the registry holds now (D-55), then:
 
 1. `hex model import <its registry object> --name "Hex healing v<n>"` (skipped when Hex already has it;
-   no `--language`: Parakeet imports take no language hint),
+   no `--language`: Parakeet imports take no language hint; an import healing creates is recorded as
+   `hex_import`),
 2. `hex model use custom-<16 hex>`,
 3. waits up to 60 s for `hex status --json` to report that model, installed, with nothing preparing and
    no fallback, and for `hex model list --json` to say it `streams` when it should (D-56),
-4. appends `promoted` and makes it current, then removes from Hex every healing import except current,
-   the previous two and v0; an import whose hash no registry version holds is never touched.
+4. appends `promoted` and makes it current, then removes from Hex every import healing created
+   (`hex_import`, never one you or another app made, whatever its hash) except current's, the previous
+   two's and v0's (D-57).
 
 When Hex doesn't confirm, `promote` switches Hex back to the model it ran before, appends
 `promote_failed` (the version stays a candidate) and exits 9. `rollback` switches Hex to the previous
@@ -177,6 +179,7 @@ def _ensure_imported(binary: Path, version: Version, listed: dict[str, dict], sa
     target = hex_id(version)
     if (listed.get(target) or {}).get("installed") is True:
         return target
+    created = target not in listed  # a listed copy that is missing or changed is repaired, not created
     if not target.startswith(objects.CUSTOM_PREFIX):
         raise ShipError(f"{version.name}'s catalog model {target} isn't installed in Hex; `hex model install {target}`")
     if not objects.has(version.gguf):
@@ -190,6 +193,8 @@ def _ensure_imported(binary: Path, version: Version, listed: dict[str, dict], sa
     fields = next((line.split("\t") for line in done.stdout.splitlines() if line.startswith("imported\t")), None)
     if not fields or len(fields) < 2 or fields[1] != target:
         raise ShipError(f"hex model import printed {done.stdout.strip()!r}, not the id {target}")
+    if created:
+        registry.record_hex_import(version.name, target, version.gguf)
     return target
 
 
@@ -251,10 +256,11 @@ def _switch_back(binary: Path, previous_id: str, target: str, say, confirm_s: fl
 
 
 def _cleanup(binary: Path, say: Callable[[str], None]) -> None:
-    """Remove every healing import Hex holds except current, the previous two and v0. An import is
-    healing's only when its id is a registry version's GGUF hash; anything else is never touched."""
+    """Remove every import healing created (`hex_import`, not since removed) except current's, the
+    previous two's and v0's. Anything else (your own import of the same file, a found Hugging Face
+    model) is never touched, and neither is the selected model."""
     state = registry.load()
-    ours = {objects.hex_model_id(sha): v.name for v in state.versions.values() for sha in v.ggufs()}
+    ours = state.owned_imports
     keep = {objects.hex_model_id(sha) for n in registry.promoted_keepers(state) for sha in state.versions[n].ggufs()}
     try:
         listed = _models(binary)
@@ -262,13 +268,16 @@ def _cleanup(binary: Path, say: Callable[[str], None]) -> None:
         say(f"cleanup skipped: {error}")
         return
     for model_id, model in listed.items():
-        if model_id not in ours or model_id in keep or model.get("selected"):
+        if model_id not in ours or model_id in keep or model.get("selected") or model.get("source") != "imported":
             continue
         try:
             hexcli.run(binary, ["model", "remove", model_id])
-            say(f"removed {ours[model_id]}'s import {model_id} from Hex")
         except hexcli.HexError as error:
             say(f"could not remove {model_id}: {error}")
+            continue
+        sha = next(s for s in state.versions[ours[model_id]].ggufs() if objects.hex_model_id(s) == model_id)
+        registry.record_hex_import(ours[model_id], model_id, sha, removed=True)
+        say(f"removed {ours[model_id]}'s import {model_id} from Hex")
 
 
 # ---- rollback --------------------------------------------------------------------------------------

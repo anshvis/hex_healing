@@ -476,3 +476,41 @@ def test_promoted_event_records_the_exact_gguf(hexbin, tmp_path):
     passing_gate("v1")
     assert promote(hexbin, "v1")[0] == 0
     assert events("promoted")[-1]["gguf_sha256"] == registry.load().get("v1").gguf
+
+
+def test_cleanup_never_removes_an_import_healing_did_not_create(hexbin, tmp_path):
+    candidate(tmp_path)
+    hexbin.set(imports={hex_id("v1"): "imported by hand"})  # the same file, imported by you first
+    for n in range(1, 5):
+        if n > 1:
+            candidate(tmp_path, parent=f"v{n - 1}")
+        passing_gate(f"v{n}")
+        assert promote(hexbin, f"v{n}")[0] == 0
+    assert hex_id("v1") in hexbin.imports
+    assert hexbin.calls("remove") == []
+    assert [c[2] for c in hexbin.calls("import")] and len(hexbin.calls("import")) == 3
+
+
+def test_cleanup_never_removes_a_found_model(hexbin, tmp_path):
+    for n in range(1, 5):
+        candidate(tmp_path, parent=f"v{n - 1}")
+        passing_gate(f"v{n}")
+        if n == 4:
+            hexbin.set(sources={hex_id("v1"): "found: someone/model@abcdef1"})
+        assert promote(hexbin, f"v{n}")[0] == 0
+    assert hex_id("v1") in hexbin.imports and hexbin.calls("remove") == []
+
+
+def test_cleanup_forgets_what_it_removed(hexbin, tmp_path):
+    """Once removed, a later import of the same file by hand is yours: cleanup leaves it."""
+    for n in range(1, 5):
+        candidate(tmp_path, parent=f"v{n - 1}")
+        passing_gate(f"v{n}")
+        assert promote(hexbin, f"v{n}")[0] == 0
+    assert hex_id("v1") not in hexbin.imports
+    hexbin.set(imports={**hexbin.imports, hex_id("v1"): "by hand"})
+    candidate(tmp_path, parent="v4")
+    passing_gate("v5")
+    assert promote(hexbin, "v5")[0] == 0
+    assert hex_id("v1") in hexbin.imports
+    assert [c[2] for c in hexbin.calls("remove")] == [hex_id("v1"), hex_id("v2")]
