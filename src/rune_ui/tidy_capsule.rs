@@ -172,7 +172,11 @@ pub(crate) struct TidyCapsule {
     /// Applies a pasted dictation's review off the main loop and hands the
     /// result back to [`TidyCapsule::applied`]; the overlay's spawns a
     /// thread, the scene's and the tests' do nothing.
-    run_apply: fn(TidySession),
+    run_apply: fn(TidySession, u64),
+    /// Counts reviews shown and applies started: an apply's result counts
+    /// only while it is still the latest, so a review opened meanwhile is
+    /// never closed or replaced by an older one's result.
+    request: u64,
     overlay: Option<OverlayHandle<TidyCapsule>>,
 }
 
@@ -185,7 +189,8 @@ impl Default for TidyCapsule {
             closing_at: None,
             role: Role::Preview,
             live: Live::preview,
-            run_apply: |_| {},
+            run_apply: |_, _| {},
+            request: 0,
             overlay: None,
         }
     }
@@ -220,6 +225,7 @@ impl TidyCapsule {
         }
         self.closing_at = None;
         self.offer = None;
+        self.request += 1;
         if session.is_empty() {
             self.say(Notice::NothingToTidy);
         } else {
@@ -277,12 +283,27 @@ impl TidyCapsule {
             (true, false) => Applied::Copied,
             (false, true) if session.accepted_count() > 0 => {
                 self.close();
-                (self.run_apply)(session);
+                self.request += 1;
+                (self.run_apply)(session, self.request);
                 return;
             }
             (false, true) => review::apply_accepted(&session),
             (false, false) => review::copy_tidied(&session),
         };
+        self.applied(session, applied);
+    }
+
+    /// An apply worker's result for `request`: ignored once a newer review
+    /// opened or another apply started, except that an edit that went in
+    /// still says so, in the notice overlay, without touching the review.
+    pub(crate) fn finished(&mut self, request: u64, session: TidySession, applied: Applied) {
+        if request != self.request {
+            tracing::info!("tidy apply finished after a newer review");
+            if matches!(applied, Applied::Edited(_)) && self.role == Role::Review {
+                notify(Notice::Applied);
+            }
+            return;
+        }
         self.applied(session, applied);
     }
 
@@ -770,7 +791,7 @@ fn notify(notice: Notice) {
 /// Applies `session` on its own thread, then hands the result to the
 /// review overlay, which reopens it (taking the keys again) only to offer a
 /// copy.
-fn spawn_apply(session: TidySession) {
+fn spawn_apply(session: TidySession, request: u64) {
     let spawned = std::thread::Builder::new()
         .name("hex-tidy-apply".into())
         .spawn(move || {
@@ -780,7 +801,7 @@ fn spawn_apply(session: TidySession) {
             };
             let handle = overlay.clone();
             overlay.update(move |capsule, tx| {
-                capsule.applied(session, applied);
+                capsule.finished(request, session, applied);
                 if capsule.session.is_some() {
                     handle.show();
                     handle.request_keys();
@@ -998,7 +1019,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static HANDED: AtomicUsize = AtomicUsize::new(0);
         let mut capsule = review(current);
-        capsule.run_apply = |session| {
+        capsule.run_apply = |session, _| {
             assert_eq!(session.accepted_count(), 3);
             HANDED.fetch_add(1, Ordering::SeqCst);
         };
@@ -1041,5 +1062,30 @@ mod tests {
         });
         stale.applied(session(), Applied::Moved);
         assert!(stale.session.is_none() && stale.offer.is_none());
+    }
+
+    /// An apply that finishes after a newer review opened leaves that
+    /// review alone; the latest apply's result still counts.
+    #[test]
+    fn an_older_apply_never_touches_a_newer_review() {
+        let session = crate::dictation::tidy::session::preview;
+        let mut capsule = TidyCapsule::default();
+        assert!(capsule.show(session()));
+        capsule.apply();
+        let first = capsule.request;
+        assert!(capsule.show(session()));
+        capsule.toggle(0);
+        let open = capsule.session.as_ref().map(TidySession::accepted_count);
+        for applied in [Applied::Moved, Applied::Edited(Method::Paste)] {
+            capsule.finished(first, session(), applied);
+            assert_eq!(
+                capsule.session.as_ref().map(TidySession::accepted_count),
+                open
+            );
+            assert!(capsule.notice.is_none() && capsule.offer.is_none());
+        }
+        let latest = capsule.request;
+        capsule.finished(latest, session(), Applied::Moved);
+        assert_eq!(capsule.offer, Some(Offer::Moved));
     }
 }
