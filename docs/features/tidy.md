@@ -59,15 +59,20 @@ Paste anchor                                         // dictation::paste_anchor
 └── one slot, in memory: every paste clears it; unusable after 10 minutes
 
 Apply                                                // dictation::tidy::apply
+├── lab off -> nothing read or sent (checked at the start and before each edit)
 ├── no anchor for this review's entry and commit -> unsupported, offers a copy
-├── secure field -> refused before anything is read
+├── secure field (role or subrole; one that can't be read counts as secure)
+│   -> refused before anything is read
 ├── the pasted-into app not frontmost within 600 ms -> unsupported (OtherApp)
 ├── read the whole field (≤ 32,768 UTF-16 units, else TooLarge)
 ├── locate the pasted text by hash: exactly once, else Moved (D-75); the
 │   dictation inside it may only differ by leading whitespace and one first
 │   letter's case (D-76), else unsupported (Differs)
+├── every edit runs under the delivery lock a dictation's paste also takes; a
+│   dictation paste since the anchor was taken -> nothing sent (D-79)
 ├── AXSelectedTextRange + AXSelectedText when both are settable: one undo step
-│   └── ignored by the field -> select the range, Hex's paste over it (D-77)
+│   └── ignored by the field -> the app still frontmost and the field focused,
+│       read again and placed from that read, then Hex's paste over it (D-77, D-79)
 └── re-read: exactly the plan (outside the range byte-identical) -> applied;
     anything else -> Unverified, "Check the text; ⌘Z undoes it", anchor spent
 ```
@@ -94,7 +99,8 @@ closing an open review, and an ended review keeping no notice of its own),
 `app_settings::tidy::tests`, `suppression::tests::tidy_shortcut_press_is_its_own_action_only_while_bound`,
 `dictation::tidy::apply::tests` (locate by range then unique search, duplicate
 text is Moved, outside the range byte-identical, the secure check first, the
-paste fallback, unverified edits), `dictation::paste_anchor::tests`,
+paste fallback and its fresh read and front-app check, unverified edits, a newer
+paste or the lab off sending nothing), `dictation::paste_anchor::tests`,
 `dictation::correction_watch::tests`, and the `tidy-capsule` golden in light
 and dark (Linux). Missing: a live run of the overlay taking and returning
 focus, the menu-bar item, and AC-17's four-app matrix (TextEdit, Notes, Slack,
