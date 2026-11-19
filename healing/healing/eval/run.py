@@ -3,7 +3,8 @@
 Each model runs through `hex benchmark-transcription` on the same machine in the same invocation,
 interleaved per set (A, B, A, B) so thermal drift is shared. Scores are never compared with a
 stored number. The eval JSON keeps per-clip records for the paired bootstrap and McNemar tests
-(T0.1's `healing stats`, M7's gate).
+(T0.1's `healing stats`, M7's gate), each with its first run's
+whole-clip `inference_ms` and `audio_ms`.
 
 Scores per set:
 - `wer`: the benchmark's own (case and punctuation stripped); n/a on the edited set, whose references
@@ -18,6 +19,7 @@ Scores per set:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import statistics
@@ -114,6 +116,21 @@ def current_vocabulary(settings_path: Path | None = None) -> tuple[list[dict], s
     return entries, boost, None if entries else "your vocabulary is empty"
 
 
+def vocabulary_fingerprint(entries: list[dict], boost: str | None) -> str:
+    """The SHA-256 of the vocabulary dictation runs with: whether it biases at all, the terms in order and
+    the boost, so a saved eval can be matched against the vocabulary Hex runs now."""
+    payload = {"biasing": bool(entries), "terms": entries, "boost": boost if entries else None}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def model_identity(model: Path, runs: list[BenchRun]) -> dict:
+    """How the benchmark saw a model: the file name it was given (a catalog model is recognized by name and
+    size, and only then padded) and the trailing silence it appended, from its `model` record."""
+    padding = next((r.model["trailing_silence_samples"] for r in runs
+                    if r.model.get("trailing_silence_samples") is not None), None)
+    return {"file_name": model.name, "trailing_silence_samples": padding}
+
+
 def resolve_set(name: str, store: Store | None, parent: str = "current") -> SetRef | Unavailable:
     """The set's folder and pin, or why it isn't available. Rolling and edited sets are `parent`'s own:
     each model version has its holdout, and another parent's newer set is not a stand-in."""
@@ -189,6 +206,8 @@ def score_set(ref: SetRef, runs: list[BenchRun]) -> tuple[dict, list[dict]]:
             "word_errors": record["word_errors"] if policy.whole_reference else None,
             "reference_words": record["reference_words"] if policy.whole_reference else None,
             "format_errors": errors, "format_words": words,
+            # the first run's whole-clip inference time and the clip's length (the gate's latency check)
+            "inference_ms": record.get("inference_ms"), "audio_ms": record.get("audio_ms"),
         }
         positions = sidecar.get(record["id"], {}).get("edited_positions")
         if policy.edited_words and positions:
@@ -281,11 +300,13 @@ def evaluate(
         "sets": [{"set": r.name, "split_id": r.split_id, "manifest_sha256": r.manifest_sha256, "n": r.n} for r in refs],
         "unavailable_sets": missing,
         "parent": parent,
-        "vocabulary": {"mode": vocabulary, "terms": len(entries), "boost": boost if entries else None},
+        "vocabulary": {"mode": vocabulary, "terms": len(entries), "boost": boost if entries else None,
+                       "sha256": vocabulary_fingerprint(entries, boost)},
         "scores": {str(m): {} for m in models},
         "per_clip": {str(m): {} for m in models},
         "started_at_ms": int(started * 1000),
     }
+    every_run: dict[str, list[BenchRun]] = {str(m): [] for m in models}
     with tempfile.TemporaryDirectory(prefix="healing-vocabulary-") as folder:
         vocabulary_file = None
         if entries:
@@ -305,9 +326,12 @@ def evaluate(
                         raise EvalError(f"{model} on {ref.name}: {error}") from error
                     results[str(model)].append(run)
             for model in models:
+                every_run[str(model)] += results[str(model)]
                 scores, per_clip = score_set(ref, results[str(model)])
                 document["scores"][str(model)][ref.name] = scores
                 document["per_clip"][str(model)][ref.name] = per_clip
+    for entry, model in zip(document["models"], models):
+        entry.update(model_identity(model, every_run[str(model)]))
     document["duration_ms"] = int((now() - started) * 1000)
     return document
 

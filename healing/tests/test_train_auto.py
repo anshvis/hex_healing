@@ -220,6 +220,20 @@ def test_undecided_candidate_waits_for_the_gate(home, store):
     assert "candidate v1 awaits the gate" in out and "healing gate v1" in out
 
 
+@pytest.mark.parametrize("decision,says", [
+    ({"pass": False, "refused": True}, "refused it for thin evidence"),
+    ({"pass": True, "refused": False}, "passed the gate"),
+])
+def test_gated_candidate_still_waits_and_says_why(home, store, decision, says):
+    """A refusal (thin evidence) and a pass both leave v1 a candidate (T7.1): still no second round."""
+    speech(store, 250, clips=5)
+    registry.register({"parent": "v0"})
+    registry.record_gate("v1", {"against": "v0", **decision}, None)
+    code, out, fake = run(home)
+    assert code == 0 and fake.calls == []
+    assert says in out and "v1" in out
+
+
 def test_remote_runner_stops_after_prepare(home, store):
     speech(store, 250, clips=5)
     auto.settings_path().write_text("runner: kaggle\n")

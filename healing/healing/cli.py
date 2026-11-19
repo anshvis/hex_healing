@@ -160,6 +160,13 @@ def main(argv: list[str] | None = None) -> int:
     model_current.add_argument("--hex", type=Path, default=None, help="path to the hex binary")
     models.add_parser("pin-golden", help="pin the frozen golden set's hash in the registry (G-10)")
 
+    gate = commands.add_parser("gate", help="the promotion gate: candidate against current on D-12's paired checks (T7.1)")
+    gate.add_argument("version", help="the candidate, e.g. v3")
+    gate.add_argument("--against", default="current", help="the version it would replace (default: current)")
+    gate.add_argument("--eval", type=Path, default=None, help="judge a saved `healing eval` holding both models instead of scoring again")
+    gate.add_argument("--hex", type=Path, default=None, help="the hex binary to ask whether the candidate streams")
+    gate.add_argument("--allow-thin-evidence", action="store_true", help=argparse.SUPPRESS)  # always refused: fixtures call run(allow_thin=True)
+
     train_group = commands.add_parser("train", help="Tier 2 training (M6): `prepare`, `auto`, or a round with --local")
     train_group.add_argument("--local", action="store_true", help="train a LoRA round on this Mac's CPU (T6.5)")
     train_group.add_argument("--smoke", action="store_true", help="with --local: 20 steps over 50 clips")
@@ -230,6 +237,10 @@ def main(argv: list[str] | None = None) -> int:
         return registry_commands.main(args)
     if args.group == "report":
         return _report(args)
+    if args.group == "gate":
+        from healing import gate as gate_module
+
+        return gate_module.main(args)
     if args.group == "train":
         if args.command == "prepare":
             return _train_prepare(args)

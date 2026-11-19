@@ -10,12 +10,14 @@ however recently the last one ran. Otherwise it prints what it is waiting on.
   and not a line of the parent's snapshot. v0 has no snapshot, so every trainable clip is new.
 - **A failed round** registers no version, so the parent and its snapshot stay and the same minutes
   count at the next run (the train row its prepare wrote is not a version).
-- **An undecided candidate** waits for M7's gate: no second round is stacked on top of it (D-53).
+- **An undecided candidate** (not promoted or rejected) blocks the next round, gated or not: no second
+  round is stacked on top of it (D-53). The wait names its gate state: never gated, refused for thin
+  evidence (it stays a candidate, D-54) or passed and awaiting promotion.
 - **One round at a time:** `$HEALING_HOME/train-auto.lock`; a second `train auto` exits at once.
 
 The round (D-51, D-52): `prepare` (T6.1), then the runner. `local` (the default) trains on this Mac
 (T6.5), exports and registers a candidate (T6.3) and scores it with `healing eval` (M3), recording
-the scores on the version; then it stops and prints `healing gate v<n>`, which M7 will add. Kaggle
+the scores on the version; then it stops and prints `healing gate v<n>` (T7.1). Kaggle
 (T6.2) is not built: a remote runner stops after prepare, before anything could be uploaded (G-3,
 X-6). The round holds its `round.lock` from training through export, eval and cleanup, and its `work/`
 scratch (about 10 GB) is removed under it when the round ends, pass or fail; `out/` and what the
@@ -92,6 +94,7 @@ class Progress:
     minutes: float
     pending: str | None  # an undecided candidate
     next_version: str
+    pending_gate: dict | None = None  # its latest `healing gate` decision
 
     @property
     def enough(self) -> bool:
@@ -107,8 +110,15 @@ class Progress:
 
     def waiting(self) -> str:
         if self.pending:
-            return (f"waiting: candidate {self.pending} awaits the gate (`healing gate {self.pending}`, M7); "
-                    f"{self.amount()}")
+            gate = self.pending_gate or {}
+            if gate.get("pass"):
+                why = f"passed the gate; promote it (`healing promote {self.pending}`, T7.2)"
+            elif gate.get("refused"):
+                why = (f"the gate refused it for thin evidence; review more clips, then `healing gate {self.pending}` "
+                       "again")
+            else:
+                why = f"awaits the gate (`healing gate {self.pending}`)"
+            return f"waiting: candidate {self.pending} {why}; {self.amount()}"
         if self.parent is None and self.enough:
             return f"waiting: no v0 to train from (run `healing models register-base`); {self.amount()}"
         return f"waiting: {self.amount()}"
@@ -135,8 +145,9 @@ def progress(store: Store, now: int | None = None) -> Progress:
         "SELECT c.clip_id, a.samples FROM clips c JOIN audio a ON a.sha256 = c.audio_sha256"
     ).fetchall())
     minutes = sum(samples.get(c) or 0 for c in new) / SAMPLE_RATE / 60
-    pending = next((v.name for v in state.ordered() if v.number > 0 and v.state == "candidate"), None)
-    return Progress(parent.name if parent else None, len(new), minutes, pending, state.next_name())
+    pending = next((v for v in state.ordered() if v.number > 0 and v.state == "candidate"), None)
+    return Progress(parent.name if parent else None, len(new), minutes, pending.name if pending else None,
+                    state.next_name(), pending.last_gate if pending else None)
 
 
 def _progress(now: int | None) -> Progress:
@@ -288,7 +299,7 @@ def _round(steps: Steps, settings: Settings, parent: str, say) -> int:
             return 1
         finally:
             shutil.rmtree(round_.work, ignore_errors=True)  # ~10 GB of scratch, under the lock; `out/` stays
-    say(f"next (M7): healing gate {version}")
+    say(f"next: healing gate {version}")
     return 0
 
 
@@ -303,7 +314,7 @@ def run(steps: Steps | None = None, *, dry_run: bool = False, now: int | None = 
             say(found.waiting())
             return 0
         say(f"would start round {found.next_version}: {found.amount()}")
-        say(f"would run: {_plan(settings)}" + (f", then stop for `healing gate {found.next_version}` (M7)"
+        say(f"would run: {_plan(settings)}" + (f", then stop for `healing gate {found.next_version}`"
                                                if settings.runner == "local" else ""))
         return 0
     with contextlib.ExitStack() as stack:

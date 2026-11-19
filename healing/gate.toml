@@ -1,0 +1,24 @@
+# `healing gate` (T7.1): the D-12 promotion margins.
+#
+# Rates are fractions of a word: 0.005 is 0.5 pt. Every interval is a paired bootstrap over clips
+# (`healing.stats`), Δ = candidate − current. This file's SHA-256 is copied into every gate record,
+# so an edit here is visible in each decision made after it.
+
+[bootstrap]
+resamples = 10000
+seed = 13
+confidence = 0.95  # two-sided: the upper bound is the 97.5th percentile of Δ
+
+[evidence]
+min_rolling_words = 1500  # reference words in the rolling set
+min_term_clips = 20  # rolling clips that expect a vocabulary term
+
+[checks]
+rolling_wer_ci_high = 0.0  # a real improvement: the upper bound is below 0
+terms_alpha = 0.05  # exact McNemar on per-clip term hits, favouring the candidate
+general_wer_ci_high = 0.005  # non-inferior: the upper bound is below +0.5 pt
+golden_wer_ci_high = 0.005
+formatting_ci_high = 0.005  # on the formatted sets (rolling, and golden once frozen)
+drift_guard = 0.01  # candidate general WER at most v0's + 1.0 pt (point estimates)
+streaming_p95_ms = 50  # candidate p95 time to text on long clips at most current's + 50 ms
+long_clip_ms = 10000  # a clip this long or longer is a long clip
