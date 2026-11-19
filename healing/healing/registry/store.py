@@ -237,6 +237,8 @@ def fold(events: list[dict]) -> State:
             version.state, version.reason = "rolled_back", event.get("reason")
             if state.current == name:
                 state.current, state.current_by = event.get("to") or _fallback(state, name), event
+            if isinstance(event.get("watch"), dict):  # `healing watch`'s decision rides on its rollback (D-59)
+                version.watches.append(event["watch"])
         elif kind == "watch":
             version.watches.append({k: v for k, v in event.items() if k not in ("event", "version")})
         elif kind == "restored":
@@ -404,9 +406,10 @@ def roll_back(name: str, reason: str, to: str | None = None, *, expect_current: 
 
 
 def record_watch(name: str, decision: dict) -> None:
-    """Append `healing watch`'s decision about `name`'s latest promotion (`decision["promoted_at_ms"]`), at
-    most once per promotion. A decision that keeps the version needs it still current; one that rolled it
-    back is written after the rollback (T7.3)."""
+    """Append `healing watch`'s keep (or insufficient-evidence keep) of `name`'s latest promotion
+    (`decision["promoted_at_ms"]`), at most once per promotion, while it is still current and both models
+    are still the GGUFs the watch scored (`decision["models"]`). A rollback's decision rides on its
+    `rolled_back` event instead (T7.3)."""
     with lock():
         state = load()
         version = state.get(name)
@@ -415,11 +418,23 @@ def record_watch(name: str, decision: dict) -> None:
             raise RegistryError(f"{version.name} was promoted again since this watch began; nothing recorded")
         if any(w.get("promoted_at_ms") == promoted_at for w in version.watches):
             raise RegistryError(f"{version.name}'s promotion is already decided")
-        expected = "rolled_back" if decision.get("verdict") == "rolled_back" else "promoted"
-        if version.state != expected or (expected == "promoted" and state.current != version.name):
+        if version.state != "promoted" or state.current != version.name:
             raise RegistryError(f"{version.name} is {version.state} and {state.current} is current now; "
                                 "nothing recorded")
+        _check_scored(state, version.name, decision)
         append({"event": "watch", "version": version.name, **decision})
+
+
+def _check_scored(state: State, name: str, decision: dict) -> None:
+    """The promoted (`name`) and previous versions' GGUFs are still the ones the watch scored."""
+    scored = decision.get("models")
+    if not scored:
+        return
+    for role, version in (("promoted", name), ("previous", decision.get("previous"))):
+        now = state.get(version).gguf
+        if now != scored.get(role):
+            raise RegistryError(f"{version}'s GGUF is {str(now)[:12]} now, not the {str(scored.get(role))[:12]} the "
+                                "watch scored (restored meanwhile?); nothing recorded, the next watch scores again")
 
 
 def pin_golden(sha256: str, n: int) -> bool:

@@ -4,12 +4,14 @@ After `healing promote`, the collect job runs `watch` after each collect. It wai
 dictated after the promotion that a random review verified hold 1,500 reference words, or until 14
 days have passed. Then it scores the promoted and the previous version together on those clips (one
 `healing eval` with the vocabulary Hex runs, each model prepared as Hex runs it) and decides once per
-promotion, recorded as a registry `watch` event:
+promotion, recorded as a registry `watch` event (a rollback carries it in its own `rolled_back` line):
 
 - **rolled back** when the promoted model is significantly worse: the one-sided 95% lower bound of
   Δ WER (promoted − previous) is above 0, or formatting or streaming regressed past what the gate
   accepts (D-58). `healing rollback` does it, so the ship lock, Hex's confirmation and `rolled_back`
-  all apply; a rollback Hex doesn't confirm records nothing and the next run tries again;
+  all apply, and under that lock it re-checks that Hex still runs the promoted version and that both
+  GGUFs are the scored ones; a refused or unconfirmed rollback records nothing and the next run tries
+  again;
 - **kept** otherwise, with Δ and its interval;
 - **insufficient evidence, kept** when 14 days pass with under 1,500 words: it never rolls back on thin
   data (`healing status` nudges you to review while it waits).
@@ -35,6 +37,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+import numpy as np
 
 from healing import gate, labels, splits, stats
 from healing.paths import healing_home
@@ -180,8 +184,9 @@ def judge(document: dict, *, promoted: str, previous: str, margins: gate.Margins
           streams_problem: str | None) -> tuple[dict, list[str]]:
     """({wer, formatting, streaming}, what regressed) on the watch set (`rolling` in the eval). WER
     regresses when its lower bound is above 0; formatting when its lower bound is above the gate's
-    formatting margin; streaming when Hex stopped streaming the promoted model or its long-clip p95
-    time to text is over the gate's margin (unmeasured is never a regression)."""
+    formatting margin; streaming when Hex stopped streaming the promoted model (a hard regression), or
+    when the one-sided 95% lower bound of its long-clip p95 time to text minus the previous one's is over
+    the gate's margin (unmeasured is never a regression)."""
     a, b = gate.rows_for(document, previous, "rolling"), gate.rows_for(document, promoted, "rolling")
     if not a or not b:
         raise WatchError("the eval did not score the watch set for both models")
@@ -193,14 +198,31 @@ def judge(document: dict, *, promoted: str, previous: str, margins: gate.Margins
         formatting = paired(format_a, format_b, resamples=margins.resamples, seed=margins.seed)
         if formatting.ci_low > margins.formatting_ci_high:
             regressed.append("formatting")
-    p95_b, long_clips, why_b = gate.p95_long(document, promoted, margins)
-    p95_a, _, why_a = gate.p95_long(document, previous, margins)
-    streaming = {"streams_problem": streams_problem, "long_clips": long_clips,
-                 "p95_delta_ms": None if p95_a is None or p95_b is None else p95_b - p95_a,
-                 "threshold_ms": margins.streaming_p95_ms, "note": why_b or why_a}
-    if streams_problem or (streaming["p95_delta_ms"] is not None and streaming["p95_delta_ms"] > margins.streaming_p95_ms):
+    streaming = {"streams_problem": streams_problem, "threshold_ms": margins.streaming_p95_ms,
+                 **_latency(a, b, margins)}
+    if streams_problem or (streaming["p95_ci_low_ms"] is not None
+                           and streaming["p95_ci_low_ms"] > margins.streaming_p95_ms):
         regressed.append("streaming")
     return {"wer": _interval(wer), "formatting": _interval(formatting), "streaming": streaming}, regressed
+
+
+def _latency(a: list[dict], b: list[dict], margins: gate.Margins) -> dict:
+    """p95 time to text on the long clips both models were timed on: the point Δ (promoted − previous)
+    and its 90% interval from the same clip resampling as the WER bootstrap, so `p95_ci_low_ms` is the
+    one-sided 95% lower bound (D-58)."""
+    timed_b = {r["id"]: r for r in b if r.get("inference_ms") is not None and r.get("audio_ms") is not None}
+    pairs = [(r["inference_ms"], timed_b[r["id"]]["inference_ms"]) for r in a
+             if r["id"] in timed_b and r.get("inference_ms") is not None and r.get("audio_ms") is not None
+             and r["audio_ms"] >= margins.long_clip_ms]
+    if not pairs:
+        return {"long_clips": 0, "p95_delta_ms": None, "p95_ci_low_ms": None, "p95_ci_high_ms": None,
+                "note": f"no timed clip of at least {margins.long_clip_ms / 1000:g} s, so time to text is unmeasured"}
+    before, after = (np.array(side, dtype=float) for side in zip(*pairs))
+    deltas = stats.paired_quantile_deltas(before, after, 95, resamples=margins.resamples, seed=margins.seed)
+    tail = (1 - CONFIDENCE) / 2
+    low, high = np.quantile(deltas, [tail, 1 - tail])
+    return {"long_clips": len(pairs), "p95_delta_ms": float(np.percentile(after, 95) - np.percentile(before, 95)),
+            "p95_ci_low_ms": float(low), "p95_ci_high_ms": float(high), "note": None}
 
 
 def _pt(value: float) -> str:
@@ -312,12 +334,19 @@ def _decide(binary: Path, target: Watched, found: Evidence, dry_run: bool, evalu
         return 0
     reason = (f"watch: {', '.join(regressed)} regressed; Δ WER {_pt(checks['wer']['delta'])} pt "
               f"[{_pt(checks['wer']['ci_low'])}, {_pt(checks['wer']['ci_high'])}] on {words} words ({document.get('eval_id')})")
+    # Every guard is asked again under the ship lock right before Hex is switched: v2 still current, Hex
+    # still running it (you may have switched meanwhile), both GGUFs still the scored ones (a restore may
+    # have swapped one). The decision rides on the `rolled_back` line itself, so no crash can split them.
     code = ship.rollback(binary=binary, to=previous, reason=reason, say=say, confirm_s=confirm_s, poll_s=poll_s,
-                         expect_leaving=name)
+                         expect_leaving=name, expect_running=_hex_ids(target.version),
+                         expect_ggufs={name: target.version.gguf, previous: target.previous.gguf},
+                         fields={"watch": {**decision, "verdict": "rolled_back"}})
+    if code == ship.EXIT_SWITCHED:
+        say(f"warning: Hex no longer runs {name}; watch does nothing and records nothing (X-4)")
+        return EXIT_MANUAL
     if code != 0:
-        say(f"{name} is not rolled back (exit {code}); the next watch tries again")
+        say(f"{name} is not rolled back (exit {code}); nothing recorded, the next watch scores again")
         return code
-    registry.record_watch(name, {**decision, "verdict": "rolled_back"})
     say(f"rolled back {name} → {previous}: {shown}")
     for check in regressed:
         if check == "formatting":
@@ -325,8 +354,9 @@ def _decide(binary: Path, target: Watched, found: Evidence, dry_run: bool, evalu
                 f"{_pt(margins.formatting_ci_high)} pt")
         elif check == "streaming":
             stream = checks["streaming"]
-            say("streaming regressed: " + (stream["streams_problem"] or f"p95 time to text {stream['p95_delta_ms']:+.0f} ms "
-                                           f"on {stream['long_clips']} long clips"))
+            say("streaming regressed: " + (stream["streams_problem"] or (
+                f"p95 time to text {stream['p95_delta_ms']:+.0f} ms [{stream['p95_ci_low_ms']:+.0f}, "
+                f"{stream['p95_ci_high_ms']:+.0f}] on {stream['long_clips']} long clips")))
     return 0
 
 

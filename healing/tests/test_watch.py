@@ -49,27 +49,32 @@ class World:
         labels.refresh(self.store)
         return ids
 
-    def scored(self, previous: list[int], promoted: list[int], format_extra: int = 0):
+    def scored(self, previous: list[int], promoted: list[int], format_extra: int = 0, ms: tuple | None = None,
+               during=None):
         """A fake `healing eval`: clip i of the watch set (in time order) has `previous[i]` word errors
         for v1 and `promoted[i]` for v2, of 20 words each. Formatting errors follow word errors (v2 has
-        `format_extra` more on every clip)."""
+        `format_extra` more on every clip). `ms` is (v1's, v2's) per-clip inference times on 12 s clips
+        (default: 300 ms on 2 s clips); `during()` runs while it scores (something happening meanwhile)."""
         state = registry.load()
         errors = {state.get("v1").gguf: previous, state.get("v2").gguf: promoted}
         extra = {state.get("v1").gguf: 0, state.get("v2").gguf: format_extra}
+        times = {state.get("v1").gguf: ms[0], state.get("v2").gguf: ms[1]} if ms else None
 
         def evaluate(paths: list[Path], ref) -> dict:
             clips = json.loads(ref.manifest.read_text())["clips"]
             self.calls.append([c["id"] for c in clips])
             assert len(clips) == len(previous) == len(promoted)
+            if during is not None:
+                during()
             models, per_clip = [], {}
             for path in paths:
                 sha = objects.sha256_file(path)
                 models.append({"gguf_path": str(path), "gguf_sha256": sha})
                 per_clip[str(path)] = {"rolling": [
                     {"id": c["id"], "word_errors": int(e), "reference_words": WORDS, "format_errors": int(e) + extra[sha],
-                     "format_words": WORDS, "terms_expected": [], "terms_hit": [], "inference_ms": 300.0,
-                     "audio_ms": 2000.0}
-                    for c, e in zip(clips, errors[sha])]}
+                     "format_words": WORDS, "terms_expected": [], "terms_hit": [],
+                     "inference_ms": float(times[sha][i]) if times else 300.0, "audio_ms": 12_000.0 if times else 2000.0}
+                    for i, (c, e) in enumerate(zip(clips, errors[sha]))]}
             return {"eval_id": "eval-watch-fixture", "models": models,
                     "sets": [{"set": "rolling", "split_id": ref.split_id, "manifest_sha256": ref.manifest_sha256,
                               "n": ref.n}],
@@ -123,8 +128,10 @@ def shifted(errors: np.ndarray, up: int, down: int = 0) -> list[int]:
     return out.tolist()
 
 
-def last_watch() -> dict:
-    return events("watch")[-1]
+def last_watch(name: str = "v2") -> dict:
+    """The version's latest watch decision, from either record: a `watch` event (kept, insufficient) or
+    the `rolled_back` event that carries it."""
+    return registry.load().versions[name].watches[-1]
 
 
 # ---- AC-14 ----------------------------------------------------------------------------------------
@@ -140,7 +147,7 @@ def test_significant_loss_rolls_back(world):
     assert "watch" in state.versions["v2"].reason and "eval-watch-fixture" in state.versions["v2"].reason
     assert world.hex.selected == hex_id("v1")
     decision = last_watch()
-    assert decision["verdict"] == "rolled_back" and decision["version"] == "v2" and decision["previous"] == "v1"
+    assert decision["verdict"] == "rolled_back" and decision["previous"] == "v1"
     assert decision["wer"]["delta"] == pytest.approx(0.02) and decision["wer"]["ci_low"] > 0  # the CI is logged
     assert decision["words"] == 2000 and decision["clips"] == 100 and decision["eval_id"] == "eval-watch-fixture"
     assert decision["promoted_at_ms"] == world.t0
@@ -219,7 +226,7 @@ def test_no_re_promote_after_rollback(world, tmp_path):
     # watch never decides again: v1 became current by a rollback, not a promotion
     code, lines = world.run(days=20)
     assert code == 0 and any("nothing to watch" in line for line in lines), lines
-    assert len(events("watch")) == 1
+    assert len(registry.load().versions["v2"].watches) == 1
     # and nothing promotes v2 again: not promote, the gate, a rollback to it, or train auto
     code, lines = ship_promote(world.hex, "v2")
     assert code == ship.EXIT_NO_GATE and any("never promoted again" in line for line in lines), lines
@@ -300,7 +307,7 @@ def test_decides_once_per_promotion(world):
     world.clips(100)  # more reviews later change nothing: the promotion is decided
     code, lines = world.run(days=10)
     assert code == 0 and lines and lines[0].startswith("decided: kept v2"), lines
-    assert len(world.calls) == 1 and len(events("watch")) == 1
+    assert len(world.calls) == 1 and len(registry.load().versions["v2"].watches) == 1
 
 
 def test_failed_rollback_records_nothing(world):
@@ -309,7 +316,7 @@ def test_failed_rollback_records_nothing(world):
     world.hex.set(ignore_use=True)  # Hex answers but keeps v2
     code, lines = world.run(world.scored(errors.tolist(), shifted(errors, 40)))
     assert code == ship.EXIT_MISMATCH
-    assert events("watch") == [] and registry.load().current == "v2"
+    assert registry.load().versions["v2"].watches == [] and registry.load().current == "v2"
     world.hex.set(ignore_use=False)  # the next run decides again
     assert world.run(world.scored(errors.tolist(), shifted(errors, 40)))[0] == 0
     assert registry.load().current == "v1"
@@ -351,3 +358,93 @@ def test_schedule_runs_watch_after_collect(monkeypatch):
     monkeypatch.setattr(schedule, "_watch_after", lambda: order.append("watch") or 0)
     assert schedule.run_once() == 0
     assert order.index("collect") < order.index("watch")
+
+
+# ---- review fixes: what may change while it scores ------------------------------------------------
+
+def test_switch_during_scoring_is_respected(world):
+    """You pick another model while the eval runs: the rollback must not overwrite your choice."""
+    world.clips(100)
+    errors = base(100)
+    switch = lambda: world.hex.set(selected=CATALOG)  # noqa: E731
+    used = len(world.hex.calls("use"))
+    code, lines = world.run(world.scored(errors.tolist(), shifted(errors, 40), during=switch))
+    assert code == watch.EXIT_MANUAL, lines
+    assert any(line.startswith("error:") or line.startswith("warning:") for line in lines)
+    assert world.hex.selected == CATALOG and len(world.hex.calls("use")) == used
+    state = registry.load()
+    assert state.current == "v2" and state.versions["v2"].watches == [] and events("rolled_back") == []
+
+
+def _swap_gguf(world, name: str):
+    """A `models restore` that rebuilt `name` to other bytes (a parity restore) while the eval ran."""
+    source = Path(world.hex.binary).parent / f"rebuilt-{name}.gguf"
+    source.write_bytes(b"GGUF rebuilt " + name.encode() * 50)
+    sha = objects.put(source)
+    with registry.lock():
+        registry.append({"event": "restored", "version": name, "method": "wer_parity", "rebuilt_sha256": sha,
+                         "gguf_sha256": sha})
+
+
+@pytest.mark.parametrize("swapped", ["v1", "v2"])
+def test_gguf_swapped_during_scoring_refuses_rollback(world, swapped):
+    world.clips(100)
+    errors = base(100)
+    used, selected = len(world.hex.calls("use")), world.hex.selected
+    code, lines = world.run(world.scored(errors.tolist(), shifted(errors, 40), during=lambda: _swap_gguf(world, swapped)))
+    assert code != 0, lines
+    state = registry.load()
+    assert state.current == "v2" and state.versions["v2"].watches == [] and events("rolled_back") == []
+    assert len(world.hex.calls("use")) == used and world.hex.selected == selected
+
+
+@pytest.mark.parametrize("swapped", ["v1", "v2"])
+def test_gguf_swapped_during_scoring_refuses_keep(world, swapped):
+    world.clips(100)
+    errors = base(100).tolist()
+    code, lines = world.run(world.scored(errors, errors, during=lambda: _swap_gguf(world, swapped)))
+    assert code != 0, lines
+    assert registry.load().versions["v2"].watches == [] and events("watch") == []
+
+
+def test_rollback_carries_its_decision_in_one_line(world):
+    """The decision is in the `rolled_back` event itself, so no crash can leave a rollback undecided."""
+    world.clips(100)
+    errors = base(100)
+    assert world.run(world.scored(errors.tolist(), shifted(errors, 40)))[0] == 0
+    [rolled] = events("rolled_back")
+    assert rolled["watch"]["verdict"] == "rolled_back" and rolled["watch"]["promoted_at_ms"] == world.t0
+    assert rolled["watch"]["wer"]["ci_low"] > 0
+    assert events("watch") == []  # nothing else to write after it
+    assert last_watch() == rolled["watch"]
+
+
+def _long_clip_times(seed: int, offset: float, *, shuffled: bool):
+    """v1's and v2's times on 100 long clips: v2 is v1 plus `offset`, clip for clip, or (`shuffled`) the
+    same spread of times landing on other clips, so only the tail's sampling noise separates them."""
+    rng = np.random.default_rng(seed)
+    previous = rng.normal(1000, 300, 100).clip(100)
+    promoted = (rng.permutation(previous) if shuffled else previous) + offset
+    return previous.tolist(), promoted.tolist()
+
+
+def test_noisy_latency_is_not_a_regression(world):
+    """p95 over 100 long clips is +60 ms as a point estimate, but not significantly over +50 ms."""
+    world.clips(100)
+    errors = base(100).tolist()
+    ms = _long_clip_times(seed=3, offset=60, shuffled=True)
+    assert np.percentile(ms[1], 95) - np.percentile(ms[0], 95) > 50  # the point estimate alone would roll back
+    code, lines = world.run(world.scored(errors, errors, ms=ms))
+    assert code == 0, lines
+    decision = last_watch()
+    assert decision["verdict"] == "kept" and decision["streaming"]["p95_ci_low_ms"] < 50
+
+
+def test_significantly_slower_long_clips_roll_back(world):
+    world.clips(100)
+    errors = base(100).tolist()
+    code, lines = world.run(world.scored(errors, errors, ms=_long_clip_times(seed=3, offset=400, shuffled=False)))
+    assert code == 0, lines
+    decision = last_watch()
+    assert decision["regressed"] == ["streaming"] and decision["streaming"]["p95_ci_low_ms"] > 50
+    assert registry.load().current == "v1"
