@@ -9,8 +9,9 @@ use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::locate::Tracker;
+use super::locate::{Anchor, Tracker};
 use super::session::{CorrectionObservation, Event, Field, Session, Step, WATCH};
+use super::tidy_edit::{self, Mark, Rebase};
 use super::{PasteTarget, QUEUE};
 use crate::accessibility::{self, Notification, Observer, RetainedElement};
 use crate::dictation::key_counts;
@@ -87,6 +88,20 @@ impl Active {
                 .then(|| Instant::now() + POLL),
             observer,
         }
+    }
+
+    /// Starts over from Tidy after paste's edit of the paste (T8.5).
+    fn rebase(&mut self, rebase: Rebase) {
+        let Rebase {
+            inserted,
+            start,
+            before,
+        } = rebase;
+        self.session.rebase(Tracker::new(
+            inserted,
+            Some(Anchor { start }),
+            Some(&before),
+        ));
     }
 
     /// What happened since the last tick.
@@ -169,6 +184,13 @@ fn run() {
         let now = Instant::now();
         active.retain_mut(|watched| {
             let events = watched.events(now);
+            // Tidy after paste is editing this paste, or just did (T8.5).
+            match tidy_edit::take(watched.entry_id) {
+                Some(Mark::Editing) => return true,
+                Some(Mark::Abandon) => return false,
+                Some(Mark::Rebase(rebase)) => watched.rebase(rebase),
+                None => {}
+            }
             match feed(
                 &mut watched.session,
                 events,

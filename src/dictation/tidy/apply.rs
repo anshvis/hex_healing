@@ -205,6 +205,31 @@ fn dictation_offset(pasted: &str, text: &str) -> Option<usize> {
     Some(shift)
 }
 
+impl Plan {
+    /// What the field holds once this plan went in, for Learn from
+    /// corrections' watch to start over from: the tidied paste, where it
+    /// starts, and the field around it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn rebase(&self) -> Rebased {
+        let end = self.range.start + self.replacement.encode_utf16().count();
+        let mut around = self.after[..self.range.start].to_vec();
+        around.extend_from_slice(&self.after[end.min(self.after.len())..]);
+        Rebased {
+            inserted: self.replacement.clone(),
+            start: self.range.start,
+            before: String::from_utf16_lossy(&around),
+        }
+    }
+}
+
+/// [`Plan::rebase`]'s answer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Rebased {
+    pub(crate) inserted: String,
+    pub(crate) start: usize,
+    pub(crate) before: String,
+}
+
 /// What a re-read of the field shows after an edit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Check {
@@ -337,6 +362,7 @@ const READ_BACKS: usize = 10;
 /// the field takes it, else (or when it ignored it) Hex's paste over the
 /// selected range; then the re-read. Nothing is sent to a field the plan
 /// can't be made for.
+#[cfg(test)]
 pub(crate) fn apply(
     target: &mut impl Target,
     inserted: &Inserted,
@@ -344,28 +370,42 @@ pub(crate) fn apply(
     text: &str,
     edits: &[Suggestion],
 ) -> Outcome {
+    apply_planned(target, inserted, expected_start, text, edits).0
+}
+
+/// [`apply`], with the plan that went in when it applied: the field's
+/// pasted range now holds `replacement` (T8.5 rebases Learn from
+/// corrections' watch on it).
+pub(crate) fn apply_planned(
+    target: &mut impl Target,
+    inserted: &Inserted,
+    expected_start: Option<usize>,
+    text: &str,
+    edits: &[Suggestion],
+) -> (Outcome, Option<Plan>) {
+    let refused = |outcome| (outcome, None);
     match target.is_secure() {
         Ok(false) => {}
-        Ok(true) => return Outcome::Unsupported(Why::SecureField),
-        Err(why) => return Outcome::Unsupported(why),
+        Ok(true) => return refused(Outcome::Unsupported(Why::SecureField)),
+        Err(why) => return refused(Outcome::Unsupported(why)),
     }
     if !target.owner_in_front() {
-        return Outcome::Unsupported(Why::OtherApp);
+        return refused(Outcome::Unsupported(Why::OtherApp));
     }
     let before = match target.read() {
         Ok(units) => units,
-        Err(why) => return Outcome::Unsupported(why),
+        Err(why) => return refused(Outcome::Unsupported(why)),
     };
     let plan = match plan(&before, inserted, expected_start, text, edits) {
         Ok(plan) => plan,
-        Err(NoPlan::Moved) => return Outcome::Moved,
-        Err(NoPlan::Differs) => return Outcome::Unsupported(Why::Differs),
+        Err(NoPlan::Moved) => return refused(Outcome::Moved),
+        Err(NoPlan::Differs) => return refused(Outcome::Unsupported(Why::Differs)),
     };
     // The delivery lock is held from the first edit through the read-backs
     // and any fallback, so no dictation paste lands on a range Tidy has
     // selected or is still checking (D-79).
     if let Err(why) = target.begin_edit() {
-        return Outcome::Unsupported(why);
+        return refused(Outcome::Unsupported(why));
     }
     let outcome = edit(
         target,
@@ -393,9 +433,9 @@ fn edit(
     expected_start: Option<usize>,
     text: &str,
     edits: &[Suggestion],
-) -> Outcome {
+) -> (Outcome, Option<Plan>) {
     let mut selected = None;
-    let outcome = edit_selecting(
+    let (outcome, used) = edit_selecting(
         target,
         before,
         plan,
@@ -411,7 +451,8 @@ fn edit(
     {
         target.select(range.end..range.end);
     }
-    outcome
+    let used = matches!(outcome, Outcome::Applied(_)).then_some(used);
+    (outcome, used)
 }
 
 /// [`edit`]'s steps, noting in `selected` the last range it selected.
@@ -425,6 +466,35 @@ fn edit_selecting(
     text: &str,
     edits: &[Suggestion],
     selected: &mut Option<Range<usize>>,
+) -> (Outcome, Plan) {
+    let mut used = plan.clone();
+    let outcome = edit_steps(
+        target,
+        before,
+        plan,
+        inserted,
+        expected_start,
+        text,
+        edits,
+        selected,
+        &mut used,
+    );
+    (outcome, used)
+}
+
+/// [`edit_selecting`]'s steps, noting in `used` the plan the last edit
+/// sent.
+#[allow(clippy::too_many_arguments)]
+fn edit_steps(
+    target: &mut impl Target,
+    before: &[u16],
+    plan: &Plan,
+    inserted: &Inserted,
+    expected_start: Option<usize>,
+    text: &str,
+    edits: &[Suggestion],
+    selected: &mut Option<Range<usize>>,
+    used: &mut Plan,
 ) -> Outcome {
     // Only when the field is still the read the plan came from, with the
     // range selected: anything typed meanwhile goes to the fallback, which
@@ -458,6 +528,7 @@ fn edit_selecting(
             Err(NoPlan::Differs) => return Outcome::Unsupported(Why::Differs),
         }
     };
+    *used = plan.clone();
     if let Err(outcome) = paste_fallback(target, &now, &plan, selected) {
         return outcome;
     }
@@ -545,13 +616,35 @@ pub(crate) fn apply_to_last(session: &super::session::TidySession) -> Outcome {
     ) {
         Err(why) => Outcome::Unsupported(why),
         Ok(anchor) => {
-            let outcome = apply(
+            // Learn from corrections' watch of this paste holds still
+            // while the edit goes in, and starts over from the tidied text
+            // once it has (T8.5): the tidy is never the person's correction.
+            let watch = crate::dictation::correction_watch::tidy_edit::TidyEdit::begin(
+                session.dictation_id,
+            );
+            let (outcome, plan) = apply_planned(
                 &mut ax::AxTarget::new(&anchor, pastes),
                 &anchor.inserted,
                 anchor.expected_start,
                 &session.text,
                 &edits,
             );
+            match (outcome, plan) {
+                (Outcome::Applied(_), Some(plan)) => {
+                    let Rebased {
+                        inserted,
+                        start,
+                        before,
+                    } = plan.rebase();
+                    watch.applied(crate::dictation::correction_watch::tidy_edit::Rebase {
+                        inserted,
+                        start,
+                        before,
+                    });
+                }
+                (Outcome::Unsupported(Why::Unverified), _) => watch.unverified(),
+                _ => drop(watch),
+            }
             if !matches!(
                 outcome,
                 Outcome::Applied(_) | Outcome::Unsupported(Why::Unverified)
@@ -1296,5 +1389,43 @@ mod tests {
         );
         assert_eq!(fake.set, 0);
         assert_eq!(fake.text(), "Note: We ship it");
+    }
+
+    /// T8.5: an applied edit hands back the plan that went in, whose rebase
+    /// is the field after the tidy: the tidied paste, where it starts, and
+    /// the text around it, including what was typed before the paste.
+    #[test]
+    fn an_applied_edit_hands_back_the_field_it_left() {
+        let planned = |fake: &mut Fake| {
+            let inserted = " um we ship it";
+            apply_planned(
+                fake,
+                &Inserted::of(inserted),
+                Some(3),
+                inserted.trim_start(),
+                &rules(inserted.trim_start()),
+            )
+        };
+        let mut fake = Fake::new("Hi. um we ship it");
+        let (outcome, plan) = planned(&mut fake);
+        assert_eq!(outcome, Outcome::Applied(Method::SelectedText));
+        let rebased = plan.unwrap().rebase();
+        assert_eq!(
+            format!("{}{}", &rebased.before[..rebased.start], rebased.inserted),
+            fake.text()
+        );
+        assert_eq!(rebased.before, "Hi.");
+        // The paste fallback re-plans from a fresh read; the rebase is of
+        // that plan.
+        let mut typed = Fake::new("Hi. um we ship it");
+        typed.typed_meanwhile = Some((1, 0, "Note: "));
+        let (outcome, plan) = planned(&mut typed);
+        assert_eq!(outcome, Outcome::Applied(Method::Paste));
+        let rebased = plan.unwrap().rebase();
+        assert_eq!(rebased.before, "Note: Hi.");
+        assert_eq!(rebased.start, "Note: Hi.".len());
+        // Nothing applied, no plan.
+        let mut moved = Fake::new("Hi. um we shipped it");
+        assert_eq!(planned(&mut moved), (Outcome::Moved, None));
     }
 }
