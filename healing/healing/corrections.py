@@ -8,6 +8,10 @@ training signal (AC-6):
 
 Edits are judged against `raw_text`, never `final_text`, so the model is not taught to
 repair the cleanup step's mistakes. Only `acoustic` edits make a training reference.
+
+After Labs › Tidy after paste edited the paste in place, Hex measures the correction from the
+tidied text (T8.5), so step 1 aligns `tidied_text` instead of `final_text`: the tidy's own
+removals are never the person's edits. A tidy whose text couldn't be rebuilt is never classified.
 """
 
 from __future__ import annotations
@@ -189,7 +193,10 @@ def label_corrections(store: Store, since_ms: int | None = None, recompute: bool
     which nothing else overwrites. `labels.refresh` is the one writer of `label` and of
     `reference_text`, which it derives from the label.
     """
-    where = "correction_outcome = 'edited' AND edited_text IS NOT NULL AND rewritten = 0"
+    where = (
+        "correction_outcome = 'edited' AND edited_text IS NOT NULL AND rewritten = 0"
+        " AND NOT (tidy_applied = 1 AND tidied_text IS NULL)"
+    )
     parameters: list = []
     if not recompute:
         where += " AND classified_at_ms IS NULL"
@@ -198,7 +205,8 @@ def label_corrections(store: Store, since_ms: int | None = None, recompute: bool
         parameters.append(since_ms)
     counts: Counter = Counter()
     rows = store.db.execute(
-        f"SELECT clip_id, raw_text, final_text, edited_text, audio_sha256 FROM clips WHERE {where}",
+        "SELECT clip_id, raw_text, COALESCE(tidied_text, final_text) AS final_text, edited_text, audio_sha256"
+        f" FROM clips WHERE {where}",
         parameters,
     ).fetchall()
     for row in rows:
