@@ -59,6 +59,15 @@ pub fn take(entry_id: u64) -> Option<Mark> {
     Some(marks.remove(index).1)
 }
 
+/// Whether the watch of `entry_id` has a mark waiting, without taking it.
+pub fn marked(entry_id: u64) -> bool {
+    MARKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .iter()
+        .any(|(id, _)| *id == entry_id)
+}
+
 /// One apply over `entry_id`'s paste. Begun before the first edit is sent;
 /// dropped without an outcome (a refusal, a panic), it clears its mark.
 pub struct TidyEdit {
@@ -114,6 +123,7 @@ mod tests {
         let edit = TidyEdit::begin(id);
         assert_eq!(take(id), Some(Mark::Editing));
         assert_eq!(take(id), Some(Mark::Editing));
+        assert!(marked(id));
         edit.applied(rebase());
         assert_eq!(take(id), Some(Mark::Rebase(rebase())));
         assert_eq!(take(id), None);

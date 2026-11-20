@@ -199,6 +199,9 @@ fn run() {
             ) {
                 Step::Wait => true,
                 Step::Drop => false,
+                // A tidy that began during this tick's reads may be what they
+                // saw: the result is dropped and the mark handled next tick.
+                Step::Done(_) if tidy_edit::marked(watched.entry_id) => true,
                 Step::Done(seen) => {
                     keep(&watched.history, watched.entry_id, &watched.text, seen);
                     false
