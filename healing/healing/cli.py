@@ -181,12 +181,15 @@ def main(argv: list[str] | None = None) -> int:
 
     train_group = commands.add_parser("train", help="Tier 2 training (M6): `prepare`, `auto`, or a round with --local")
     train_group.add_argument("--local", action="store_true", help="train a LoRA round on this Mac's CPU (T6.5)")
-    train_group.add_argument("--smoke", action="store_true", help="with --local: 20 steps over 50 clips")
+    train_group.add_argument("--smoke", action="store_true", help="with --local or --remote: 20 steps over 50 clips")
     train_group.add_argument("--bundle", type=Path, default=None, help="with --local: the bundle `train prepare` wrote")
     train_group.add_argument("--config", type=Path, default=None, help="with --local: the training config (default: healing/train/configs/lora.yaml)")
     train_group.add_argument("--base", type=Path, default=None, help="with --local: the base .nemo (default: $HEALING_BASE_NEMO, else M0's model cache)")
     train_group.add_argument("--python", type=Path, default=None, help="with --local: NeMo's Python (default: $HEALING_NEMO_PYTHON, else M0's env)")
     train_group.add_argument("--rounds-dir", type=Path, default=None, help="with --local: where rounds work (default: $HEALING_ROUNDS_DIR, else $HEALING_HOME/rounds)")
+    train_group.add_argument("--remote", action="store_true", help="train the round on Kaggle's free GPU (T6.2): uploads the bundle")
+    train_group.add_argument("--allow-upload", action="store_true", help="with --remote: allow uploading the bundle (your voice and words) to a private Kaggle dataset")
+    train_group.add_argument("--max-minutes", type=int, default=120, help="with --remote: the GPU run's time limit (default 120)")
     train = train_group.add_subparsers(dest="command")
     prepare = train.add_parser("prepare", help="snapshot the train clips and write the weighted training bundle")
     prepare.add_argument("--include-weak", action="store_true", help="also train on weak clips (weight 0.2)")
@@ -272,8 +275,20 @@ def main(argv: list[str] | None = None) -> int:
             from healing.train import auto as train_auto
 
             return train_auto.main(args)
+        if args.local and args.remote:
+            train_group.error("give --local or --remote, not both")
+        if args.remote:
+            from healing.remote.kaggle_runner import main as remote_main, run_remote  # G-3: only remote/ uploads
+
+            if not args.allow_upload:  # before anything else: no file read, no subprocess, no network
+                return run_remote(args.bundle, allow_upload=False)
+            if args.bundle is None:
+                train_group.error("--remote needs --bundle")
+            if args.max_minutes < 1:
+                train_group.error("--max-minutes must be at least 1")
+            return remote_main(args)
         if not args.local:
-            train_group.error("give a subcommand (prepare, auto) or --local")
+            train_group.error("give a subcommand (prepare, auto), --local or --remote")
         if args.bundle is None:
             train_group.error("--local needs --bundle")
         from healing.train import run as train_run

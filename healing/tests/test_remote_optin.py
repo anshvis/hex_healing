@@ -22,6 +22,7 @@ from healing.remote import kaggle_runner
 from healing.train import config as config_module
 from healing.train.manifest import LISTING, MANIFEST, _listing
 
+REAL_RUN = subprocess.run  # the stub hands every other command (git, for the run record) to it
 TEXT = "please call stella ask her to bring these things"
 
 
@@ -79,7 +80,8 @@ class StubKaggle:
         self.live: set[str] = set()
 
     def __call__(self, argv, **kwargs):
-        assert argv[0] == "/stub/kaggle"
+        if argv[0] != "/stub/kaggle":
+            return REAL_RUN(argv, **kwargs)
         args = list(argv[1:])
         self.calls.append(args)
         env = kwargs.get("env") or {}
@@ -91,7 +93,7 @@ class StubKaggle:
             folder = Path(args[args.index("-p") + 1])
             self.metadata["dataset"] = json.loads((folder / "dataset-metadata.json").read_text())
             self.uploaded = sorted(p.name for p in folder.iterdir())
-            self.live.add(self.metadata["dataset"]["id"])
+            self.live.add(("datasets", self.metadata["dataset"]["id"]))
         elif args[:2] == ["datasets", "status"]:
             out = "ready\n"
         elif args[:2] == ["kernels", "push"]:
@@ -99,7 +101,7 @@ class StubKaggle:
             meta = json.loads((folder / "kernel-metadata.json").read_text())
             self.metadata["kernel"] = meta
             self.notebook = (folder / meta["code_file"]).read_text()
-            self.live.add(meta["id"])
+            self.live.add(("kernels", meta["id"]))
         elif args[:2] == ["kernels", "status"]:
             if self.interrupt_poll:
                 raise KeyboardInterrupt
@@ -110,9 +112,9 @@ class StubKaggle:
             if self.fail_delete:
                 code, out = 1, "403 Forbidden"
             else:
-                self.live.discard(args[2])
+                self.live.discard((args[0], args[-1]))
         elif args[1:2] == ["list"]:
-            out = "\n".join(sorted(self.live)) + "\n"
+            out = "\n".join(i for kind, i in sorted(self.live) if kind == args[0]) + "\n"
         return subprocess.CompletedProcess(argv, code, out, "")
 
     def write_output(self, folder: Path, slug: str) -> None:
