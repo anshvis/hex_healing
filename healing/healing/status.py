@@ -77,6 +77,8 @@ class Status:
     min_free: int = DEFAULT_MIN_FREE
     last_clean: dict | None = None
     registry_object_bytes: int = 0  # the model registry's objects store (GGUFs and LoRA deltas)
+    # Tidy after paste's recorded decisions (T8.5): all of them, accepted, and clips tidied in place.
+    tidy: dict[str, int] = field(default_factory=lambda: {"decisions": 0, "accepted": 0, "applied_clips": 0})
     watch: str | None = None  # `healing watch`'s waiting line while the current promotion is undecided
     warnings: list[str] = field(default_factory=list)
 
@@ -94,6 +96,7 @@ class Status:
             "min_free": self.min_free,
             "last_clean": self.last_clean,
             "registry_object_bytes": self.registry_object_bytes,
+            "tidy": self.tidy,
             "watch": self.watch,
             "warnings": self.warnings,
         }
@@ -119,6 +122,8 @@ class Status:
         else:
             lines.append("last clean never")
         lines.append(f"registry objects {self.registry_object_bytes} bytes")
+        t = self.tidy
+        lines.append(f"tidy decisions {t['decisions']}, accepted {t['accepted']}, applied clips {t['applied_clips']}")
         if self.watch:
             lines.append(f"watch {self.watch}")
         if self.oldest_uncollected_risk_ms is not None:
@@ -176,6 +181,12 @@ def compute(
         {row[0]: row[1] for row in db.execute("SELECT label, COUNT(*) FROM clips GROUP BY label")}
     )
     status.clusters = db.execute("SELECT COUNT(*) FROM clusters").fetchone()[0]
+    decided = db.execute("SELECT COUNT(*), COALESCE(SUM(accepted), 0) FROM tidy_events").fetchone()
+    status.tidy = {
+        "decisions": decided[0],
+        "accepted": decided[1],
+        "applied_clips": db.execute("SELECT COUNT(*) FROM clips WHERE tidy_applied = 1").fetchone()[0],
+    }
     run = db.execute("SELECT * FROM runs ORDER BY run_id DESC LIMIT 1").fetchone()
     if run:
         status.last_run = {

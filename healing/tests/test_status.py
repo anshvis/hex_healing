@@ -130,6 +130,7 @@ def test_json_shape_and_list(world, capsys):
     assert set(document) == {
         "clips", "with_audio", "audio_bytes", "budget", "labels", "clusters", "last_run",
         "oldest_uncollected_risk", "warnings", "free_bytes", "min_free", "last_clean", "registry_object_bytes", "watch",
+        "tidy",
     }
     assert main(["status", "--list"]) == 0
     listed = capsys.readouterr().out
@@ -160,3 +161,17 @@ def test_vocabulary_warnings_only_after_apply(world):
     world.settings(**{"labs.vocabulary_biasing": True})
     vocab_apply.save_applied(vocab_apply.Applied(1, [], [], None, 3))
     assert codes(world) == []
+
+
+def test_tidy_decisions_are_counted(world, capsys):
+    """M8 validation step 5: `healing status` shows the recorded tidy decisions (T8.5)."""
+    add_audio(world, "a" * 64, 10)
+    clip = world.store.db.execute("SELECT clip_id FROM clips").fetchone()[0]
+    world.store.db.execute("UPDATE clips SET tidy_applied = 1, tidied_text = 'x' WHERE clip_id = ?", (clip,))
+    for accepted in (1, 1, 0):
+        world.store.db.execute(
+            "INSERT INTO tidy_events (clip_id, kind, token, accepted, source) VALUES (?, 'filler', 'um', ?, 'rule')",
+            (clip, accepted))
+    world.store.db.commit()
+    assert main(["status", "--hex", str(world.hex)]) == 0
+    assert "tidy decisions 3, accepted 2, applied clips 1" in capsys.readouterr().out
