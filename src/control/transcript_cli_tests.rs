@@ -134,6 +134,7 @@ fn history_stats_parse_sum_retained_entries_and_need_the_labs_toggle() {
         text_ms: None,
         versions: Vec::new(),
         correction: None,
+        tidy: Vec::new(),
     };
     let entries = [
         entry(1, 10, "expired by retention", "expired by retention"),
@@ -862,4 +863,58 @@ fn correction_only_with_raw() {
         serde_json::json!({"outcome":"edited","observed_at_ms":4200,"edited_text":"Kit"})
     );
     assert!(rows(&[]).get("correction").is_none());
+}
+
+/// T8.5: a row carries the entry's tidy decisions with `--raw`, and no
+/// `tidy` key at all when there are none (older entries) or without it.
+#[test]
+fn history_row_tidy_omitted_when_empty() {
+    let mut entries = entries();
+    entries[1].tidy = vec![crate::history::HistoryTidy::bounded(
+        "misheard",
+        "Kip",
+        "Kit",
+        3..6,
+        true,
+        true,
+        "model",
+    )];
+    let id = entries[1].id;
+    let output = |extra: &[&str]| {
+        let output = history_output(
+            &entries,
+            &args(extra),
+            HistoryRetention::Week,
+            NOW,
+            &[],
+            None,
+        )
+        .unwrap();
+        serde_json::to_value(output).unwrap()
+    };
+    let raw = output(&["--raw"]);
+    assert_eq!(raw["version"], 1, "additive: the version stays 1");
+    let rows = raw["entries"].as_array().unwrap();
+    let row = rows.iter().find(|row| row["id"] == id).unwrap();
+    assert_eq!(
+        row["tidy"],
+        serde_json::json!([{
+            "kind": "misheard", "token": "Kip", "replacement": "Kit",
+            "start": 3, "end": 6, "accepted": true, "applied": true, "source": "model",
+        }])
+    );
+    for other in rows.iter().filter(|row| row["id"] != id) {
+        assert!(
+            other.get("tidy").is_none(),
+            "an entry without decisions has no key"
+        );
+    }
+    let plain = output(&[]);
+    assert!(
+        plain["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("tidy").is_none())
+    );
 }

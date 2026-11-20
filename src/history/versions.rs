@@ -68,6 +68,8 @@ impl HistoryEntry {
         self.language = version.language;
         // A correction was seen against the text it replaces, not this one.
         self.correction = None;
+        // So were tidy decisions, whose places are in the replaced text.
+        self.tidy.clear();
         self.text_ms = (version.timestamp_ms != self.timestamp_ms).then_some(version.timestamp_ms);
     }
 

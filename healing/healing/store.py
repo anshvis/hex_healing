@@ -21,7 +21,7 @@ import soundfile
 from healing.paths import healing_home
 
 SAMPLE_RATE = 16_000
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA = """
 CREATE TABLE audio (
@@ -191,6 +191,48 @@ CREATE TABLE IF NOT EXISTS vocab_candidates (
 """
 
 
+# v9 (M8, T8.5): Tidy after paste's decisions, the tidied text a correction is measured from, and
+# where a label came from. `raw_text` and `final_text` never change for a tidy (D-38).
+TIDY_KINDS = ("filler", "repeat", "self_correction", "misheard")
+TIDY_COLUMNS = {"tidied_text": "TEXT", "tidy_applied": "INTEGER NOT NULL DEFAULT 0", "label_source": "TEXT"}
+TIDY_EVENTS = f"""
+CREATE TABLE IF NOT EXISTS tidy_events (
+    clip_id TEXT NOT NULL REFERENCES clips(clip_id),
+    idx INTEGER NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL CHECK (kind IN ({", ".join(repr(k) for k in TIDY_KINDS)})),
+    token TEXT NOT NULL CHECK (length(CAST(token AS BLOB)) <= 32),
+    replacement TEXT CHECK (replacement IS NULL OR length(CAST(replacement AS BLOB)) <= 32),
+    accepted INTEGER NOT NULL CHECK (accepted IN (0, 1)),
+    applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0, 1)),
+    source TEXT NOT NULL CHECK (source IN ('rule', 'model'))
+);
+CREATE INDEX IF NOT EXISTS tidy_events_clip ON tidy_events(clip_id, idx);
+"""
+
+
+TIDY_EVENT_COLUMNS = {
+    "idx": "INTEGER NOT NULL DEFAULT 0",
+    "replacement": "TEXT",
+    "applied": "INTEGER NOT NULL DEFAULT 0",
+}
+
+
+def _migrate_v9(db: sqlite3.Connection) -> None:
+    """The T8.5 step, guarded like the M3 one, so a step cut short (or repeated) finishes."""
+    have = {row[1] for row in db.execute("PRAGMA table_info(clips)")}
+    for name, definition in TIDY_COLUMNS.items():
+        if name not in have:
+            db.execute(f"ALTER TABLE clips ADD COLUMN {name} {definition}")
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "tidy_events" in tables:
+        # A table made to T8.2's earlier reading of D-66 (no idx, replacement or applied): complete it.
+        events = {row[1] for row in db.execute("PRAGMA table_info(tidy_events)")}
+        for name, definition in TIDY_EVENT_COLUMNS.items():
+            if name not in events:
+                db.execute(f"ALTER TABLE tidy_events ADD COLUMN {name} {definition}")
+    db.executescript(TIDY_EVENTS)
+
+
 # `splits` columns beyond the table's base layout, defined once and always added by the guarded loop below:
 # the pin of the sidecar, and a train snapshot's record (model, note, each member's texts).
 M3_SPLIT_COLUMNS = {"sidecar_sha256": "TEXT", "detail": "TEXT"}
@@ -239,7 +281,9 @@ def _migrate_m3(db: sqlite3.Connection) -> None:
     reset_stale_classifications(db)
 
 
-MIGRATIONS = [SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, _migrate_m3, SCHEMA_V8]
+MIGRATIONS = [
+    SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, _migrate_m3, SCHEMA_V8, _migrate_v9,
+]
 
 
 class StoreError(Exception):

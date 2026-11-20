@@ -365,3 +365,65 @@ def test_a_run_cut_short_drops_its_partial_batch_and_still_writes_its_row(world,
     finally:
         store.close()
     assert _last_run(world)["error"] == "history vanished"
+
+
+# T8.5 (AC-16, data): a tidy that removed "um" and fixed "Kip" -> "Kit" in place.
+TIDY_FINAL = "Um so send it to Kip."
+TIDY = [
+    {"kind": "filler", "token": "Um so", "replacement": "So", "start": 0, "end": 5, "accepted": True,
+     "applied": True, "source": "rule"},
+    {"kind": "misheard", "token": "Kip", "replacement": "Kit", "start": 17, "end": 20, "accepted": True,
+     "applied": True, "source": "model"},
+    {"kind": "repeat", "token": "it", "replacement": "", "start": 13, "end": 15, "accepted": False,
+     "source": "rule"},
+]
+
+
+def test_tidy_events_stored_raw_text_unchanged(world):
+    entry = world.doc["entries"][0]
+    entry.update(raw_text="um so send it to kip", final_text=TIDY_FINAL, tidy=TIDY,
+                 correction={"outcome": "unchanged", "observed_at_ms": 900})
+    world.save()
+    assert world.run() == 0
+    row = clips(world)[0]
+    assert (row["raw_text"], row["final_text"]) == ("um so send it to kip", TIDY_FINAL)
+    assert (row["tidy_applied"], row["tidied_text"]) == (1, "So send it to Kit.")
+    events = [tuple(r) for r in world.db().execute(
+        "SELECT kind, token, replacement, accepted, applied, source FROM tidy_events ORDER BY idx")]
+    assert events == [
+        ("filler", "Um so", "So", 1, 1, "rule"),
+        ("misheard", "Kip", "Kit", 1, 1, "model"),
+        ("repeat", "it", "", 0, 0, "rule"),
+    ]
+    # T8.2 reads them as before (D-66): snake-case kinds, 0/1, timed by the clip.
+    from healing import tidy
+    assert ("misheard", "Kip", True, entry["timestamp_ms"]) in tidy.decisions(world.db())
+    # A second run changes nothing; an entry that drops `tidy` (an older Hex saved it) keeps them.
+    assert world.run() == 0
+    del entry["tidy"]
+    world.save()
+    assert world.run() == 0
+    assert world.db().execute("SELECT COUNT(*) FROM tidy_events").fetchone()[0] == 3
+    assert clips(world)[0]["tidied_text"] == "So send it to Kit."
+
+
+def test_a_tidy_that_cannot_be_rebuilt_has_no_tidied_text(world):
+    unrebuildable = [dict(TIDY[0], replacement=None)]
+    world.doc["entries"][0].update(final_text=TIDY_FINAL, tidy=unrebuildable)
+    world.save()
+    world.run()
+    row = clips(world)[0]
+    assert (row["tidy_applied"], row["tidied_text"]) == (1, None)
+    assert collect_module.tidied("abc", [{"start": 0, "end": 9, "replacement": "", "applied": True}]) == (1, None)
+    assert collect_module.tidied("abc", [{"start": 0, "end": 1, "replacement": "", "applied": False}]) == (0, None)
+
+
+def test_a_tidy_applied_after_the_watch_ended_changes_no_baseline(world):
+    late = [dict(TIDY[1], after_watch=True)]
+    world.doc["entries"][0].update(final_text=TIDY_FINAL, tidy=late,
+                                    correction={"outcome": "unchanged", "observed_at_ms": 900})
+    world.save()
+    world.run()
+    row = clips(world)[0]
+    assert (row["tidy_applied"], row["tidied_text"]) == (0, None)
+    assert world.db().execute("SELECT applied FROM tidy_events").fetchone()[0] == 0

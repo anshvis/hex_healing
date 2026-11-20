@@ -101,19 +101,70 @@ pub(crate) enum Applied {
 /// suggestions to the pasted range of its field through Accessibility
 /// ([`super::apply::apply_to_last`]). Blocks for the frontmost-app wait and
 /// the re-reads (under a second), so callers run it off the main thread.
-/// T8.5 records the decisions and resets Learn from corrections' baseline
-/// here, on [`Applied::Edited`].
+/// Every decision goes on the dictation's History entry (T8.5), marked
+/// applied on [`Applied::Edited`]; the apply itself resets Learn from
+/// corrections' baseline.
 pub(crate) fn apply_accepted(session: &TidySession) -> Applied {
     log_decisions(session);
     if session.accepted_count() == 0 {
+        record(session, false);
         return Applied::Nothing;
     }
-    match super::apply::apply_to_last(session) {
+    let applied = match super::apply::apply_to_last(session) {
         Outcome::Applied(method) => Applied::Edited(method),
         Outcome::Moved => Applied::Moved,
         Outcome::Unsupported(why) => Applied::Unsupported(why),
+    };
+    record(session, matches!(applied, Applied::Edited(_)));
+    applied
+}
+
+/// The review's decisions as History keeps them (T8.5): every suggestion,
+/// accepted or skipped, as its kind, its token (the words it changes in
+/// the dictation's final text, never more), what it puts there, and its
+/// place; `applied` on the accepted ones when the edit went into the field.
+pub(crate) fn decisions(session: &TidySession, applied: bool) -> Vec<crate::history::HistoryTidy> {
+    let chars: Vec<char> = session.text.chars().collect();
+    session
+        .suggestions
+        .iter()
+        .zip(&session.accepted)
+        .map(|(suggestion, accepted)| {
+            let range = suggestion.range.scalar.clone();
+            let token: String = chars[range.start.min(chars.len())..range.end.min(chars.len())]
+                .iter()
+                .collect();
+            crate::history::HistoryTidy::bounded(
+                suggestion.kind.as_str(),
+                &token,
+                &suggestion.replacement,
+                range,
+                *accepted,
+                applied,
+                suggestion.source.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// Keeps the review's decisions on its History entry. Counts only in the
+/// log.
+#[cfg(target_os = "macos")]
+fn record(session: &TidySession, applied: bool) {
+    let Some(history) = crate::macos_rune::runtime().and_then(|runtime| runtime.history()) else {
+        return;
+    };
+    let decisions = decisions(session, applied);
+    let count = decisions.len();
+    match history.record_tidy(session.dictation_id, &session.text, decisions) {
+        Ok(kept) => tracing::info!(count, applied, kept, "tidy decisions recorded"),
+        Err(error) => tracing::warn!(%error, "could not record tidy decisions"),
     }
 }
+
+/// Linux and Windows have no tidy review (D-70).
+#[cfg(not(target_os = "macos"))]
+fn record(_session: &TidySession, _applied: bool) {}
 
 /// Copy tidied text: for a dictation that only reached the clipboard, or
 /// one whose field couldn't be edited.
@@ -127,6 +178,7 @@ fn copy_tidied_with(
 ) -> Applied {
     let accepted = session.accepted_count();
     log_decisions(session);
+    record(session, false);
     if accepted == 0 {
         return Applied::Nothing;
     }
@@ -193,6 +245,60 @@ mod tests {
 
     fn no_habits() -> Habits {
         Habits::default()
+    }
+
+    /// T8.5: every suggestion is a decision with its token alone, its
+    /// replacement and place in the final text; only accepted ones that
+    /// went in are applied.
+    #[test]
+    fn decisions_record_tokens_not_text() {
+        let mut session = preview();
+        let skipped = decisions(&session, false);
+        assert_eq!(skipped.len(), session.suggestions.len());
+        assert!(skipped.iter().all(|decision| !decision.applied));
+        let misheard = skipped
+            .iter()
+            .find(|decision| decision.kind == "misheard")
+            .unwrap();
+        assert_eq!(
+            (misheard.token.as_str(), misheard.replacement.as_deref()),
+            ("send", Some("sent"))
+        );
+        assert!(!misheard.accepted, "a misheard fix starts skipped");
+        assert_eq!(misheard.source, "model");
+        session.accept_all();
+        let applied = decisions(&session, true);
+        assert!(
+            applied
+                .iter()
+                .all(|decision| decision.accepted && decision.applied)
+        );
+        for decision in &applied {
+            let span: String = session
+                .text
+                .chars()
+                .skip(decision.start)
+                .take(decision.end - decision.start)
+                .collect();
+            assert!(
+                span.contains(&decision.token),
+                "{span:?} {:?}",
+                decision.token
+            );
+            assert_ne!(decision.token, session.text, "never the whole text");
+        }
+        // Rebuilding the tidied text from the decisions alone, as
+        // `healing collect` does, gives what the review applied.
+        let mut rebuilt = String::new();
+        let mut at = 0;
+        let chars: Vec<char> = session.text.chars().collect();
+        for decision in &applied {
+            rebuilt.extend(&chars[at..decision.start]);
+            rebuilt.push_str(decision.replacement.as_deref().unwrap());
+            at = decision.end;
+        }
+        rebuilt.extend(&chars[at..]);
+        assert_eq!(rebuilt, session.tidied());
     }
 
     #[test]

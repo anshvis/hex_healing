@@ -290,6 +290,7 @@ impl HistoryPane {
                     text_ms: None,
                     versions: Vec::new(),
                     correction: None,
+                    tidy: Vec::new(),
                 }
             };
         let mut rewritten = entry(

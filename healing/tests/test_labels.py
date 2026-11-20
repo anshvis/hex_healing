@@ -180,7 +180,7 @@ def test_a_v5_dataset_migrates(tmp_path, monkeypatch):
     assert {"weight", "edited_positions", "review_strategy"} <= columns
     tables = {r[0] for r in migrated.db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"reviews", "splits", "split_members"} <= tables
-    assert migrated.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION == 8
+    assert migrated.db.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION == 9
     kept = migrated.db.execute("SELECT raw_text, weight, label FROM clips").fetchone()
     assert tuple(kept) == ("a b c", 0, "unlabelled")
     # idempotent: a run that stopped part-way finishes on the next open
@@ -580,3 +580,101 @@ def test_refresh_reads_only_the_clips_it_is_given(store):
     store.db.set_trace_callback(None)
     reads = [s for s in statements if s.lstrip().upper().startswith("SELECT")]
     assert reads and all("WHERE clip_id IN" in s for s in reads)  # no scan of every clip, edit or review
+
+
+def _tidy(store, cid, *events, tidied="So send it to Kit."):
+    """Marks `cid` tidied in place with `events` as (kind, token, replacement, accepted, applied)."""
+    store.db.execute("UPDATE clips SET tidy_applied = 1, tidied_text = ? WHERE clip_id = ?", (tidied, cid))
+    for index, (kind, token, replacement, accepted, applied) in enumerate(events):
+        store.db.execute(
+            "INSERT INTO tidy_events (clip_id, idx, kind, token, replacement, accepted, applied, source)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, 'rule')",
+            (cid, index, kind, token, replacement, accepted, applied),
+        )
+    store.db.commit()
+
+
+def test_accepted_misheard_becomes_weak_removals_never_labels(store):
+    """T8.5 (AC-16, AC-17 data): the accepted Kip -> Kit fix that survived is a weak label from tidy;
+    the filler removal changes no reference; a skipped or unapplied fix, or one with no observation,
+    makes nothing."""
+    raw = "um so send it to kip"
+    fixed = add_clip(store, 1, raw=raw, final="Um so send it to Kip.", outcome="unchanged")
+    _tidy(store, fixed, ("filler", "Um so", "So", 1, 1), ("misheard", "Kip", "Kit", 1, 1))
+    removal = add_clip(store, 2, raw=raw, final="Um so send it to Kip.", outcome="unchanged")
+    _tidy(store, removal, ("filler", "Um so", "So", 1, 1), tidied="So send it to Kip.")
+    skipped = add_clip(store, 3, raw=raw, final="Um so send it to Kip.", outcome="unchanged")
+    _tidy(store, skipped, ("misheard", "Kip", "Kit", 0, 0), tidied="Um so send it to Kip.")
+    unobserved = add_clip(store, 4, raw=raw, final="Um so send it to Kip.")
+    _tidy(store, unobserved, ("misheard", "Kip", "Kit", 1, 1))
+    ambiguous = add_clip(store, 5, raw="kip told kip", final="Kip told Kip.", outcome="unchanged")
+    _tidy(store, ambiguous, ("misheard", "Kip", "Kit", 1, 1), tidied="Kit told Kip.")
+    unrebuildable = add_clip(store, 6, raw=raw, final="Um so send it to Kip.", outcome="unchanged")
+    _tidy(store, unrebuildable, ("misheard", "Kip", "Kit", 1, 1), tidied=None)
+
+    labels.label_all(store)
+
+    assert label_of(store, fixed) == ("weak", 0.2)
+    assert row(store, fixed)["reference_text"] == "um so send it to Kit"  # "um" stays: you said it
+    assert row(store, fixed)["label_source"] == "tidy"
+    assert row(store, fixed)["raw_text"] == raw
+    assert row(store, removal)["reference_text"] == raw and row(store, removal)["label_source"] is None
+    assert row(store, skipped)["reference_text"] == raw and row(store, skipped)["label_source"] is None
+    assert label_of(store, unobserved) == ("unlabelled", 0)
+    assert label_of(store, ambiguous) == ("unlabelled", 0)
+    assert label_of(store, unrebuildable) == ("unlabelled", 0)
+
+
+def test_a_correction_after_a_tidy_is_measured_from_the_tidied_text(store):
+    """M2 records no correction for the tidy itself: an edit after it is classified against the tidied
+    text, so the "um" removal is never one of the person's edits."""
+    from healing import corrections
+
+    cid = add_clip(store, 1, raw="um so send it to kip", final="Um so send it to Kip.", outcome="edited",
+                   edited="So send it to Kit today.")
+    _tidy(store, cid, ("filler", "Um so", "So", 1, 1), ("misheard", "Kip", "Kit", 1, 1))
+    corrections.label_corrections(store)
+    edits = store.db.execute("SELECT final_from, to_text FROM edits WHERE clip_id = ?", (cid,)).fetchall()
+    assert [tuple(e) for e in edits] == [("", "today")]
+
+
+def test_a_tidy_fix_needs_one_raw_match_and_must_survive_an_edit(store):
+    """Codex review: uniqueness is judged against what Hex heard, not a reference an edit changed; a
+    fix the person removed while the watch ran never reaches a reference."""
+    from healing import corrections
+
+    twice = add_clip(store, 1, raw="kip told cat to call kip", final="Kip told cat to call kip.",
+                     outcome="edited", edited="Kit told cat to call kid.")
+    _tidy(store, twice, ("misheard", "Kip", "Kit", 1, 1), tidied="Kit told cat to call kip.")
+    undone = add_clip(store, 2, raw="send it to kip", final="Send it to Kip.", outcome="edited",
+                      edited="Send it to.")
+    _tidy(store, undone, ("misheard", "Kip", "Kit", 1, 1), tidied="Send it to Kit.")
+    kept = add_clip(store, 3, raw="send it to kip", final="Send it to Kip.", outcome="edited",
+                    edited="Send it to Kit now.")
+    _tidy(store, kept, ("misheard", "Kip", "Kit", 1, 1), tidied="Send it to Kit.")
+    corrections.label_corrections(store)
+    labels.refresh(store)
+    assert label_of(store, twice) == ("unlabelled", 0)
+    assert label_of(store, undone) == ("unlabelled", 0)
+    assert row(store, kept)["reference_text"] == "send it to Kit" and row(store, kept)["label_source"] == "tidy"
+
+
+def test_v9_completes_an_earlier_tidy_events_table(tmp_path, monkeypatch):
+    """A v8 dataset holding T8.2's earlier `tidy_events(clip_id, kind, token, accepted, source)`."""
+    monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))
+    root = tmp_path / "home" / "dataset"
+    (root / "audio").mkdir(parents=True)
+    db = sqlite3.connect(root / "dataset.sqlite")
+    for step in range(8):
+        migration = MIGRATIONS[step]
+        migration(db) if callable(migration) else db.executescript(migration)
+    db.execute("PRAGMA user_version = 8")
+    db.execute("CREATE TABLE tidy_events (clip_id TEXT, kind TEXT, token TEXT, accepted INTEGER, source TEXT)")
+    db.execute("INSERT INTO tidy_events VALUES ('c1', 'filler', 'um', 1, 'rule')")
+    db.commit()
+    db.close()
+    store = Store()
+    columns = {r[1] for r in store.db.execute("PRAGMA table_info(tidy_events)")}
+    assert {"idx", "replacement", "applied"} <= columns
+    assert tuple(store.db.execute("SELECT token, applied FROM tidy_events").fetchone()) == ("um", 0)
+    store.close()

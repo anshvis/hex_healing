@@ -1052,7 +1052,9 @@ CoreAudio formats, AppleScript details, or event serialization.
   final text plus bounded metadata (and, with Labs › Learn from corrections
   on, the edited span read back from the field it was pasted into, bounded to
   2 × the pasted length + 64 characters, under the same retention, caps,
-  Delete and Clear all), never full browser URLs or window titles,
+  Delete and Clear all; with Labs › Tidy after paste, each review decision as
+  a token of at most 32 bytes, its replacement, and its place, never the
+  surrounding text), never full browser URLs or window titles,
   and no audio unless Labs › Keep recordings is on. Entries name their speech
   model; with Keep recordings, Replace keeps up to five earlier versions
   inside the entry, counted by the same caps. History defaults to seven days, and every retention window remains

@@ -15,10 +15,18 @@ unlabelled has none.
 
 Weak references are the model's own output, and so are a strong clip's untouched words, so they
 never gate (AC-7): gating sets take `verified` references only.
+
+Labs › Tidy after paste (T8.5, D-38): a `misheard` fix you accepted and Hex edited into the field,
+which then survived the correction watch, is your word for what was said, so the reference takes it
+in place of what Hex heard and the label's `label_source` is `tidy` (weak when nothing else edited
+it). Removals (fillers, repeats, self-corrections) never change a reference or make a label: you
+still said them. A fix whose word can't be found exactly once in what Hex heard, or a tidy whose
+text couldn't be rebuilt, leaves the clip unlabelled rather than guess.
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections import Counter
 
@@ -58,12 +66,73 @@ def latest_reviews(db: sqlite3.Connection, clip_ids: list[str] | None = None) ->
     return {r["clip_id"]: r for r in rows}
 
 
-def derive(row: sqlite3.Row, kinds: set[str], review: sqlite3.Row | None) -> tuple[str, str | None, str | None]:
-    """(label, reference_text or None for no reference, review strategy) from a clip's evidence."""
+def tidy_fixes(db: sqlite3.Connection, clip_ids: list[str] | None = None) -> dict[str, list[tuple[str, str]]]:
+    """clip_id -> its accepted `misheard` fixes that Hex edited into the field while the watch saw it,
+    as (token, replacement)."""
+    select = "SELECT clip_id, token, replacement FROM tidy_events"
+    fix = "kind = 'misheard' AND accepted = 1 AND applied = 1 AND replacement IS NOT NULL ORDER BY clip_id, idx"
+    rows = []
+    if clip_ids is None:
+        rows = db.execute(f"{select} WHERE {fix}").fetchall()
+    else:
+        for chunk in _chunks(clip_ids):
+            rows += db.execute(
+                f"{select} WHERE clip_id IN ({','.join('?' * len(chunk))}) AND {fix}", chunk
+            ).fetchall()
+    fixes: dict[str, list[tuple[str, str]]] = {}
+    for row in rows:
+        fixes.setdefault(row["clip_id"], []).append((row["token"], row["replacement"]))
+    return fixes
+
+
+def _words(text: str) -> re.Pattern | None:
+    words = text.split()
+    if not words:
+        return None
+    return re.compile(r"(?<!\w)" + r"\s+".join(map(re.escape, words)) + r"(?!\w)", re.IGNORECASE)
+
+
+def with_fixes(raw: str, reference: str, edited: str | None, fixes: list[tuple[str, str]]) -> str | None:
+    """`reference` with each fix's word put in place of the one it replaced; None when a fix can't be
+    placed for sure or didn't survive. The replaced word must occur exactly once in what Hex heard
+    (`raw`) and in the reference (whole words, any case); after an edit, the fix's word must still be
+    in what the field held (`edited`), else the person undid it."""
+    for token, replacement in fixes:
+        pattern = _words(token)
+        if pattern is None or len(pattern.findall(raw)) != 1:
+            return None
+        found = list(pattern.finditer(reference))
+        if len(found) != 1:
+            return None
+        kept = _words(replacement)
+        if edited is not None and (kept is None or not kept.search(edited)):
+            return None
+        reference = reference[: found[0].start()] + replacement + reference[found[0].end() :]
+    return reference
+
+
+def derive(
+    row: sqlite3.Row, kinds: set[str], review: sqlite3.Row | None, fixes: list[tuple[str, str]] | None = None,
+) -> tuple[str, str | None, str | None, str | None]:
+    """(label, reference_text or None for no reference, review strategy, label source) from a clip's
+    evidence. The source is `tidy` when an accepted tidy fix shaped the reference."""
+    label, reference, strategy = _derive(row, kinds, review)
+    if review is not None or not fixes or label == "unlabelled":
+        return label, reference, strategy, None
+    edited = row["edited_text"] if row["correction_outcome"] == "edited" else None
+    fixed = with_fixes(row["raw_text"], reference, edited, fixes)
+    if fixed is None:
+        return "unlabelled", None, None, None
+    return label, fixed, strategy, "tidy"
+
+
+def _derive(row: sqlite3.Row, kinds: set[str], review: sqlite3.Row | None) -> tuple[str, str | None, str | None]:
     if review is not None:
         if review["action"] == "reject":
             return "unlabelled", None, review["strategy"]
         return "verified", review["text"], review["strategy"]
+    if row["tidy_applied"] and row["tidied_text"] is None:
+        return "unlabelled", None, None  # a tidy we can't rebuild: the correction has no known baseline
     outcome = row["correction_outcome"]
     if outcome == "unchanged" and not row["rewritten"]:
         return "weak", row["raw_text"], None
@@ -106,12 +175,15 @@ def refresh(store: Store, clip_ids: list[str] | None = None) -> Counter:
             for edit in db.execute(f"SELECT clip_id, kind FROM edits WHERE clip_id IN ({marks})", chunk):
                 kinds.setdefault(edit["clip_id"], set()).add(edit["kind"])
     reviews = latest_reviews(db, clip_ids)
+    fixes = tidy_fixes(db, clip_ids)
     counts: Counter = Counter()
     for row in rows:
-        label, reference, strategy = derive(row, kinds.get(row["clip_id"], set()), reviews.get(row["clip_id"]))
+        clip = row["clip_id"]
+        label, reference, strategy, source = derive(row, kinds.get(clip, set()), reviews.get(clip), fixes.get(clip))
         db.execute(
-            "UPDATE clips SET label = ?, weight = ?, reference_text = ?, review_strategy = ? WHERE clip_id = ?",
-            (label, WEIGHTS[label], reference, strategy, row["clip_id"]),
+            "UPDATE clips SET label = ?, weight = ?, reference_text = ?, review_strategy = ?, label_source = ?"
+            " WHERE clip_id = ?",
+            (label, WEIGHTS[label], reference, strategy, source, clip),
         )
         counts[label] += 1
     db.commit()

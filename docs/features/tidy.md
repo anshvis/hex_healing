@@ -79,13 +79,31 @@ Apply                                                // dictation::tidy::apply
 │       still has selected collapses to its end (D-77, D-79)
 └── re-read: exactly the plan (outside the range byte-identical) -> applied;
     anything else -> Unverified, "Check the text; ⌘Z undoes it", anchor spent
+
+Training boundary (T8.5, D-38, D-80..D-83)           // history::tidy, correction_watch::tidy_edit
+├── Return or Copy tidied text -> every suggestion's decision on its History entry:
+│   kind, token (the words it changes, ≤ 32 bytes), replacement (≤ 32 bytes, else
+│   none), place in final_text, accepted, applied (went into the field), source;
+│   at most 64; raw_text and final_text never change; Escape records nothing
+│   └── the first applied review wins; one that only copied or failed is replaced
+├── Learn from corrections' watch of that paste while the edit goes in
+│   ├── holds still (no read, no timeout, no result)
+│   ├── applied -> starts over with the tidied paste as its baseline: the tidy is
+│   │   never a correction; the person's later edits are measured from it
+│   ├── unverified -> ends with no result (the field's text is unknown)
+│   └── moved or refused -> goes on as before
+└── healing collect -> tidy_events rows, tidied_text (final_text with the applied
+    decisions), corrections classified against it; an accepted, applied misheard
+    fix that survived the watch puts its word in the weak reference
+    (label_source `tidy`); removals never change a reference
 ```
 
 Platforms: macOS only. Linux and Windows have the rule pass but no review
 overlay that takes keys, tray item, or shortcut adapter yet; `platform::DIFFERENCES`
 records `tidy` as pending, and their control hosts answer `unsupported`.
 
-Privacy: the review reads the History entry Hex already keeps. The logs carry
+Privacy: the review reads the History entry Hex already keeps, and writes back
+only bounded tokens (G-4): never the text around them. The logs carry
 counts and kinds only (`tidy suggestions ready`, `tidy review ready`, `tidy
 review applied`, `tidy review cancelled`), never text. The commit marker the
 output stage keeps (`dictation::tidy::last`) holds a counter, an entry id, and
@@ -105,7 +123,14 @@ closing an open review, and an ended review keeping no notice of its own),
 text is Moved, outside the range byte-identical, the secure check first, the
 paste fallback and its fresh read and front-app check, unverified edits, a newer
 paste or the lab off sending nothing), `dictation::paste_anchor::tests`,
-`dictation::correction_watch::tests`, and the `tidy-capsule` golden in light
+`dictation::correction_watch::tests`,
+`dictation::correction_watch::session::tests::tidy_resets_baseline_no_correction`,
+`dictation::correction_watch::tidy_edit::tests`,
+`dictation::tidy::apply::tests::an_applied_edit_hands_back_the_field_it_left`,
+`history::tidy::tests::tidy_metadata_persisted_and_bounded`,
+`control::transcript_cli::tests::history_row_tidy_omitted_when_empty`, healing's
+`test_collect.py` (tidy events, raw text unchanged) and `test_labels.py`
+(accepted misheard becomes weak, removals never label), and the `tidy-capsule` golden in light
 and dark (Linux). Missing: a live run of the overlay taking and returning
 focus, the menu-bar item, and AC-17's four-app matrix (TextEdit, Notes, Slack,
 a Chrome textarea: only the pasted range changes, typed text around it stays,

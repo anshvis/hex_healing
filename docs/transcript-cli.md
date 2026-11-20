@@ -51,6 +51,28 @@ An entry has at most one; the first observation wins. It counts toward the
 16 MiB text cap and leaves with its entry. A Hex older than this field drops it
 when it next saves the file.
 
+With `--raw`, a row also carries `tidy` when Labs › Tidy after paste's review
+of the entry was decided (additive, `version` stays 1, absent when empty and
+never without `--raw`): one decision per suggestion, tokens only.
+
+```ts
+type TidyDecision = { // history row, --json --raw only
+  kind: "filler" | "repeat" | "self_correction" | "misheard"
+  token: string          // the words it removes or replaces (not ones it keeps), at most 32 bytes
+  replacement?: string   // what it puts there ("" for a removal); absent past 32 bytes
+  start: number          // its place in final_text, in Unicode scalars
+  end: number
+  accepted: boolean
+  applied?: true         // Hex edited it into the field (accepted ones only)
+  after_watch?: true     // applied after Learn from corrections' watch had ended
+  source: "rule" | "model"
+}
+```
+
+At most 64 per entry. `raw_text` and `final_text` stay what Hex heard and
+pasted; the tidied text is `final_text` with the applied decisions in place,
+and a `correction` after an applied tidy is measured from it.
+
 - `--since` is inclusive and `--until` is exclusive. A date alone means local
   midnight; `--until 2026-10-20` includes all of October 20.
 - Times accept `3d`, `36h`, `90m`, `2w`, `today`, `yesterday`, `now`, dates,

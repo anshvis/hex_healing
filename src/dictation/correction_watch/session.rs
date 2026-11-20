@@ -362,6 +362,18 @@ impl<F: Field> Session<F> {
         self.reads
     }
 
+    /// Starts the watch over from `tracker`, keeping its start time and read
+    /// counts: Labs › Tidy after paste edited the paste in place (T8.5), so
+    /// nothing held from before (a read of the tidy's own edit included) is
+    /// the person's, and the next tick reads a new baseline.
+    pub fn rebase(&mut self, tracker: Tracker) {
+        self.tracker = tracker;
+        self.state = State::new();
+        self.last_read = None;
+        self.last_text = None;
+        self.due = None;
+    }
+
     /// Advances on `event` at `now`. `gate` is asked before every read.
     pub fn step(&mut self, now: Instant, event: Event, gate: &dyn Fn() -> bool) -> Step {
         match event {
@@ -588,6 +600,54 @@ mod tests {
             Step::Done(seen) => seen,
             other => panic!("expected Done, got {other:?}"),
         }
+    }
+
+    /// T8.5, AC-16: a tidy that removes "um" and fixes "Kip" to "Kit" in
+    /// place resets the baseline, so the tidy is never the person's
+    /// correction, even when a read caught its edit first; an edit the
+    /// person makes afterwards is measured from the tidied text.
+    #[test]
+    fn tidy_resets_baseline_no_correction() {
+        let pasted = "um so send it to Kip";
+        let tidied = "So send it to Kit";
+        let rebase = || Tracker::new(tidied.into(), Some(Anchor { start: 0 }), Some(""));
+
+        // Without the reset, a tidy's own edit reads as a correction (a
+        // misheard fix alone), or loses the watch (the filler removal too).
+        let t0 = Instant::now();
+        let fix = "send it to Kip";
+        let mut unreset = session(Script::new(&[fix, "send it to Kit"]), fix, t0);
+        baseline(&mut unreset, t0);
+        unreset.step(at(t0, 1_000), Event::ValueChanged, OPEN);
+        let seen = done(unreset.step(at(t0, 2_000), Event::FocusOut, OPEN));
+        assert_eq!(seen.outcome, Outcome::Edited("send it to Kit".into()));
+        let mut unreset = session(Script::new(&[pasted, tidied]), pasted, t0);
+        baseline(&mut unreset, t0);
+        unreset.step(at(t0, 1_000), Event::ValueChanged, OPEN);
+        let seen = done(unreset.step(at(t0, 2_000), Event::FocusOut, OPEN));
+        assert_eq!(seen.outcome, Outcome::Lost(Lost::SpanNotFound));
+
+        // With it, even after a read caught the edit: unchanged.
+        let mut reset = session(Script::new(&[pasted, tidied]), pasted, t0);
+        baseline(&mut reset, t0);
+        reset.step(at(t0, 1_000), Event::ValueChanged, OPEN);
+        reset.rebase(rebase());
+        assert_eq!(reset.step(at(t0, 1_100), Event::Tick, OPEN), Step::Wait);
+        let seen = done(reset.step(at(t0, 2_000), Event::FocusOut, OPEN));
+        assert_eq!(seen.outcome, Outcome::Unchanged);
+
+        // The person's own edit after the tidy is the correction.
+        let mut edited = session(
+            Script::new(&[pasted, tidied, "So send it to Kat"]),
+            pasted,
+            t0,
+        );
+        baseline(&mut edited, t0);
+        edited.rebase(rebase());
+        assert_eq!(edited.step(at(t0, 1_100), Event::Tick, OPEN), Step::Wait);
+        edited.step(at(t0, 1_500), Event::ValueChanged, OPEN);
+        let seen = done(edited.step(at(t0, 2_000), Event::FocusOut, OPEN));
+        assert_eq!(seen.outcome, Outcome::Edited("So send it to Kat".into()));
     }
 
     #[test]

@@ -38,6 +38,7 @@ mod property_tests;
 mod recall_tests;
 use locate::Anchor;
 mod session;
+pub(crate) mod tidy_edit;
 mod worker;
 
 /// Targets waiting for the watcher. A full queue drops the oldest.
