@@ -227,7 +227,8 @@ class Remote:
 
     @property
     def kernel(self) -> str:
-        return f"{self.username}/{self.run_id}"
+        # its own slug: pushing a kernel whose slug is the dataset's is refused (409 Conflict)
+        return f"{self.username}/{self.run_id}-run"
 
 
 def _stage_dataset(r: Remote, bundle: Path) -> Path:
@@ -253,7 +254,7 @@ def _stage_kernel(r: Remote, job: dict) -> Path:
     owner_dir(folder)
     (folder / "notebook.py").write_text(render_notebook(job))
     (folder / "kernel-metadata.json").write_text(json.dumps({
-        "id": r.kernel, "title": r.run_id, "code_file": "notebook.py", "language": "python",
+        "id": r.kernel, "title": r.kernel.split("/")[1], "code_file": "notebook.py", "language": "python",
         "kernel_type": "script", "is_private": True, "enable_gpu": True, "enable_internet": True,
         "dataset_sources": [r.dataset], "competition_sources": [], "kernel_sources": [], "model_sources": []}))
     return folder
@@ -373,7 +374,7 @@ def run_remote(bundle: Path, config_path: Path | None = None, smoke: bool = Fals
     owner_dir(remote_root)
     r = Remote(run_id, creds.username, remote_root / run_id, {
         "run_id": run_id, "provider": "kaggle", "dataset": f"{creds.username}/{run_id}",
-        "kernel": f"{creds.username}/{run_id}", "uploaded_bytes": 0, "gpu_minutes": None,
+        "kernel": f"{creds.username}/{run_id}-run", "uploaded_bytes": 0, "gpu_minutes": None,
         "started_at_ms": _now_ms(), "finished_at_ms": None, "deleted_remote": None, "error": None,
         "round": folder.name, "smoke": smoke, "max_minutes": max_minutes,
         "versions": {"kaggle_cli": KAGGLE_CLI_VERSION, "transcribe_cpp_rev": None, "uv": UV_VERSION}})
