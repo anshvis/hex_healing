@@ -24,10 +24,12 @@ pub mod corrections;
 pub mod playback;
 pub mod recordings;
 pub mod stats;
+pub mod tidy;
 pub mod versions;
 
 pub use corrections::HistoryCorrection;
 pub use recordings::Recording;
+pub use tidy::HistoryTidy;
 pub use versions::{HistoryVersion, Transcript};
 
 const VERSION: u32 = 1;
@@ -156,6 +158,10 @@ pub struct HistoryEntry {
     /// ([`corrections`]); absent without an observation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correction: Option<HistoryCorrection>,
+    /// What Labs › Tidy after paste decided about its suggestions
+    /// ([`tidy`]); absent when no review was decided.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tidy: Vec<HistoryTidy>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -177,6 +183,7 @@ impl HistoryEntry {
                 .map(HistoryVersion::text_bytes)
                 .sum::<usize>()
             + self.correction_bytes()
+            + self.tidy_bytes()
     }
 
     /// Whether any searched field contains `needle` (already lowercased).
@@ -456,6 +463,7 @@ impl HistoryStore {
             text_ms: None,
             versions: Vec::new(),
             correction: None,
+            tidy: Vec::new(),
         });
         self.prune(now_ms);
         self.persist()?;
@@ -800,6 +808,17 @@ impl History {
         correction: HistoryCorrection,
     ) -> io::Result<bool> {
         self.synced().observe_correction(id, final_text, correction)
+    }
+
+    /// Keep a tidy review's decisions on entry `id` ([`tidy`]).
+    #[cfg(target_os = "macos")]
+    pub fn record_tidy(
+        &self,
+        id: u64,
+        final_text: &str,
+        decisions: Vec<HistoryTidy>,
+    ) -> io::Result<bool> {
+        self.synced().record_tidy(id, final_text, decisions)
     }
 
     /// Whether a dictation would be recorded: retention is not Off.
