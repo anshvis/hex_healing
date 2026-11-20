@@ -36,11 +36,32 @@ pub(crate) enum Kind {
     Misheard,
 }
 
+impl Kind {
+    /// The name History and `healing` keep (D-66).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Filler => "filler",
+            Self::Repeat => "repeat",
+            Self::SelfCorrection => "self_correction",
+            Self::Misheard => "misheard",
+        }
+    }
+}
+
 /// Which pass suggested an edit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Source {
     Rule,
     Model,
+}
+
+impl Source {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Rule => "rule",
+            Self::Model => "model",
+        }
+    }
 }
 
 /// A range of the pasted text in UTF-16 code units, which Accessibility
