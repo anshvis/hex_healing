@@ -274,13 +274,17 @@ mod tests {
                 .all(|decision| decision.accepted && decision.applied)
         );
         for decision in &applied {
-            let token: String = session
+            let span: String = session
                 .text
                 .chars()
                 .skip(decision.start)
                 .take(decision.end - decision.start)
                 .collect();
-            assert_eq!(decision.token, token);
+            assert!(
+                span.contains(&decision.token),
+                "{span:?} {:?}",
+                decision.token
+            );
             assert_ne!(decision.token, session.text, "never the whole text");
         }
         // Rebuilding the tidied text from the decisions alone, as

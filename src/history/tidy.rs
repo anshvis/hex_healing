@@ -31,7 +31,8 @@ pub const MAX_TIDY_TOKEN_BYTES: usize = 32;
 pub struct HistoryTidy {
     pub kind: String,
     /// The words the suggestion removes or replaces, at most
-    /// [`MAX_TIDY_TOKEN_BYTES`].
+    /// [`MAX_TIDY_TOKEN_BYTES`]: its span less the words it keeps (a
+    /// removal that recases the next word keeps that word out).
     pub token: String,
     /// What it puts in their place: empty for a removal. `None` when it was
     /// longer than [`MAX_TIDY_TOKEN_BYTES`], so it isn't kept and the tidied
@@ -46,30 +47,39 @@ pub struct HistoryTidy {
     /// person's later edits are measured from the text with these applied.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub applied: bool,
+    /// Applied after Learn from corrections had already finished watching
+    /// the paste: its correction was seen against `final_text`, not this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub after_watch: bool,
     pub source: String,
 }
 
 impl HistoryTidy {
-    /// A decision with its token and replacement bounded.
+    /// A decision over `span` (the suggestion's words in `final_text`),
+    /// with its token and replacement bounded. A `misheard` fix whose token
+    /// had to be cut keeps no replacement either: a cut token could match
+    /// another word when `healing` puts the fix in a reference.
     pub fn bounded(
         kind: &str,
-        token: &str,
+        span: &str,
         replacement: &str,
         range: std::ops::Range<usize>,
         accepted: bool,
         applied: bool,
         source: &str,
     ) -> Self {
-        let cut = |text: &str| text[..text.floor_char_boundary(MAX_TIDY_TOKEN_BYTES)].to_string();
+        let token = changed_words(span, replacement);
+        let cut = token.len() > MAX_TIDY_TOKEN_BYTES;
+        let keeps = replacement.len() <= MAX_TIDY_TOKEN_BYTES && !(cut && kind == "misheard");
         Self {
             kind: kind.to_string(),
-            token: cut(token),
-            replacement: (replacement.len() <= MAX_TIDY_TOKEN_BYTES)
-                .then(|| replacement.to_string()),
+            token: token[..token.floor_char_boundary(MAX_TIDY_TOKEN_BYTES)].to_string(),
+            replacement: keeps.then(|| replacement.to_string()),
             start: range.start,
             end: range.end,
             accepted,
             applied: applied && accepted,
+            after_watch: false,
             source: source.to_string(),
         }
     }
@@ -77,6 +87,49 @@ impl HistoryTidy {
     fn text_bytes(&self) -> usize {
         self.token.len() + self.replacement.as_ref().map_or(0, String::len)
     }
+}
+
+/// `span`'s words less those `replacement` keeps at either end (any case):
+/// "Basically, send" -> "Send" removes "Basically,". The whole span when
+/// nothing is left (a change of case alone).
+fn changed_words(span: &str, replacement: &str) -> String {
+    let words: Vec<&str> = span.split_whitespace().collect();
+    let kept: Vec<&str> = replacement.split_whitespace().collect();
+    let same = |a: &str, b: &str| a.to_lowercase() == b.to_lowercase();
+    let lead = words
+        .iter()
+        .zip(&kept)
+        .take_while(|(word, kept)| same(word, kept))
+        .count();
+    let tail = words[lead..]
+        .iter()
+        .rev()
+        .zip(kept[lead..].iter().rev())
+        .take_while(|(word, kept)| same(word, kept))
+        .count();
+    let changed = &words[lead..words.len() - tail];
+    if changed.is_empty() {
+        span.trim().to_string()
+    } else {
+        changed.join(" ")
+    }
+}
+
+/// At most [`MAX_TIDY_DECISIONS`], the applied ones first, in text order.
+/// When even the applied ones don't fit, one keeps no replacement, so the
+/// tidied text is never rebuilt from part of them.
+fn capped(mut decisions: Vec<HistoryTidy>) -> Vec<HistoryTidy> {
+    if decisions.len() <= MAX_TIDY_DECISIONS {
+        return decisions;
+    }
+    let overflow = decisions.iter().filter(|d| d.applied).count() > MAX_TIDY_DECISIONS;
+    decisions.sort_by_key(|decision| !decision.applied);
+    decisions.truncate(MAX_TIDY_DECISIONS);
+    if overflow {
+        decisions[0].replacement = None;
+    }
+    decisions.sort_by_key(|decision| decision.start);
+    decisions
 }
 
 impl HistoryEntry {
@@ -97,12 +150,12 @@ impl HistoryStore {
         &mut self,
         id: u64,
         final_text: &str,
-        mut decisions: Vec<HistoryTidy>,
+        decisions: Vec<HistoryTidy>,
     ) -> std::io::Result<bool> {
         if !self.records() || decisions.is_empty() {
             return Ok(false);
         }
-        decisions.truncate(MAX_TIDY_DECISIONS);
+        let mut decisions = capped(decisions);
         let Some(index) = self.entries.iter().position(|entry| entry.id == id) else {
             return Ok(false);
         };
@@ -111,6 +164,13 @@ impl HistoryStore {
             || entry.tidy.iter().any(|decision| decision.applied)
         {
             return Ok(false);
+        }
+        // The watch already ended: its correction was of the text as pasted.
+        if entry.correction.is_some() {
+            decisions
+                .iter_mut()
+                .filter(|decision| decision.applied)
+                .for_each(|decision| decision.after_watch = true);
         }
         let before = self.entries.clone();
         self.entries[index].tidy = decisions;
@@ -218,6 +278,76 @@ mod tests {
         let id = off.record(draft(TEXT), now_ms()).unwrap().unwrap();
         off.set_retention(HistoryRetention::Off, now_ms()).unwrap();
         assert!(!off.record_tidy(id, TEXT, decisions(false)).unwrap());
+    }
+
+    /// Codex review: the token is the words changed, never a kept word; a
+    /// cut misheard token keeps no replacement; the cap never keeps part
+    /// of the applied decisions; a tidy after the watch ended says so.
+    #[test]
+    fn tokens_caps_and_late_tidies() {
+        let removal = HistoryTidy::bounded(
+            "filler",
+            "Basically, send",
+            "Send",
+            0..15,
+            true,
+            true,
+            "rule",
+        );
+        assert_eq!(removal.token, "Basically,");
+        assert_eq!(
+            HistoryTidy::bounded("filler", "um so", "So", 0..5, true, true, "rule").token,
+            "um"
+        );
+        assert_eq!(
+            HistoryTidy::bounded("misheard", "Kip", "Kit", 0..3, true, true, "model").token,
+            "Kip"
+        );
+        let long = "y".repeat(40);
+        let fix = HistoryTidy::bounded("misheard", &long, "Kit", 0..40, true, true, "model");
+        assert_eq!(fix.replacement, None);
+
+        let applied: Vec<_> = (0..MAX_TIDY_DECISIONS + 1)
+            .map(|at| {
+                HistoryTidy::bounded("filler", "um", "", at * 3..at * 3 + 2, true, true, "rule")
+            })
+            .collect();
+        let kept = capped(applied);
+        assert_eq!(kept.len(), MAX_TIDY_DECISIONS);
+        assert!(kept.iter().any(|decision| decision.replacement.is_none()));
+        let mut mixed: Vec<_> = (0..MAX_TIDY_DECISIONS)
+            .map(|at| {
+                HistoryTidy::bounded("filler", "um", "", at * 3..at * 3 + 2, false, false, "rule")
+            })
+            .collect();
+        mixed.push(HistoryTidy::bounded(
+            "filler",
+            "uh",
+            "",
+            999..1001,
+            true,
+            true,
+            "rule",
+        ));
+        let kept = capped(mixed);
+        assert!(kept.iter().any(|decision| decision.applied));
+        assert!(kept.iter().all(|decision| decision.replacement.is_some()));
+
+        let (_, mut late) = store("late");
+        let id = late.record(draft(TEXT), now_ms()).unwrap().unwrap();
+        late.observe_correction(
+            id,
+            TEXT,
+            crate::history::HistoryCorrection {
+                outcome: "unchanged".into(),
+                reason: None,
+                observed_at_ms: 1,
+                edited_text: None,
+            },
+        )
+        .unwrap();
+        assert!(late.record_tidy(id, TEXT, decisions(true)).unwrap());
+        assert!(late.entry(id).unwrap().tidy.iter().all(|d| d.after_watch));
     }
 
     /// Older entries have no `tidy`, and an entry without one writes none.
