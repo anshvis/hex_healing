@@ -38,10 +38,12 @@ MUTABLE = (
     "correction_outcome",
     "correction_reason",
     "edited_text",
+    "tidied_text",
+    "tidy_applied",
 )
 
 # A change to any of these makes a stored classification stale.
-CLASSIFICATION_INPUTS = ("raw_text", "final_text", "edited_text", "correction_outcome")
+CLASSIFICATION_INPUTS = ("raw_text", "final_text", "edited_text", "correction_outcome", "tidied_text")
 
 
 class CollectError(Exception):
@@ -199,6 +201,46 @@ def _collect_pages(
         since = rfc3339(entries[-1]["timestamp_ms"])
 
 
+def tidied(final_text: str, decisions: list[dict]) -> tuple[int, str | None]:
+    """(tidy_applied, tidied_text) for an entry's Tidy after paste decisions (T8.5, D-38).
+
+    The tidied text is `final_text` with the decisions Hex edited into the field applied: the text the
+    person's later corrections are measured from. `raw_text` and `final_text` stay what Hex heard and
+    pasted. An applied tidy whose text can't be rebuilt (a replacement too long to keep, offsets that
+    don't fit) is `(1, None)`: its correction has no known baseline and never labels.
+    """
+    applied = sorted((d for d in decisions if d.get("applied")), key=lambda d: d["start"])
+    if not applied:
+        return 0, None
+    chars = list(final_text)
+    out: list[str] = []
+    at = 0
+    for decision in applied:
+        start, end, replacement = decision["start"], decision["end"], decision.get("replacement")
+        if replacement is None or not at <= start <= end <= len(chars):
+            return 1, None
+        out += chars[at:start]
+        out.append(replacement)
+        at = end
+    out += chars[at:]
+    return 1, "".join(out)
+
+
+def _store_tidy_events(store: Store, clip: str, decisions: list[dict]) -> None:
+    """Replace a clip's `tidy_events` with its entry's decisions: tokens only, as Hex bounded them."""
+    store.db.execute("DELETE FROM tidy_events WHERE clip_id = ?", (clip,))
+    for index, decision in enumerate(decisions):
+        store.db.execute(
+            "INSERT INTO tidy_events (clip_id, idx, kind, token, replacement, accepted, applied, source)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                clip, index, decision["kind"], decision["token"], decision.get("replacement"),
+                1 if decision.get("accepted") else 0, 1 if decision.get("applied") else 0,
+                decision["source"],
+            ),
+        )
+
+
 def _store_entry(
     store: Store, epochs: Epochs, entry: dict, summary: Summary, copy_audio: bool = True,
 ) -> str | None:
@@ -225,6 +267,10 @@ def _store_entry(
         "edited_text": (correction or {}).get("edited_text"),
     }
     fields.update(observed)
+    # Like `correction`, an entry without `tidy` says nothing: what was stored stays.
+    decisions = entry.get("tidy")
+    if decisions is not None:
+        fields["tidy_applied"], fields["tidied_text"] = tidied(entry["final_text"], decisions)
     existing = store.db.execute(
         "SELECT * FROM clips WHERE hex_epoch_ms = ? AND hex_id = ?", (epoch, hex_id)
     ).fetchone()
@@ -249,13 +295,24 @@ def _store_entry(
                 fields["edited_text"],
             ),
         )
+        if decisions:
+            store.db.execute(
+                "UPDATE clips SET tidy_applied = ?, tidied_text = ? WHERE clip_id = ?",
+                (fields["tidy_applied"], fields["tidied_text"], clip_id(epoch, hex_id)),
+            )
+            _store_tidy_events(store, clip_id(epoch, hex_id), decisions)
         return clip_id(epoch, hex_id)
+    if decisions is not None and _tidy_rows(store, existing["clip_id"]) != _tidy_tuples(decisions):
+        _store_tidy_events(store, existing["clip_id"], decisions)
+        touched = True
+    else:
+        touched = False
     changed = {k: v for k, v in fields.items() if existing[k] != v}
     changed = _correction_changes(existing, correction, observed, changed)
     if audio_sha != existing["audio_sha256"]:
         changed["audio_sha256"] = audio_sha
     if not changed:
-        return None
+        return existing["clip_id"] if touched else None
     if any(name in changed for name in CLASSIFICATION_INPUTS):
         # Hex added or changed the correction: `label corrections` classifies it again.
         forget(store.db, existing["clip_id"], changed)
@@ -265,6 +322,25 @@ def _store_entry(
         (*changed.values(), epoch, hex_id),
     )
     return existing["clip_id"]
+
+
+def _tidy_tuples(decisions: list[dict]) -> list[tuple]:
+    return [
+        (d["kind"], d["token"], d.get("replacement"), 1 if d.get("accepted") else 0,
+         1 if d.get("applied") else 0, d["source"])
+        for d in decisions
+    ]
+
+
+def _tidy_rows(store: Store, clip: str) -> list[tuple]:
+    return [
+        tuple(row)
+        for row in store.db.execute(
+            "SELECT kind, token, replacement, accepted, applied, source FROM tidy_events WHERE clip_id = ?"
+            " ORDER BY idx",
+            (clip,),
+        )
+    ]
 
 
 def _correction_changes(existing, correction: dict | None, observed: dict, changed: dict) -> dict:
