@@ -305,8 +305,10 @@ def _train(folder: Path, work: Path, out: Path, key: str, config: dict, effectiv
     return _finish(folder, job, config_path, effective, smoke, paths, started_at, time.monotonic() - started, say)
 
 
-def _finish(folder: Path, job: dict, config_path: Path, effective: str, smoke: bool, paths: Paths,
-            started_at: str, seconds: float, say) -> int:
+def _finish(folder: Path, job: dict, config_path: Path, effective: str, smoke: bool, paths: Paths | None,
+            started_at: str, seconds: float, say, runner: dict | None = None) -> int:
+    """Check what the trainer wrote and record the run. `runner` describes a trainer that ran somewhere
+    else (`healing train --remote`), in place of the local `paths`."""
     work, out = folder / "work", folder / "out"
     delta, log_path = out / DELTA, out / LOG
     if not delta.is_file() or not log_path.is_file():
@@ -328,9 +330,11 @@ def _finish(folder: Path, job: dict, config_path: Path, effective: str, smoke: b
         "bundle": {"path": job["bundle"], "sha256": job["bundle_sha256"]},
         "config": {"source": str(config_path), "path": str(out / EFFECTIVE), "sha256": config_module.text_sha256(effective)},
         "base": {"path": job["base"], "sha256": job["base_sha256"]},
-        "trainer": {"python": str(paths.python), "python_version": env.get("python"), "torch": env.get("torch"),
-                    "nemo": env.get("nemo"), "transcribe_cpp": str(paths.transcribe_cpp),
-                    "transcribe_cpp_rev": _git_rev(paths.transcribe_cpp), "script": str(TRAINER)},
+        "trainer": {**(runner if runner is not None else {
+                        "python": str(paths.python), "transcribe_cpp": str(paths.transcribe_cpp),
+                        "transcribe_cpp_rev": _git_rev(paths.transcribe_cpp)}),
+                    "python_version": env.get("python"), "torch": env.get("torch"), "nemo": env.get("nemo"),
+                    "script": str(TRAINER)},
         "code_sha": _code_sha(),
         "targets": {g: len(n) for g, n in targets["groups"].items()},
         "trainable_parameters": targets["trainable_parameters"],
