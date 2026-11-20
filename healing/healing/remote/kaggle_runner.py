@@ -14,7 +14,7 @@ This is the only place personal data leaves the Mac (G-3), so it is explicit, mi
    kernel, removes the staged copy, and appends `$HEALING_HOME/remote/runs.jsonl`. A delete that fails
    is recorded as `deleted_remote: false` and the exact `kaggle … delete` commands are printed.
 
-Kaggle is reached only through the pinned `kaggle` CLI (`KAGGLE_COMMAND`, run with `uvx`, D-80;
+Kaggle is reached only through the pinned `kaggle` CLI (`KAGGLE_COMMAND`, run with `uvx`, D-84;
 `$HEALING_KAGGLE` names another executable), the subprocess boundary the tests stub. Credentials are
 Kaggle's own: `$KAGGLE_API_TOKEN`, else `~/.kaggle/access_token`, else `~/.kaggle/kaggle.json`
 (`$KAGGLE_CONFIG_DIR` moves the folder). They go to the CLI in its environment only; healing never
@@ -57,7 +57,7 @@ KAGGLE_CLI_VERSION = "2.2.5"
 # The CLI imports `six` without declaring it (2.2.4 and 2.2.5), so it is pinned beside it.
 KAGGLE_COMMAND = ["uvx", "-q", "--python", "3.12", "--from", f"kaggle=={KAGGLE_CLI_VERSION}", "--with", "six==1.17.0", "kaggle"]
 ACCELERATOR = "NvidiaTeslaT4"
-# What a round changes on Kaggle's machine (D-81): the GPU, its 4 CPUs and its ~30 GB of RAM. They are
+# What a round changes on Kaggle's machine (D-85): the GPU, its 4 CPUs and its ~30 GB of RAM. They are
 # part of the effective config, so they are hashed and recorded like every other value.
 REMOTE_OVERRIDES = {"device": "cuda", "threads": 4, "max_rss_gb": 24}
 TEMPLATE = Path(__file__).with_name("notebook.py.tmpl")
