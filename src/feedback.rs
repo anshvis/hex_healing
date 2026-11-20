@@ -1250,9 +1250,14 @@ fn play_system_sound(tone: Tone) {
 }
 
 /// Starts `/System/Library/Sounds/<sound>.aiff` at the current volume. The
-/// caller waits for it.
+/// caller waits for it. Test builds never start it: unlike Hex's own tones,
+/// which need the player thread tests never start, this would play through
+/// the speakers on every error path a test reaches.
 #[cfg(target_os = "macos")]
 fn spawn_system_sound(sound: &str) -> Option<std::process::Child> {
+    if cfg!(test) {
+        return None;
+    }
     let volume = volume().to_string();
     Command::new("/usr/bin/afplay")
         .args([
