@@ -13,6 +13,7 @@
 //!
 //! Nothing here stores the pasted text, and the log keeps counts only.
 
+pub(crate) mod apply;
 mod habits;
 pub(crate) mod last;
 pub(crate) mod review;

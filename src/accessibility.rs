@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::dictation::caret_text::{Keep, bounded_units};
 
+pub mod edit;
 mod watch;
 pub use watch::{
     FieldText, Notification, Observer, ReadError, caret, read_value_bounded, run_loop_once,
@@ -527,6 +528,13 @@ pub struct RetainedElement(CfObject);
 unsafe impl Send for RetainedElement {}
 
 impl RetainedElement {
+    /// Another owner of the same element, with its own retain: the paste
+    /// anchor and the correction watcher each keep one.
+    pub fn share(&self) -> Self {
+        // SAFETY: the element is live while `self` holds its retain.
+        Self(CfObject(unsafe { CFRetain(self.0.0) }))
+    }
+
     /// A real retained element that names no field, for tests.
     #[cfg(test)]
     pub fn for_test() -> Self {

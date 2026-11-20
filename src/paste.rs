@@ -190,7 +190,7 @@ impl Paster {
             clipboard: NSPasteboard::generalPasteboard(),
             activity,
             continuation: None,
-            clipboard_restore: Arc::new(Mutex::new(ClipboardRestore::default())),
+            clipboard_restore: shared_restore(),
             prepared_clipboard: None,
         }
     }
@@ -254,30 +254,53 @@ impl Paster {
             None if crate::labs::smart_spacing() => with_smart_spacing(text),
             None => text.to_string(),
         };
+        self.deliver(&text, mode)?;
+        self.continuation = (!matches!(mode, PasteMode::Standalone)).then_some(Continuation {
+            revision,
+            inserted: text,
+        });
+        Ok(())
+    }
+
+    /// Puts `text` into the focused field as it stands: typed into a
+    /// Chromium 155 or 156 app, else pasted through the clipboard with the
+    /// generation-safe restore.
+    fn deliver(&mut self, text: &str, mode: PasteMode) -> Result<()> {
+        self.deliver_if(text, mode, &mut || true)
+    }
+
+    /// [`Self::deliver`], asking `ready` last, right before anything is
+    /// typed or written to the clipboard (after the clipboard capture,
+    /// which can take a while): `false` sends nothing.
+    fn deliver_if(
+        &mut self,
+        text: &str,
+        mode: PasteMode,
+        ready: &mut dyn FnMut() -> bool,
+    ) -> Result<()> {
         if crate::dictation::context::frontmost_bundle_path()
             .is_some_and(|bundle| has_clipboard_race(&bundle))
         {
             if matches!(mode, PasteMode::Standalone) {
                 self.continuation = None;
             }
+            if !ready() {
+                return Err(eyre!(NOT_READY));
+            }
             tracing::debug!("typing instead of pasting into Chromium 155 or 156");
-            keyboard::type_text(&text)?;
+            keyboard::type_text(text)?;
             if crate::labs::keep_on_clipboard() {
                 self.clipboard_restore
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .keep();
-                if let Err(error) = write_clipboard_text(&self.clipboard, &text, false) {
+                if let Err(error) = write_clipboard_text(&self.clipboard, text, false) {
                     tracing::warn!(%error, "could not leave the dictation on the clipboard");
                 }
             }
         } else {
-            self.paste_through_clipboard(&text, mode)?;
+            self.paste_through_clipboard(text, mode, ready)?;
         }
-        self.continuation = (!matches!(mode, PasteMode::Standalone)).then_some(Continuation {
-            revision,
-            inserted: text,
-        });
         Ok(())
     }
 
@@ -294,7 +317,12 @@ impl Paster {
         write_clipboard_text(&self.clipboard, text, false)
     }
 
-    fn paste_through_clipboard(&mut self, text: &str, mode: PasteMode) -> Result<()> {
+    fn paste_through_clipboard(
+        &mut self,
+        text: &str,
+        mode: PasteMode,
+        ready: &mut dyn FnMut() -> bool,
+    ) -> Result<()> {
         let generation = {
             let mut restore = self
                 .clipboard_restore
@@ -321,6 +349,9 @@ impl Paster {
             };
             if self.clipboard.changeCount() != previous_change_count {
                 return Err(eyre!("clipboard changed while Hex was preserving it"));
+            }
+            if !ready() {
+                return Err(eyre!(NOT_READY));
             }
             if matches!(mode, PasteMode::Standalone) {
                 self.continuation = None;
@@ -376,6 +407,27 @@ impl Paster {
             thread::sleep,
         )
     }
+}
+
+/// The one clipboard restore every [`Paster`] shares, so a paste from
+/// another thread (Tidy's fallback) supersedes a dictation's pending restore
+/// and keeps the person's original clipboard, as a second dictation would.
+fn shared_restore() -> Arc<Mutex<ClipboardRestore>> {
+    static RESTORE: std::sync::OnceLock<Arc<Mutex<ClipboardRestore>>> = std::sync::OnceLock::new();
+    RESTORE.get_or_init(Default::default).clone()
+}
+
+/// Why [`replace_selection`] sent nothing: its `ready` said no.
+pub const NOT_READY: &str = "the field lost the keys before the paste";
+
+/// Labs › Tidy after paste's fallback: pastes `text` over the focused
+/// field's selection exactly as given (no continuation join, no Smart
+/// spacing), through the dictation path: typed into Chromium 155 or 156,
+/// else the clipboard, ⌘V, and the shared generation-safe restore. `ready`
+/// is asked right before anything is typed or written (after the clipboard
+/// capture); `false` sends nothing and leaves the clipboard as it was.
+pub fn replace_selection(text: &str, mut ready: impl FnMut() -> bool) -> Result<()> {
+    Paster::new(InputActivity::default()).deliver_if(text, PasteMode::Standalone, &mut ready)
 }
 
 /// Whether the app at `bundle` embeds a Chromium 155 or 156 framework. Every

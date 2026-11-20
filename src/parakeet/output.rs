@@ -158,6 +158,12 @@ pub(super) fn finish_output(
                                 );
                                 return Err(error.to_string());
                             }
+                            // Every paste releases the last dictation's
+                            // anchor, and waits for a Tidy edit already going
+                            // into a field; held through the correction
+                            // baseline read and the paste, so neither sees a
+                            // field half-way through Tidy's edit (D-79).
+                            let _delivery = crate::dictation::paste_anchor::begin_paste();
                             // Labs › Learn from corrections: not a Send or copy only.
                             if matches!(mode, PasteMode::Continue) {
                                 watch = Watch::before(corrections, history);
@@ -197,12 +203,16 @@ pub(super) fn finish_output(
                     let entry_id = history.and_then(|history| {
                         record_history(history, target, sent, &mut completed)
                     });
-                    watch.recorded(corrections, history, entry_id, &completed.text);
                     // Labs › Tidy after paste: a review of an older dictation
-                    // closes, and a copy-only one offers a copy.
+                    // closes, a copy-only one offers a copy, and a pasted
+                    // one leaves its anchor, tied to this entry and commit.
                     if !matches!(target, TranscriptionTarget::Service) {
-                        crate::dictation::tidy::last::committed(entry_id, copied);
+                        let generation = crate::dictation::tidy::last::committed(entry_id, copied);
+                        if let Some(anchor) = watch.anchor(entry_id, generation) {
+                            corrections.anchor(anchor);
+                        }
                     }
+                    watch.recorded(corrections, history, entry_id, &completed.text);
                 }
                 tracing::info!(
                     audio_ms = completed.timings.audio_ms,
@@ -235,6 +245,9 @@ pub(super) fn finish_output(
             }
         }
         OutputJob::Paste { kind, .. } => {
+            // As for a dictation: waits for a Tidy edit in progress and
+            // releases the anchor, since the text around it may move.
+            let _delivery = crate::dictation::paste_anchor::begin_paste();
             let result = match kind {
                 PasteKind::LastTranscript => last_transcript
                     .as_deref()

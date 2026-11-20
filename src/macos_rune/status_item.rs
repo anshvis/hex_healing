@@ -1121,6 +1121,7 @@ mod tests {
                 "—".into(),
                 "Pause Hex".into(),
                 "Paste Last Dictation".into(),
+                "Tidy Last Dictation".into(),
                 "Copy Recent Dictation".into(),
                 "Copy Last Meeting Transcript".into(),
                 "Restore Last Capture".into(),
