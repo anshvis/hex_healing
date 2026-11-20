@@ -58,12 +58,13 @@ never without `--raw`): one decision per suggestion, tokens only.
 ```ts
 type TidyDecision = { // history row, --json --raw only
   kind: "filler" | "repeat" | "self_correction" | "misheard"
-  token: string          // the words it removes or replaces, at most 32 bytes
+  token: string          // the words it removes or replaces (not ones it keeps), at most 32 bytes
   replacement?: string   // what it puts there ("" for a removal); absent past 32 bytes
   start: number          // its place in final_text, in Unicode scalars
   end: number
   accepted: boolean
   applied?: true         // Hex edited it into the field (accepted ones only)
+  after_watch?: true     // applied after Learn from corrections' watch had ended
   source: "rule" | "model"
 }
 ```
