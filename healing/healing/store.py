@@ -210,12 +210,26 @@ CREATE INDEX IF NOT EXISTS tidy_events_clip ON tidy_events(clip_id, idx);
 """
 
 
+TIDY_EVENT_COLUMNS = {
+    "idx": "INTEGER NOT NULL DEFAULT 0",
+    "replacement": "TEXT",
+    "applied": "INTEGER NOT NULL DEFAULT 0",
+}
+
+
 def _migrate_v9(db: sqlite3.Connection) -> None:
     """The T8.5 step, guarded like the M3 one, so a step cut short (or repeated) finishes."""
     have = {row[1] for row in db.execute("PRAGMA table_info(clips)")}
     for name, definition in TIDY_COLUMNS.items():
         if name not in have:
             db.execute(f"ALTER TABLE clips ADD COLUMN {name} {definition}")
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "tidy_events" in tables:
+        # A table made to T8.2's earlier reading of D-66 (no idx, replacement or applied): complete it.
+        events = {row[1] for row in db.execute("PRAGMA table_info(tidy_events)")}
+        for name, definition in TIDY_EVENT_COLUMNS.items():
+            if name not in events:
+                db.execute(f"ALTER TABLE tidy_events ADD COLUMN {name} {definition}")
     db.executescript(TIDY_EVENTS)
 
 

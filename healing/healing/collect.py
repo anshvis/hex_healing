@@ -207,8 +207,11 @@ def tidied(final_text: str, decisions: list[dict]) -> tuple[int, str | None]:
     The tidied text is `final_text` with the decisions Hex edited into the field applied: the text the
     person's later corrections are measured from. `raw_text` and `final_text` stay what Hex heard and
     pasted. An applied tidy whose text can't be rebuilt (a replacement too long to keep, offsets that
-    don't fit) is `(1, None)`: its correction has no known baseline and never labels.
+    don't fit) is `(1, None)`: its correction has no known baseline and never labels. A tidy applied
+    after the watch had ended (`after_watch`) is `(0, None)`: the correction was of `final_text`.
     """
+    if any(d.get("applied") and d.get("after_watch") for d in decisions):
+        return 0, None
     applied = sorted((d for d in decisions if d.get("applied")), key=lambda d: d["start"])
     if not applied:
         return 0, None
@@ -226,6 +229,12 @@ def tidied(final_text: str, decisions: list[dict]) -> tuple[int, str | None]:
     return 1, "".join(out)
 
 
+def _applied(decision: dict) -> int:
+    """1 when the decision went into the field while the watch could see it; a fix applied after the
+    watch ended has no evidence it survived, so it never counts toward a label."""
+    return 1 if decision.get("applied") and not decision.get("after_watch") else 0
+
+
 def _store_tidy_events(store: Store, clip: str, decisions: list[dict]) -> None:
     """Replace a clip's `tidy_events` with its entry's decisions: tokens only, as Hex bounded them."""
     store.db.execute("DELETE FROM tidy_events WHERE clip_id = ?", (clip,))
@@ -235,8 +244,7 @@ def _store_tidy_events(store: Store, clip: str, decisions: list[dict]) -> None:
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 clip, index, decision["kind"], decision["token"], decision.get("replacement"),
-                1 if decision.get("accepted") else 0, 1 if decision.get("applied") else 0,
-                decision["source"],
+                1 if decision.get("accepted") else 0, _applied(decision), decision["source"],
             ),
         )
 
@@ -326,8 +334,7 @@ def _store_entry(
 
 def _tidy_tuples(decisions: list[dict]) -> list[tuple]:
     return [
-        (d["kind"], d["token"], d.get("replacement"), 1 if d.get("accepted") else 0,
-         1 if d.get("applied") else 0, d["source"])
+        (d["kind"], d["token"], d.get("replacement"), 1 if d.get("accepted") else 0, _applied(d), d["source"])
         for d in decisions
     ]
 

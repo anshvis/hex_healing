@@ -67,7 +67,8 @@ def latest_reviews(db: sqlite3.Connection, clip_ids: list[str] | None = None) ->
 
 
 def tidy_fixes(db: sqlite3.Connection, clip_ids: list[str] | None = None) -> dict[str, list[tuple[str, str]]]:
-    """clip_id -> its accepted `misheard` fixes that Hex edited into the field, as (token, replacement)."""
+    """clip_id -> its accepted `misheard` fixes that Hex edited into the field while the watch saw it,
+    as (token, replacement)."""
     select = "SELECT clip_id, token, replacement FROM tidy_events"
     fix = "kind = 'misheard' AND accepted = 1 AND applied = 1 AND replacement IS NOT NULL ORDER BY clip_id, idx"
     rows = []
@@ -84,16 +85,27 @@ def tidy_fixes(db: sqlite3.Connection, clip_ids: list[str] | None = None) -> dic
     return fixes
 
 
-def with_fixes(reference: str, fixes: list[tuple[str, str]]) -> str | None:
-    """`reference` with each fix's word put in place of the one it replaced, which must be there
-    exactly once (whole words, any case); None when one isn't."""
+def _words(text: str) -> re.Pattern | None:
+    words = text.split()
+    if not words:
+        return None
+    return re.compile(r"(?<!\w)" + r"\s+".join(map(re.escape, words)) + r"(?!\w)", re.IGNORECASE)
+
+
+def with_fixes(raw: str, reference: str, edited: str | None, fixes: list[tuple[str, str]]) -> str | None:
+    """`reference` with each fix's word put in place of the one it replaced; None when a fix can't be
+    placed for sure or didn't survive. The replaced word must occur exactly once in what Hex heard
+    (`raw`) and in the reference (whole words, any case); after an edit, the fix's word must still be
+    in what the field held (`edited`), else the person undid it."""
     for token, replacement in fixes:
-        words = token.split()
-        if not words:
+        pattern = _words(token)
+        if pattern is None or len(pattern.findall(raw)) != 1:
             return None
-        pattern = re.compile(r"(?<!\w)" + r"\s+".join(map(re.escape, words)) + r"(?!\w)", re.IGNORECASE)
         found = list(pattern.finditer(reference))
         if len(found) != 1:
+            return None
+        kept = _words(replacement)
+        if edited is not None and (kept is None or not kept.search(edited)):
             return None
         reference = reference[: found[0].start()] + replacement + reference[found[0].end() :]
     return reference
@@ -107,7 +119,8 @@ def derive(
     label, reference, strategy = _derive(row, kinds, review)
     if review is not None or not fixes or label == "unlabelled":
         return label, reference, strategy, None
-    fixed = with_fixes(reference, fixes)
+    edited = row["edited_text"] if row["correction_outcome"] == "edited" else None
+    fixed = with_fixes(row["raw_text"], reference, edited, fixes)
     if fixed is None:
         return "unlabelled", None, None, None
     return label, fixed, strategy, "tidy"

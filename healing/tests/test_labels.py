@@ -636,3 +636,45 @@ def test_a_correction_after_a_tidy_is_measured_from_the_tidied_text(store):
     corrections.label_corrections(store)
     edits = store.db.execute("SELECT final_from, to_text FROM edits WHERE clip_id = ?", (cid,)).fetchall()
     assert [tuple(e) for e in edits] == [("", "today")]
+
+
+def test_a_tidy_fix_needs_one_raw_match_and_must_survive_an_edit(store):
+    """Codex review: uniqueness is judged against what Hex heard, not a reference an edit changed; a
+    fix the person removed while the watch ran never reaches a reference."""
+    from healing import corrections
+
+    twice = add_clip(store, 1, raw="kip told cat to call kip", final="Kip told cat to call kip.",
+                     outcome="edited", edited="Kit told cat to call kid.")
+    _tidy(store, twice, ("misheard", "Kip", "Kit", 1, 1), tidied="Kit told cat to call kip.")
+    undone = add_clip(store, 2, raw="send it to kip", final="Send it to Kip.", outcome="edited",
+                      edited="Send it to.")
+    _tidy(store, undone, ("misheard", "Kip", "Kit", 1, 1), tidied="Send it to Kit.")
+    kept = add_clip(store, 3, raw="send it to kip", final="Send it to Kip.", outcome="edited",
+                    edited="Send it to Kit now.")
+    _tidy(store, kept, ("misheard", "Kip", "Kit", 1, 1), tidied="Send it to Kit.")
+    corrections.label_corrections(store)
+    labels.refresh(store)
+    assert label_of(store, twice) == ("unlabelled", 0)
+    assert label_of(store, undone) == ("unlabelled", 0)
+    assert row(store, kept)["reference_text"] == "send it to Kit" and row(store, kept)["label_source"] == "tidy"
+
+
+def test_v9_completes_an_earlier_tidy_events_table(tmp_path, monkeypatch):
+    """A v8 dataset holding T8.2's earlier `tidy_events(clip_id, kind, token, accepted, source)`."""
+    monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))
+    root = tmp_path / "home" / "dataset"
+    (root / "audio").mkdir(parents=True)
+    db = sqlite3.connect(root / "dataset.sqlite")
+    for step in range(8):
+        migration = MIGRATIONS[step]
+        migration(db) if callable(migration) else db.executescript(migration)
+    db.execute("PRAGMA user_version = 8")
+    db.execute("CREATE TABLE tidy_events (clip_id TEXT, kind TEXT, token TEXT, accepted INTEGER, source TEXT)")
+    db.execute("INSERT INTO tidy_events VALUES ('c1', 'filler', 'um', 1, 'rule')")
+    db.commit()
+    db.close()
+    store = Store()
+    columns = {r[1] for r in store.db.execute("PRAGMA table_info(tidy_events)")}
+    assert {"idx", "replacement", "applied"} <= columns
+    assert tuple(store.db.execute("SELECT token, applied FROM tidy_events").fetchone()) == ("um", 0)
+    store.close()

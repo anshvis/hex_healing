@@ -416,3 +416,14 @@ def test_a_tidy_that_cannot_be_rebuilt_has_no_tidied_text(world):
     assert (row["tidy_applied"], row["tidied_text"]) == (1, None)
     assert collect_module.tidied("abc", [{"start": 0, "end": 9, "replacement": "", "applied": True}]) == (1, None)
     assert collect_module.tidied("abc", [{"start": 0, "end": 1, "replacement": "", "applied": False}]) == (0, None)
+
+
+def test_a_tidy_applied_after_the_watch_ended_changes_no_baseline(world):
+    late = [dict(TIDY[1], after_watch=True)]
+    world.doc["entries"][0].update(final_text=TIDY_FINAL, tidy=late,
+                                    correction={"outcome": "unchanged", "observed_at_ms": 900})
+    world.save()
+    world.run()
+    row = clips(world)[0]
+    assert (row["tidy_applied"], row["tidied_text"]) == (0, None)
+    assert world.db().execute("SELECT applied FROM tidy_events").fetchone()[0] == 0
