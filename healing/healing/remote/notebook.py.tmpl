@@ -1,0 +1,168 @@
+# Hex healing: one LoRA round on a Kaggle GPU (T6.2). Written by healing/remote/kaggle_runner.py.
+#
+# This kernel is private and is deleted, with its private dataset, as soon as the run ends. It:
+#   1. builds T0.4's NeMo environment from transcribe.cpp's lock at the pinned rev (D-29), with uv;
+#   2. downloads the base .nemo from Hugging Face at the pinned revision and checks its SHA-256;
+#   3. unpacks the bundle (the train split only) from the dataset and checks its listing's SHA-256;
+#   4. runs healing's own trainer (`lora.py`, carried below) on the GPU;
+#   5. leaves the delta, the numbers-only train log and result.json in /kaggle/working (the output).
+#
+# Kaggle keeps a kernel's log until the kernel is deleted, so nothing here prints transcript text:
+# installs print only on failure (they hold no personal data), and every line the trainer writes passes
+# `scrub`, the runner's own filter, which drops any line holding manifest text. NeMo's
+# `log_prediction` is off in the trainer.
+
+import base64
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+import traceback
+import urllib.request
+from pathlib import Path
+
+JOB_B64 = "@@JOB_B64@@"
+LORA_B64 = "@@LORA_B64@@"
+JOB = json.loads(base64.b64decode(JOB_B64))
+OUT = Path("/kaggle/working")
+TMP = Path("/tmp/healing")
+STARTED = time.time()
+RESULT = {"code": None, "stage": "start", "dropped_lines": 0}
+
+@@SCRUB_SOURCE@@
+
+
+def say(message):
+    print(f"healing: {message}", flush=True)
+
+
+def quiet(command, stage, env=None):
+    """Run an install step with its output in a file; print its tail only if it fails."""
+    RESULT["stage"] = stage
+    log = TMP / f"{stage}.log"
+    with open(log, "w") as handle:
+        done = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, env={**os.environ, **(env or {})})
+    if done.returncode:
+        print(log.read_text()[-4000:], flush=True)
+        raise RuntimeError(f"{stage} failed (exit {done.returncode})")
+    say(f"{stage} ok ({time.time() - STARTED:.0f}s)")
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 22), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def environment():
+    checkout = TMP / "transcribe.cpp"
+    checkout.mkdir(parents=True, exist_ok=True)
+    quiet(["git", "-C", str(checkout), "init", "-q"], "git-init")
+    quiet(["git", "-C", str(checkout), "fetch", "-q", "--depth", "1", JOB["transcribe_cpp_repo"], JOB["transcribe_cpp_rev"]], "fetch-transcribe-cpp")
+    quiet(["git", "-C", str(checkout), "checkout", "-q", "FETCH_HEAD"], "checkout-transcribe-cpp")
+    quiet([sys.executable, "-m", "pip", "install", "-q", f"uv=={JOB['uv_version']}"], "install-uv")
+    env = TMP / "env"
+    quiet([sys.executable, "-m", "uv", "sync", "--frozen", "--no-install-project", "--python", JOB["python_version"],
+           "--project", str(checkout / "scripts/envs/parakeet")], "nemo-environment",
+          env={"UV_PROJECT_ENVIRONMENT": str(env), "UV_PYTHON_DOWNLOADS": "automatic"})
+    return checkout, env / "bin" / "python"
+
+
+def base_model():
+    spec = JOB["config"]["base"]
+    path = TMP / spec["file"]
+    RESULT["stage"] = "base"
+    url = f"https://huggingface.co/{spec['repo']}/resolve/{spec['revision']}/{spec['file']}"
+    with urllib.request.urlopen(url, timeout=600) as response, open(path, "wb") as handle:
+        shutil.copyfileobj(response, handle, 1 << 22)
+    if sha256(path) != JOB["base_sha256"]:
+        raise RuntimeError("the base checkpoint's SHA-256 is not the config's pin")
+    say(f"base ok ({path.stat().st_size} bytes, {time.time() - STARTED:.0f}s)")
+    return path
+
+
+def bundle():
+    """The dataset's bundle.tar (or the folder Kaggle unpacked it into), unpacked and checked."""
+    RESULT["stage"] = "bundle"
+    found = sorted(Path("/kaggle/input").rglob("bundle.tar")) or sorted(Path("/kaggle/input").rglob("bundle.sha256"))
+    if not found:
+        raise RuntimeError("the dataset holds no bundle")
+    target = TMP / "bundle"
+    if found[0].name == "bundle.tar" and found[0].is_file():
+        with tarfile.open(found[0]) as archive:
+            archive.extractall(target, filter="data")
+    else:
+        shutil.copytree(found[0].parent, target)
+    listing = (target / "bundle.sha256").read_bytes()
+    if hashlib.sha256(listing).hexdigest() != JOB["bundle_sha256"]:
+        raise RuntimeError("the bundle's listing is not the one uploaded")
+    for line in listing.decode().splitlines():
+        digest, name = line.split("  ", 1)
+        if sha256(target / name) != digest:
+            raise RuntimeError("a bundle file changed in transit")
+    say(f"bundle ok ({len(listing.splitlines())} files)")
+    return target
+
+
+def train(python, checkout, base, data):
+    RESULT["stage"] = "train"
+    work, out = TMP / "work", TMP / "out"
+    work.mkdir(parents=True, exist_ok=True)
+    trainer = TMP / "lora.py"
+    trainer.write_bytes(base64.b64decode(LORA_B64))
+    job = {"key": JOB["key"], "config": JOB["config"], "bundle": str(data), "bundle_sha256": JOB["bundle_sha256"],
+           "base": str(base), "base_sha256": JOB["base_sha256"], "transcribe_cpp": str(checkout),
+           "work_dir": str(work), "out_dir": str(out)}
+    (work / "trainer.json").write_text(json.dumps(job))
+    grams = text_grams(json.loads(line)["text"] for line in (data / "manifest.jsonl").read_text().splitlines() if line)
+    child = subprocess.Popen([str(python), "-I", str(trainer), "--job", str(work / "trainer.json")],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+                             env={**os.environ, "PYTHONUNBUFFERED": "1"})
+    for line in child.stdout:
+        kept, dropped = scrub([line.rstrip("\n")[:2000]], grams)
+        RESULT["dropped_lines"] += dropped
+        for text in kept:
+            print(text, flush=True)
+    code = child.wait()
+    say(f"trainer exited {code}; {RESULT['dropped_lines']} line(s) held manifest text and were dropped")
+    for name, folder in (("lora_delta.safetensors", out), ("train_log.json", out), ("env.json", work), ("targets.json", work)):
+        if (folder / name).is_file():
+            shutil.copy(folder / name, OUT / name)
+    return code
+
+
+def gpu():
+    done = subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
+                          capture_output=True, text=True)
+    return done.stdout.strip() or None
+
+
+def main():
+    TMP.mkdir(parents=True, exist_ok=True)
+    try:
+        RESULT["gpu"] = gpu()
+        say(f"gpu {RESULT['gpu']}")
+        checkout, python = environment()
+        base = base_model()
+        data = bundle()
+        RESULT["code"] = train(python, checkout, base, data)
+        if RESULT["code"] == 0:
+            RESULT["stage"] = "done"
+    except Exception as error:  # our own messages; none of them holds manifest text
+        RESULT["code"] = RESULT["code"] or 1
+        RESULT["error"] = f"{type(error).__name__}: {error}"[:500]
+        traceback.print_exc(limit=3)
+    finally:
+        RESULT["seconds"] = round(time.time() - STARTED, 1)
+        (OUT / "result.json").write_text(json.dumps(RESULT))
+        say(f"result {json.dumps(RESULT)}")
+
+
+main()

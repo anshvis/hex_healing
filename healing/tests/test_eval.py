@@ -250,7 +250,8 @@ def test_the_eval_json_has_the_contract_fields(world):
     assert json.loads(path.read_text())["eval_id"] == document["eval_id"]
 
 
-def test_the_cli_needs_a_model(capsys):
+def test_the_cli_needs_a_model(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("HEALING_HOME", str(tmp_path / "home"))  # never the real data root
     assert main(["eval"]) == 2
     assert "--model" in capsys.readouterr().err
 
