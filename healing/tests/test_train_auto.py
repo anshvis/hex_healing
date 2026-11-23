@@ -83,9 +83,12 @@ def locked_now(folder) -> bool:
 class Fake:
     """The heavy steps. `prepare` writes a real train row, as `healing train prepare` does."""
 
-    def __init__(self, rounds, fail=None, busy=False):
+    def __init__(self, rounds, fail=None, busy=False, remote_code=0, words=2000, verdict="pass", promote_code=0,
+                 register=False):
         self.rounds, self.fail, self.calls, self.parents = rounds, fail, [], {}
         self.busy, self.held = busy, contextlib.ExitStack()  # busy: a manual `healing train --local` holds the round
+        self.remote_code, self.words, self.verdict, self.promote_code = remote_code, words, verdict, promote_code
+        self.notes, self.register = [], register  # register: export registers a real candidate
 
     def prepare(self, parent):
         self.calls.append("prepare")
@@ -120,12 +123,47 @@ class Fake:
         self.parents["export"] = parent
         if self.fail == "export":
             raise auto.ExportError("convert failed (exit 1): boom")
-        return {"version": "v9", "gguf_sha256": "ab" * 32}
+        version = registry.register({"parent": parent}) if self.register else "v9"
+        return {"version": version, "gguf_sha256": "ab" * 32}
 
     def evaluate(self, version, gguf_sha, parent):
         self.calls.append("eval")
         self.parents["eval"] = parent
         return "scored rolling, general"
+
+    def remote(self, bundle, max_minutes, say):
+        self.calls.append("remote")
+        self.max_minutes = max_minutes
+        folder = self.rounds / "remote"
+        (folder / "work").mkdir(parents=True, exist_ok=True)
+        (folder / "out").mkdir(exist_ok=True)
+        (folder / "work" / "env.json").write_text("{}")
+        return self.remote_code, folder
+
+    def build(self, parent):
+        self.calls.append("build")
+        self.parents["build"] = parent
+        return self.words
+
+    def gate(self, version, say):
+        self.calls.append(f"gate {version}")
+        if self.verdict == "pass":
+            registry.record_gate(version, {"against": "v0", "pass": True, "refused": False}, None)
+            return 0
+        if self.verdict == "refused":
+            registry.record_gate(version, {"against": "v0", "pass": False, "refused": True}, None)
+        else:
+            registry.record_gate(version, {"against": "v0", "pass": False, "refused": False}, "gate: rolling_wer")
+        return 7
+
+    def promote(self, version, say):
+        self.calls.append(f"promote {version}")
+        if self.promote_code == 0:
+            registry.promote(version, "test")
+        return self.promote_code
+
+    def notify(self, message):
+        self.notes.append(message)
 
 
 def run(home, fake=None, **kw):
@@ -234,15 +272,114 @@ def test_gated_candidate_still_waits_and_says_why(home, store, decision, says):
     assert says in out and "v1" in out
 
 
-def test_remote_runner_stops_after_prepare(home, store):
+def test_remote_runner_needs_allow_upload(home, store):
+    """G-3: without `allow_upload: true` a Kaggle round stops after prepare; nothing is uploaded."""
     speech(store, 250, clips=5)
     auto.settings_path().write_text("runner: kaggle\n")
     code, out, fake = run(home)
     assert code == 0 and fake.calls == ["prepare"]
     assert "allow_upload" in out and "G-3" in out and "nothing uploaded" in out
-    auto.settings_path().write_text("runner: kaggle\nallow_upload: true\n")
+
+
+def test_kaggle_round_exports_what_it_brought_back(home, store):
+    speech(store, 250, clips=5)
+    auto.settings_path().write_text("runner: kaggle\nallow_upload: true\nmax_minutes: 90\n")
     code, out, fake = run(home)
-    assert fake.calls == ["prepare"] and "parked" in out and "X-6" in out
+    assert code == 0 and fake.calls == ["prepare", "remote", "export", "eval"]
+    assert fake.max_minutes == 90 and "next: healing gate v9" in out
+    assert not (fake.rounds / "remote" / "work").exists() and (fake.rounds / "remote" / "out").is_dir()
+
+
+def test_kaggle_quota_used_up_trains_here(home, store):
+    from healing.remote.kaggle_runner import QUOTA
+
+    speech(store, 250, clips=5)
+    auto.settings_path().write_text("runner: kaggle\nallow_upload: true\n")
+    code, out, fake = run(home, Fake(home / "rounds", remote_code=QUOTA))
+    assert code == 0 and fake.calls == ["prepare", "remote", "open", "train", "export", "eval"]
+    assert "quota is used up" in out
+
+
+def test_a_failed_kaggle_round_registers_nothing_and_says_so(home, store):
+    speech(store, 250, clips=5)
+    auto.settings_path().write_text("runner: kaggle\nallow_upload: true\n")
+    code, out, fake = run(home, Fake(home / "rounds", remote_code=1))
+    assert code == 1 and fake.calls == ["prepare", "remote"]
+    assert "round failed at train (kaggle" in out and fake.notes and "failed" in fake.notes[0]
+    assert registry.load().current == "v0"
+
+
+def test_settings_are_checked(home):
+    for text in ("max_minutes: true\n", "max_minutes: 0\n", "auto_promote: 1\n", "runner: colab\n"):
+        auto.settings_path().parent.mkdir(parents=True, exist_ok=True)
+        auto.settings_path().write_text(text)
+        with pytest.raises(Exception):
+            auto.load_settings()
+
+
+HANDS_OFF = "auto_promote: true\n"
+
+
+def test_hands_off_waits_on_reviews_and_says_how_many(home, store):
+    """Under 1,500 reviewed words nothing is gated (D-22): it waits, and a notification says so."""
+    speech(store, 250, clips=5)
+    registry.register({"parent": "v0"})
+    auto.settings_path().write_text(HANDS_OFF)
+    code, out, fake = run(home, Fake(home / "rounds", words=600))
+    assert code == 0 and fake.calls == ["build"] and fake.parents["build"] == "v0"
+    assert "600/1500 reviewed words" in out and "healing review" in fake.notes[0]
+
+
+def test_hands_off_gates_promotes_then_trains_the_next_round(home, store):
+    speech(store, 250, clips=5)
+    registry.register({"parent": "v0"})  # v1, waiting
+    auto.settings_path().write_text(HANDS_OFF)
+    code, out, fake = run(home, Fake(home / "rounds", register=True))
+    assert code == 0
+    assert fake.calls[:3] == ["build", "gate v1", "promote v1"]
+    assert fake.calls[3:8] == FULL  # v1 decided, so the round starts from it
+    assert fake.parents["prepare"] == "v1"
+    assert fake.calls[8:] == ["build", "gate v2", "promote v2"]  # and its candidate is decided at once
+    state = registry.load()
+    assert state.current == "v2" and state.get("v1").state == "promoted"
+    assert any("v2 is now Hex's speech model" in n for n in fake.notes)
+
+
+def test_hands_off_a_rejected_candidate_frees_the_next_round(home, store):
+    speech(store, 250, clips=5)
+    registry.register({"parent": "v0"})
+    auto.settings_path().write_text(HANDS_OFF)
+    code, out, fake = run(home, Fake(home / "rounds", verdict="reject"))
+    assert fake.calls[:2] == ["build", "gate v1"] and "promote v1" not in fake.calls
+    assert registry.load().get("v1").state == "rejected"
+    assert fake.calls[2:7] == FULL and fake.parents["prepare"] == "v0"
+    assert "rejected" in fake.notes[0]
+
+
+def test_hands_off_a_refused_gate_keeps_waiting(home, store):
+    speech(store, 250, clips=5)
+    registry.register({"parent": "v0"})
+    auto.settings_path().write_text(HANDS_OFF)
+    code, out, fake = run(home, Fake(home / "rounds", verdict="refused"))
+    assert code == 0 and fake.calls == ["build", "gate v1"]
+    assert registry.load().get("v1").state == "candidate" and "more reviewed clips" in fake.notes[0]
+
+
+def test_hands_off_retries_a_failed_promote_without_gating_again(home, store):
+    speech(store, 100, clips=2)
+    registry.register({"parent": "v0"})
+    auto.settings_path().write_text(HANDS_OFF)
+    code, out, fake = run(home, Fake(home / "a", promote_code=9))
+    assert fake.calls == ["build", "gate v1", "promote v1"] and "failed" in fake.notes[0]
+    code, out, fake = run(home, Fake(home / "b"))
+    assert fake.calls == ["promote v1"] and registry.load().current == "v1"
+
+
+def test_without_auto_promote_nothing_is_gated(home, store):
+    speech(store, 250, clips=5)
+    registry.register({"parent": "v0"})
+    code, out, fake = run(home)
+    assert fake.calls == [] and "awaits the gate" in out
 
 
 def test_dry_run_prints_and_runs_nothing(home, store):

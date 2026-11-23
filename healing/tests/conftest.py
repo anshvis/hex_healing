@@ -23,3 +23,9 @@ def plenty_of_disk(monkeypatch):
     `healing.clean.free_bytes` themselves."""
     for name in ("healing.clean.free_bytes", "healing.status.free_bytes"):
         monkeypatch.setattr(name, lambda *_: 1 << 50)
+
+
+@pytest.fixture(autouse=True)
+def no_notifications(monkeypatch):
+    """The scheduled jobs' macOS notifications never show while tests run."""
+    monkeypatch.setenv("HEALING_NO_NOTIFY", "1")

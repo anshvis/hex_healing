@@ -331,6 +331,22 @@ def _delete(kaggle: Kaggle, r: Remote, say_error) -> bool:
     return ok
 
 
+def _plan(bundle: Path, config_path: Path, smoke: bool, rounds: Path | None):
+    """The remote round's effective config, checked bundle, key and folder: the same ones for the same inputs."""
+    config, effective = remote_config(config_path, smoke)
+    bundle = Path(bundle).resolve()
+    bundle_sha = verify_bundle(bundle)
+    base_sha = config["base"]["sha256"]  # the notebook checks the download against it
+    paths = train_run.default_paths(config, rounds=rounds)
+    key = hashlib.sha256(f"{config_module.text_sha256(effective)}\n{bundle_sha}\n{base_sha}\n".encode()).hexdigest()
+    return config, effective, bundle, bundle_sha, base_sha, key, paths.rounds / f"{bundle.name}-{key[:12]}"
+
+
+def round_folder(bundle: Path, config_path: Path | None = None, smoke: bool = False, rounds: Path | None = None) -> Path:
+    """Where `run_remote` puts this bundle's round (`out/` holds the delta and the effective config)."""
+    return _plan(bundle, Path(config_path or config_module.DEFAULT), smoke, rounds)[-1]
+
+
 def run_remote(bundle: Path, config_path: Path | None = None, smoke: bool = False, allow_upload: bool = False,
                max_minutes: int = 120, rounds: Path | None = None, say=print, say_error=None) -> int:
     say_error = say_error or (lambda message: print(message, file=sys.stderr))
@@ -346,14 +362,8 @@ def run_remote(bundle: Path, config_path: Path | None = None, smoke: bool = Fals
 
     # every local check before anything leaves the Mac
     config_path = Path(config_path or config_module.DEFAULT)
-    config, effective = remote_config(config_path, smoke)
-    bundle = Path(bundle).resolve()
-    bundle_sha = verify_bundle(bundle)
-    base_sha = config["base"]["sha256"]  # the notebook checks the download against it
-    paths = train_run.default_paths(config, rounds=rounds)
-    owner_dir(paths.rounds)
-    key = hashlib.sha256(f"{config_module.text_sha256(effective)}\n{bundle_sha}\n{base_sha}\n".encode()).hexdigest()
-    folder = paths.rounds / f"{bundle.name}-{key[:12]}"
+    config, effective, bundle, bundle_sha, base_sha, key, folder = _plan(bundle, config_path, smoke, rounds)
+    owner_dir(folder.parent)
     for path in (folder, folder / "work", folder / "out"):
         owner_dir(path)
     record_path = folder / "out" / train_run.RECORD
