@@ -9,6 +9,29 @@ It never changes Hex's behaviour on its own. It reads Hex's output, runs Hex's o
 (default `~/Library/Application Support/hex-healing`). Audio and datasets live there, never in
 this repo.
 
+### Data on an external drive
+
+The data folder can live on an external drive. It must be inside an APFS volume, not directly on
+an exFAT or FAT drive: there macOS writes AppleDouble `._*` sidecars that `clean` would quarantine as
+orphan audio, deletes race their removal, and owner-only modes and symlinks don't exist (the suite
+fails 32 tests there). An APFS sparse image on the drive works and passes the whole suite:
+
+```sh
+hdiutil create -size 200g -type SPARSEBUNDLE -fs APFS -volname HexHealing /Volumes/<drive>/hex-healing.sparsebundle
+hdiutil attach -nobrowse -owners on /Volumes/<drive>/hex-healing.sparsebundle
+ditto ~/Library/Application\ Support/hex-healing /Volumes/HexHealing/hex-healing   # jobs stopped first
+mv ~/Library/Application\ Support/hex-healing ~/Library/Application\ Support/hex-healing.internal-backup
+ln -s /Volumes/HexHealing/hex-healing ~/Library/Application\ Support/hex-healing
+healing schedule install --job collect && healing schedule install --job train-auto
+```
+
+A user LaunchAgent with `RunAtLoad` and `WatchPaths` `/Volumes` that runs `hdiutil attach` when the
+image's drive is present and the volume isn't keeps it mounted after login and replugs. When the
+data folder's drive isn't connected (a dangling link, or an unmounted `/Volumes/<name>`), `healing`
+commands exit 1 saying so, and the scheduled `schedule run` and `train auto` wait a minute for it,
+then skip with exit 0; collect also posts a notification, since History entries age out while it
+skips (D-88).
+
 ## Install
 
 ```sh

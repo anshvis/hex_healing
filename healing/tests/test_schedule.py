@@ -103,3 +103,29 @@ def test_train_auto_job_runs_daily_and_not_at_load(world):
     assert not schedule.plist_path(world.agents).exists()  # the collect job is untouched
     schedule.remove(world.agents, job=schedule.TRAIN_AUTO)
     assert not target.exists()
+
+
+def test_a_missing_data_drive_skips_the_jobs_and_fails_other_commands(tmp_path, monkeypatch, capsys):
+    """A data folder linked to a drive that isn't connected: the scheduled jobs exit 0 with a note,
+    everything else exits 1, and nothing is created in its place."""
+    from healing.cli import main
+
+    home = tmp_path / "hex-healing"
+    home.symlink_to(tmp_path / "unplugged" / "hex-healing")
+    monkeypatch.setenv("HEALING_HOME", str(home))
+    monkeypatch.setattr("time.sleep", lambda _s: None)  # the jobs' minute of waiting for the drive
+    assert main(["schedule", "run"]) == 0
+    assert main(["train", "auto"]) == 0
+    assert main(["status"]) == 1
+    err = capsys.readouterr().err
+    assert err.count("skipped:") == 2 and "error:" in err and "drive connected" in err
+    assert not (tmp_path / "unplugged").exists() and home.is_symlink()
+
+
+def test_a_data_folder_not_created_yet_is_fine(tmp_path, monkeypatch):
+    from healing.paths import home_unavailable
+
+    monkeypatch.setenv("HEALING_HOME", str(tmp_path / "new"))
+    assert home_unavailable() is None
+    monkeypatch.setenv("HEALING_HOME", "/Volumes/no-such-drive-for-tests/hex-healing")
+    assert "isn't mounted" in home_unavailable()

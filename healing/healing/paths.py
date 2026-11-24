@@ -31,3 +31,18 @@ def hex_support_dir() -> Path:
 def train_dir() -> Path:
     """`$HEALING_HOME/train`: training bundles (`<round>/`) and the replay transcript cache."""
     return healing_home() / "train"
+
+
+def home_unavailable() -> str | None:
+    """Why `$HEALING_HOME` can't be used right now, or None. Only a data folder on a drive that isn't
+    connected counts: a link whose target is gone, or a path under an unmounted `/Volumes/<name>`.
+    A folder that doesn't exist yet on the Mac is fine (the first collect creates it)."""
+    home = healing_home()
+    if home.is_dir():
+        return None
+    if home.is_symlink():
+        return f"the data folder {home} links to {os.readlink(home)}, which isn't there; is its drive connected?"
+    parts = home.parts
+    if len(parts) > 2 and parts[1] == "Volumes" and not Path("/Volumes", parts[2]).is_dir():
+        return f"the data folder {home} is on /Volumes/{parts[2]}, which isn't mounted; is its drive connected?"
+    return None
