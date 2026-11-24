@@ -229,6 +229,29 @@ def main(argv: list[str] | None = None) -> int:
     habits.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
+    from healing.paths import home_unavailable
+
+    missing = home_unavailable()
+    scheduled = (args.group == "schedule" and args.command == "run") or (
+        args.group == "train" and getattr(args, "command", None) == "auto")
+    if missing and scheduled:  # at login the drive may still be mounting: give it a minute
+        import time
+
+        for _ in range(12):
+            time.sleep(5)
+            missing = home_unavailable()
+            if not missing:
+                break
+    if missing:
+        # The scheduled jobs skip quietly (exit 0) so launchd doesn't count a failure; collect notifies,
+        # since it runs often and is what loses History entries if the drive stays away for days.
+        print(f"{'skipped' if scheduled else 'error'}: {missing}", file=sys.stderr)
+        if scheduled and args.group == "schedule":
+            from healing.notify import notify
+
+            notify("Collection skipped: the healing data drive isn't connected. Plug it in within a few days "
+                   "so no dictations age out of History.")
+        return 0 if scheduled else 1
     if args.group == "label":
         return _label_all(args) if args.command == "all" else _label(args)
     if args.group == "review":
